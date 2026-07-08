@@ -20,14 +20,17 @@ test('testimonial marquee is scrolling on all browsers', async ({ page }) => {
   await page.waitForTimeout(400);
   const t2 = await track.evaluate(el => el.style.transform);
 
-  // Transform must be set and must have changed (marquee is moving)
-  expect(t1).toMatch(/translateX/);
+  // Transform must be set and must have changed (marquee is moving).
+  // translate3d, not translateX — GPU-layer fix for iOS Safari.
+  expect(t1).toMatch(/translate3d/);
   expect(t1).not.toBe(t2);
 });
 
 test('nav anchor clicks do not add hash to URL', async ({ page }) => {
   await page.goto('/');
-  await page.locator('a[href="#team"]').first().click();
+  // Desktop nav and mobile drawer both have a #team link; only one is
+  // visible per viewport, so target whichever actually is.
+  await page.locator('a[href="#team"]:visible').first().click();
   await page.waitForTimeout(300);
   expect(page.url()).not.toContain('#');
 });
