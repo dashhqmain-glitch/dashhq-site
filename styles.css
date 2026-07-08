@@ -325,6 +325,10 @@ section{position:relative;z-index:2}
 .sub-row.checking{border-color:rgba(91,155,248,.5)}
 .sub-row input{flex:1;min-width:0;background:transparent;border:0;outline:0;color:#fff;font-family:'DM Sans',sans-serif;font-size:15px}
 .sub-row input::placeholder{color:var(--muted)}
+.sub-row input:-webkit-autofill,
+.sub-row input:-webkit-autofill:hover,
+.sub-row input:-webkit-autofill:focus,
+.sub-row input:-webkit-autofill:active{-webkit-text-fill-color:#fff;caret-color:#fff;-webkit-box-shadow:0 0 0 1000px transparent inset;box-shadow:0 0 0 1000px transparent inset;transition:background-color 9999s ease-in-out 0s}
 .sub-row button{flex:none;border:0;cursor:pointer;background:var(--primary);color:#fff;font-family:'Sora',sans-serif;font-weight:600;font-size:14.5px;padding:0 26px;height:46px;border-radius:40px;box-shadow:0 8px 24px rgba(27,66,255,.4);transition:transform .15s,box-shadow .3s}
 .sub-row button:hover{box-shadow:0 12px 32px rgba(27,66,255,.6)}
 .sub-row button:active{transform:scale(.97)}
