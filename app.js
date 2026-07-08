@@ -242,6 +242,27 @@
   place();
 })();
 
+/* ════ JS MARQUEE — CSS animation breaks inside mask containers on iOS Safari ════ */
+(function(){
+  var track=document.querySelector('.voices-track');
+  if(!track)return;
+  if(window.matchMedia('(prefers-reduced-motion:reduce)').matches)return;
+  var half=0,pos=0,paused=false,last=null;
+  var marquee=track.parentElement;
+  if(window.matchMedia('(hover:hover)').matches){
+    marquee.addEventListener('mouseenter',function(){paused=true;});
+    marquee.addEventListener('mouseleave',function(){paused=false;});
+  }
+  function step(ts){
+    if(!half)half=track.scrollWidth/2;
+    if(!last)last=ts;
+    var dt=Math.min(ts-last,50);last=ts;
+    if(!paused){pos+=(half/48000)*dt;if(pos>=half)pos-=half;track.style.transform='translateX(-'+pos+'px)';}
+    requestAnimationFrame(step);
+  }
+  requestAnimationFrame(step);
+})();
+
 /* ════ CLEAN HASH URLS — intercept every #anchor click site-wide ════ */
 (function(){
   document.addEventListener('click',function(e){
