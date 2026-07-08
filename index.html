@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dash HQ — One Step Ahead of the Curve</title>
+
+<!-- ============================================================
+     SEO / SOCIAL META  ·  Dash HQ
+     ⚠ DEPLOY NOTE for developer:
+       - Confirm the domain below matches the live site (currently https://dashhq.site).
+       - Upload "og-image.png" (the share banner, provided alongside this file)
+         to the SITE ROOT so it resolves at https://dashhq.site/og-image.png
+       - Social platforms (X, Discord, Telegram, iMessage) fetch that image by URL,
+         so it must be a real hosted file — not a data URI or relative path.
+     ============================================================ -->
+<meta name="description" content="Dash HQ is a premier Web3 alpha community — a collective of serious NFT collectors, onchain analysts and crypto-native traders. Curated alpha, onchain analytics and market research.">
+<meta name="author" content="Dash HQ">
+<meta name="theme-color" content="#05080F">
+<meta name="robots" content="index, follow">
+<link rel="canonical" href="https://dashhq.site/">
+<link rel="icon" type="image/png" href="assets/hero-bg.png">
+<link rel="apple-touch-icon" href="assets/hero-bg.png">
+
+<!-- Open Graph (Facebook, Discord, Telegram, LinkedIn, iMessage) -->
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Dash HQ">
+<meta property="og:url" content="https://dashhq.site/">
+<meta property="og:title" content="Dash HQ — One Step Ahead of the Curve">
+<meta property="og:description" content="Dash HQ is a premier Web3 alpha community — a collective of serious NFT collectors, onchain analysts and crypto-native traders. Curated alpha, onchain analytics and market research.">
+<meta property="og:image" content="https://dashhq.site/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Dash HQ — Web3 Alpha Community">
+
+<!-- Twitter / X Card -->
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Dash HQ — One Step Ahead of the Curve">
+<meta name="twitter:description" content="Dash HQ is a premier Web3 alpha community — a collective of serious NFT collectors, onchain analysts and crypto-native traders. Curated alpha, onchain analytics and market research.">
+<meta name="twitter:image" content="https://dashhq.site/og-image.png">
+
+<!-- Organization structured data (brand panel + verified socials in Google) -->
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "Organization",
+  "name": "Dash HQ",
+  "url": "https://dashhq.site/",
+  "logo": "https://dashhq.site/og-image.png",
+  "description": "Dash HQ is a premier Web3 alpha community — a collective of serious NFT collectors, onchain analysts and crypto-native traders. Curated alpha, onchain analytics and market research.",
+  "sameAs": [
+    "https://x.com/sickofnfts"
+  ]
+}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;500;600;700;800&family=DM+Sans:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="scrollProgress"></div>
+<div id="cursorGhost"></div>
+
+<div class="fx fx-grid"></div>
+<div class="fx fx-scan"></div>
+<div class="fx fx-vig"></div>
+
+<nav>
+  <a href="#hero" class="logo"><span class="logo-mark-img"></span> DASH HQ</a>
+  <div class="nav-links">
+    <a href="#about" class="active">About</a>
+    <a href="#blog">Research</a>
+    <a href="#team">Team</a>
+    <a href="portal.html">Portal</a>
+  </div>
+  <a href="#join" class="nav-cta magnetic">Apply Now →</a>
+  <button class="nav-toggle" aria-label="Menu" aria-expanded="false"><span></span><span></span><span></span></button>
+</nav>
+<div class="nav-drawer">
+  <a href="#about">About</a>
+  <a href="#blog">Research</a>
+  <a href="#team">Team</a>
+  <a href="#faq">FAQ</a>
+  <a href="portal.html">Portal</a>
+  <a href="#join">Contact</a>
+</div>
+
+<!-- ══ HERO (above the cube preserved) ══ -->
+<section id="hero">
+  <canvas id="particles"></canvas>
+  <div class="hero-atmo"></div>
+  <div class="hero-inner">
+    <h1 class="sh disp-xl hero-h">One Step <span class="gw">Ahead</span><br>of the Curve.</h1>
+    <p class="lead hero-sub">Dash HQ is a premier Web3 alpha community — a collective of serious NFT collectors, onchain analysts, and crypto-native individuals. The community delivers curated alpha, onchain analytics &amp; market research — all running through a private Discord server and an active presence on X.</p>
+    <div class="hero-btns">
+      <a href="#join" class="btn btn-p magnetic">Apply for Citizenship →</a>
+      <a href="#blog" class="btn btn-g magnetic">Explore Research</a>
+    </div>
+    <p style="margin-top:20px;font-size:14px;color:var(--muted2)">Already a Citizen? <a href="portal.html" style="color:var(--sky);font-weight:600">Enter the Portal →</a></p>
+  </div>
+
+  <div class="cube-stage" id="cubeStage">
+    <div class="cube-corona"></div>
+    <div class="cube-chip big chip-l1"><div class="cl">Alpha Calls</div><div class="cv">15,000<span class="u">+</span></div><div class="cn">Since founding</div></div>
+    <div class="cube-chip sm chip-l2"><div class="cl">Coverage</div><div class="cv">24/7</div></div>
+    <div class="cube-chip sm chip-r1"><div class="cl">Dash Citizens</div><div class="cv">200<span class="u">+</span></div></div>
+    <div class="cube-chip big chip-r2"><div class="cl">Collaborations</div><div class="cv">700<span class="u">+</span></div><div class="cn">Partnerships shipped</div></div>
+    <svg viewBox="0 0 500 400" fill="none" xmlns="http://www.w3.org/2000/svg" class="cube-svg-el"><defs>
+<linearGradient id="cfaceL" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#8fb4ff" stop-opacity="0.20"></stop><stop offset="0.45" stop-color="#2f63e6" stop-opacity="0.10"></stop><stop offset="1" stop-color="#1430a0" stop-opacity="0.05"></stop></linearGradient>
+<linearGradient id="cfaceR" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#b8d2ff" stop-opacity="0.30"></stop><stop offset="0.5" stop-color="#3a72f0" stop-opacity="0.15"></stop><stop offset="1" stop-color="#1a45c8" stop-opacity="0.06"></stop></linearGradient>
+<linearGradient id="ctileL" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#a9c6ff" stop-opacity="0.34"></stop><stop offset="1" stop-color="#2350cc" stop-opacity="0.10"></stop></linearGradient>
+<linearGradient id="ctileR" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#cfe0ff" stop-opacity="0.42"></stop><stop offset="1" stop-color="#2b5ad8" stop-opacity="0.13"></stop></linearGradient>
+<radialGradient id="cglossL" cx="0.62" cy="0.18" r="0.7"><stop offset="0" stop-color="#fff" stop-opacity="0.30"></stop><stop offset="0.4" stop-color="#cfe0ff" stop-opacity="0.08"></stop><stop offset="1" stop-color="#fff" stop-opacity="0"></stop></radialGradient>
+<radialGradient id="cglossR" cx="0.40" cy="0.16" r="0.72"><stop offset="0" stop-color="#fff" stop-opacity="0.40"></stop><stop offset="0.4" stop-color="#d8e6ff" stop-opacity="0.12"></stop><stop offset="1" stop-color="#fff" stop-opacity="0"></stop></radialGradient>
+<linearGradient id="cedge" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#fff" stop-opacity="0.95"></stop><stop offset="0.5" stop-color="#bcd4ff" stop-opacity="0.8"></stop><stop offset="1" stop-color="#6f9bff" stop-opacity="0.45"></stop></linearGradient>
+<clipPath id="cclipL"><polygon points="250,44 60,110 60,300 250,372"></polygon></clipPath><clipPath id="cclipR"><polygon points="250,44 440,110 440,300 250,372"></polygon></clipPath>
+<filter id="csoft" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur stdDeviation="6"></feGaussianBlur></filter>
+</defs><polygon points="250,44 60,110 60,300 250,372" fill="url(#cfaceL)"></polygon><g clip-path="url(#cclipL)"><polygon points="250,44 60,110 60,300 250,372" fill="url(#cglossL)"></polygon><polygon points="250,44 145.5,80.3 193,192.77 250,142.4" fill="#fff" opacity="0.06"></polygon></g><polygon points="227.2,72.16 79,116.65 79,132.95 227.2,97.08" fill="url(#ctileL)" stroke="#bcd6ff" stroke-opacity="0.55" stroke-width="1" stroke-linejoin="round"></polygon><polygon points="227.2,72.16 79,116.65 79,132.95 227.2,97.08" fill="#5b9bf8" opacity="0.1"></polygon><line x1="227.2" y1="72.16" x2="79" y2="116.65" stroke="#eaf2ff" stroke-opacity="0.85" stroke-width="1.1"></line><polygon points="227.2,115.77 156.9,129.72 156.9,180.49 227.2,176.5" fill="url(#ctileL)" stroke="#bcd6ff" stroke-opacity="0.55" stroke-width="1" stroke-linejoin="round"></polygon><polygon points="227.2,115.77 156.9,129.72 156.9,180.49 227.2,176.5" fill="#5b9bf8" opacity="0.07"></polygon><line x1="227.2" y1="115.77" x2="156.9" y2="129.72" stroke="#eaf2ff" stroke-opacity="0.85" stroke-width="1.1"></line><polygon points="149.3,131.23 79,145.18 79,184.92 149.3,180.92" fill="url(#ctileL)" stroke="#bcd6ff" stroke-opacity="0.55" stroke-width="1" stroke-linejoin="round"></polygon><polygon points="149.3,131.23 79,145.18 79,184.92 149.3,180.92" fill="#5b9bf8" opacity="0.04"></polygon><line x1="149.3" y1="131.23" x2="79" y2="145.18" stroke="#eaf2ff" stroke-opacity="0.85" stroke-width="1.1"></line><polygon points="227.2,198.3 181.6,198.57 181.6,240.32 227.2,245.01" fill="url(#ctileL)" stroke="#bcd6ff" stroke-opacity="0.55" stroke-width="1" stroke-linejoin="round"></polygon><polygon points="227.2,198.3 181.6,198.57 181.6,240.32 227.2,245.01" fill="#5b9bf8" opacity="0.02"></polygon><line x1="227.2" y1="198.3" x2="181.6" y2="198.57" stroke="#eaf2ff" stroke-opacity="0.85" stroke-width="1.1"></line><polygon points="175.9,198.6 130.3,198.88 130.3,235.04 175.9,239.73" fill="url(#ctileL)" stroke="#bcd6ff" stroke-opacity="0.55" stroke-width="1" stroke-linejoin="round"></polygon><polygon points="175.9,198.6 130.3,198.88 130.3,235.04 175.9,239.73" fill="#5b9bf8" opacity="0.06"></polygon><line x1="175.9" y1="198.6" x2="130.3" y2="198.88" stroke="#eaf2ff" stroke-opacity="0.85" stroke-width="1.1"></line><polygon points="124.6,198.91 79,199.19 79,229.76 124.6,234.45" fill="url(#ctileL)" stroke="#bcd6ff" stroke-opacity="0.55" stroke-width="1" stroke-linejoin="round"></polygon><polygon points="124.6,198.91 79,199.19 79,229.76 124.6,234.45" fill="#5b9bf8" opacity="0.02"></polygon><line x1="124.6" y1="198.91" x2="79" y2="199.19" stroke="#eaf2ff" stroke-opacity="0.85" stroke-width="1.1"></line><polygon points="227.2,260.58 181.6,254.23 181.6,295.98 227.2,307.3" fill="url(#ctileL)" stroke="#bcd6ff" stroke-opacity="0.55" stroke-width="1" stroke-linejoin="round"></polygon><polygon points="227.2,260.58 181.6,254.23 181.6,295.98 227.2,307.3" fill="#5b9bf8" opacity="0.06"></polygon><line x1="227.2" y1="260.58" x2="181.6" y2="254.23" stroke="#eaf2ff" stroke-opacity="0.85" stroke-width="1.1"></line><polygon points="175.9,253.44 130.3,247.09 130.3,283.25 175.9,294.57" fill="url(#ctileL)" stroke="#bcd6ff" stroke-opacity="0.55" stroke-width="1" stroke-linejoin="round"></polygon><polygon points="175.9,253.44 130.3,247.09 130.3,283.25 175.9,294.57" fill="#5b9bf8" opacity="0.02"></polygon><line x1="175.9" y1="253.44" x2="130.3" y2="247.09" stroke="#eaf2ff" stroke-opacity="0.85" stroke-width="1.1"></line><polygon points="124.6,246.3 79,239.95 79,270.52 124.6,281.83" fill="url(#ctileL)" stroke="#bcd6ff" stroke-opacity="0.55" stroke-width="1" stroke-linejoin="round"></polygon><polygon points="124.6,246.3 79,239.95 79,270.52 124.6,281.83" fill="#5b9bf8" opacity="0.06"></polygon><line x1="124.6" y1="246.3" x2="79" y2="239.95" stroke="#eaf2ff" stroke-opacity="0.85" stroke-width="1.1"></line><polygon points="250,44 440,110 440,300 250,372" fill="url(#cfaceR)"></polygon><g clip-path="url(#cclipR)"><polygon points="250,44 440,110 440,300 250,372" fill="url(#cglossR)"></polygon><polygon points="250,44 354.5,80.3 307,192.77 250,142.4" fill="#fff" opacity="0.06"></polygon></g><polygon points="272.8,72.16 421,116.65 421,132.95 272.8,97.08" fill="url(#ctileR)" stroke="#bcd6ff" stroke-opacity="0.55" stroke-width="1" stroke-linejoin="round"></polygon><polygon points="272.8,72.16 421,116.65 421,132.95 272.8,97.08" fill="#5b9bf8" opacity="0.1"></polygon><line x1="272.8" y1="72.16" x2="421" y2="116.65" stroke="#eaf2ff" stroke-opacity="0.85" stroke-width="1.1"></line><polygon points="272.8,115.77 343.1,129.72 343.1,180.49 272.8,176.5" fill="url(#ctileR)" stroke="#bcd6ff" stroke-opacity="0.55" stroke-width="1" stroke-linejoin="round"></polygon><polygon points="272.8,115.77 343.1,129.72 343.1,180.49 272.8,176.5" fill="#5b9bf8" opacity="0.07"></polygon><line x1="272.8" y1="115.77" x2="343.1" y2="129.72" stroke="#eaf2ff" stroke-opacity="0.85" stroke-width="1.1"></line><polygon points="350.7,131.23 421,145.18 421,184.92 350.7,180.92" fill="url(#ctileR)" stroke="#bcd6ff" stroke-opacity="0.55" stroke-width="1" stroke-linejoin="round"></polygon><polygon points="350.7,131.23 421,145.18 421,184.92 350.7,180.92" fill="#5b9bf8" opacity="0.04"></polygon><line x1="350.7" y1="131.23" x2="421" y2="145.18" stroke="#eaf2ff" stroke-opacity="0.85" stroke-width="1.1"></line><polygon points="272.8,198.3 318.4,198.57 318.4,240.32 272.8,245.01" fill="url(#ctileR)" stroke="#bcd6ff" stroke-opacity="0.55" stroke-width="1" stroke-linejoin="round"></polygon><polygon points="272.8,198.3 318.4,198.57 318.4,240.32 272.8,245.01" fill="#5b9bf8" opacity="0.02"></polygon><line x1="272.8" y1="198.3" x2="318.4" y2="198.57" stroke="#eaf2ff" stroke-opacity="0.85" stroke-width="1.1"></line><polygon points="324.1,198.6 369.7,198.88 369.7,235.04 324.1,239.73" fill="url(#ctileR)" stroke="#bcd6ff" stroke-opacity="0.55" stroke-width="1" stroke-linejoin="round"></polygon><polygon points="324.1,198.6 369.7,198.88 369.7,235.04 324.1,239.73" fill="#5b9bf8" opacity="0.06"></polygon><line x1="324.1" y1="198.6" x2="369.7" y2="198.88" stroke="#eaf2ff" stroke-opacity="0.85" stroke-width="1.1"></line><polygon points="375.4,198.91 421,199.19 421,229.76 375.4,234.45" fill="url(#ctileR)" stroke="#bcd6ff" stroke-opacity="0.55" stroke-width="1" stroke-linejoin="round"></polygon><polygon points="375.4,198.91 421,199.19 421,229.76 375.4,234.45" fill="#5b9bf8" opacity="0.02"></polygon><line x1="375.4" y1="198.91" x2="421" y2="199.19" stroke="#eaf2ff" stroke-opacity="0.85" stroke-width="1.1"></line><polygon points="272.8,260.58 318.4,254.23 318.4,295.98 272.8,307.3" fill="url(#ctileR)" stroke="#bcd6ff" stroke-opacity="0.55" stroke-width="1" stroke-linejoin="round"></polygon><polygon points="272.8,260.58 318.4,254.23 318.4,295.98 272.8,307.3" fill="#5b9bf8" opacity="0.06"></polygon><line x1="272.8" y1="260.58" x2="318.4" y2="254.23" stroke="#eaf2ff" stroke-opacity="0.85" stroke-width="1.1"></line><polygon points="324.1,253.44 369.7,247.09 369.7,283.25 324.1,294.57" fill="url(#ctileR)" stroke="#bcd6ff" stroke-opacity="0.55" stroke-width="1" stroke-linejoin="round"></polygon><polygon points="324.1,253.44 369.7,247.09 369.7,283.25 324.1,294.57" fill="#5b9bf8" opacity="0.02"></polygon><line x1="324.1" y1="253.44" x2="369.7" y2="247.09" stroke="#eaf2ff" stroke-opacity="0.85" stroke-width="1.1"></line><polygon points="375.4,246.3 421,239.95 421,270.52 375.4,281.83" fill="url(#ctileR)" stroke="#bcd6ff" stroke-opacity="0.55" stroke-width="1" stroke-linejoin="round"></polygon><polygon points="375.4,246.3 421,239.95 421,270.52 375.4,281.83" fill="#5b9bf8" opacity="0.06"></polygon><line x1="375.4" y1="246.3" x2="421" y2="239.95" stroke="#eaf2ff" stroke-opacity="0.85" stroke-width="1.1"></line><g filter="url(#csoft)" opacity="0.6"><polyline points="60,110 250,44 440,110" fill="none" stroke="#9cc0ff" stroke-width="2"></polyline><polyline points="60,300 250,372 440,300" fill="none" stroke="#6f9bff" stroke-width="2"></polyline></g><polygon points="60,110 250,44 440,110 440,300 250,372 60,300" fill="none" stroke="#cfe1ff" stroke-opacity="0.92" stroke-width="1.7" stroke-linejoin="round"></polygon><line x1="250" y1="44" x2="250" y2="372" stroke="url(#cedge)" stroke-width="2.4" stroke-linecap="round"></line><circle cx="250" cy="44" r="3.2" fill="#fff" opacity="0.9"></circle><circle cx="250" cy="44" r="8" fill="#fff" opacity="0.18" filter="url(#csoft)"></circle></svg>
+  </div>
+</section>
+
+<!-- ══ ABOUT ══ -->
+<section id="about">
+  <div class="wrap">
+    <div class="vision">
+      <span class="eyebrow" data-reveal="up">Our Vision</span>
+      <h2 class="sh disp-l" data-reveal="blur" style="--d:80ms">To be the most alpha-packed community in Web3 <span class="qmark">—</span> nothing passes us by.</h2>
+      <p data-reveal="up" style="--d:200ms">We don't just call plays. We build minds.</p>
+    </div>
+
+    <div class="about-divider" data-reveal="zoom"></div>
+
+    <div class="story-grid">
+      <div class="story-copy">
+        <span class="eyebrow" data-reveal="curtain-l">Our Story</span>
+        <h3 class="sh disp-m" data-reveal="curtain-l" style="--d:60ms">Not another Discord group. A movement.</h3>
+        <p data-reveal="curtain-l" style="--d:140ms">Dash HQ was founded by a tight circle of traders and serious collectors who were tired of noise. We built a command center where value compounds — where the most talented &amp; sharpest minds sharpen each other.</p>
+        <p data-reveal="curtain-l" style="--d:220ms">Today we run curated alpha, mint analysis and onchain research through a private Discord and an active presence on X. Every call carries a name behind it.</p>
+      </div>
+      <div class="timeline" id="timeline">
+        <div class="prog" id="tlProg"></div>
+        <div class="tl-item" data-reveal="curtain-r"><span class="node"></span><div class="yr">2023</div><h4>Founded</h4><p>A handful of degens, one private server, one rule: bring value or bring nothing.</p></div>
+        <div class="tl-item" data-reveal="curtain-r" style="--d:80ms"><span class="node"></span><div class="yr">2023</div><h4>First Alpha Call</h4><p>The drop that started the streak — and the standard we hold every citizen to.</p></div>
+        <div class="tl-item" data-reveal="curtain-r" style="--d:160ms"><span class="node"></span><div class="yr">2024</div><h4>First Mint Win</h4><p>Conviction over hype. The community moved early and the thesis printed.</p></div>
+        <div class="tl-item" data-reveal="curtain-r" style="--d:240ms"><span class="node"></span><div class="yr">2025</div><h4>The Collective Grows</h4><p>Citizens given a voice — research priorities set by the people who use them.</p></div>
+      </div>
+    </div>
+
+    <!-- PILLARS (haptic squares, split reveal) -->
+    <div class="pillars">
+      <div class="pillar" data-reveal="up"><span class="pn">01</span><span class="pico"><svg viewBox="0 0 24 24"><path d="M13 2 3 14h7l-1 8 10-12h-7z"/></svg></span><h4>Alpha</h4><p>High-conviction calls before the market moves.</p></div>
+      <div class="pillar" data-reveal="up" style="--d:80ms"><span class="pn">02</span><span class="pico"><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><circle cx="17" cy="10" r="2.4"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6M14 20c0-2.3 1.6-4.3 4-4.8"/></svg></span><h4>Community First</h4><p>A collective of sharp minds. Your network is your edge.</p></div>
+      <div class="pillar" data-reveal="up" style="--d:160ms"><span class="pn">03</span><span class="pico"><svg viewBox="0 0 24 24"><path d="M12 3 4 7v5c0 5 3.4 8 8 9 4.6-1 8-4 8-9V7z"/></svg></span><h4>Transparency</h4><p>Reputation is staked on the table, in public.</p></div>
+      <div class="pillar" data-reveal="up" style="--d:240ms"><span class="pn">04</span><span class="pico"><svg viewBox="0 0 24 24"><path d="M3 17l5-5 4 4 8-9"/><path d="M21 7v5h-5"/></svg></span><h4>Continuous Growth</h4><p>Markets evolve. So do we — research, tooling and minds, sharpened weekly.</p></div>
+    </div>
+
+    <!-- WHAT WE PROVIDE -->
+    <div style="margin-top:90px">
+      <div class="sec-head">
+        <div><span class="eyebrow" data-reveal="up">What We Provide</span><h3 class="sh disp-m" data-reveal="up" style="--d:70ms">The full Dash HQ toolkit.</h3></div>
+      </div>
+      <div class="provide">
+        <div class="prov" data-reveal="up"><span class="dot"></span><span>Live Alpha Drops</span></div>
+        <div class="prov" data-reveal="up" style="--d:60ms"><span class="dot"></span><span>Mint Analysis</span></div>
+        <div class="prov" data-reveal="up" style="--d:120ms"><span class="dot"></span><span>On-Chain Tracking</span></div>
+        <div class="prov" data-reveal="up" style="--d:180ms"><span class="dot"></span><span>Community Voice</span></div>
+        <div class="prov" data-reveal="up" style="--d:240ms"><span class="dot"></span><span>Exclusive Research</span></div>
+        <div class="prov" data-reveal="up" style="--d:300ms"><span class="dot"></span><span>Network &amp; Connections</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══ BLOG / RESEARCH ══ -->
+<section id="blog">
+  <div class="wrap">
+    <div class="sec-head">
+      <div>
+        <span class="eyebrow" data-reveal="up">Latest From The HQ</span>
+        <h2 class="sh disp-l" data-reveal="up" style="--d:70ms">Research &amp; Alpha.</h2>
+      </div>
+      <button type="button" class="btn btn-g magnetic" data-reveal="up" style="--d:120ms" onclick="openResearch()">View All Research →</button>
+    </div>
+    <div class="blog-row" id="blogRow">
+      <article class="post" data-post="nft101" data-reveal="up" role="button" tabindex="0" onclick="openPost('nft101')"><div class="thumb"><div class="glow"></div><div class="strip"></div></div><div class="pbody"><h3>Understanding NFTs and the Blockchain</h3><p class="pex">NFTs, crypto, blockchain, Web3 — demystified from the ground up. Finally get with the times.</p><div class="pmeta"><span>@LuvThePisces</span><span class="sep">•</span><span>3 min</span><span class="sep">•</span><span>Jul 3</span></div></div></article>
+      <article class="post" data-post="keys" data-reveal="up" style="--d:90ms" role="button" tabindex="0" onclick="openPost('keys')"><div class="thumb"><div class="glow"></div><div class="strip"></div></div><div class="pbody"><h3>Not Your Keys, Not Your Coins</h3><p class="pex">The most repeated phrase in crypto, and what self-custody actually asks of you.</p><div class="pmeta"><span>Dash Team</span><span class="sep">•</span><span>2 min</span><span class="sep">•</span><span>Jun 24</span></div></div></article>
+      <article class="post" data-post="gas" data-reveal="up" style="--d:180ms" role="button" tabindex="0" onclick="openPost('gas')"><div class="thumb"><div class="glow"></div><div class="strip"></div></div><div class="pbody"><h3>Gas, Explained</h3><p class="pex">Gwei, base fees, priority tips. What you pay for every time you hit confirm.</p><div class="pmeta"><span>Dash Team</span><span class="sep">•</span><span>2 min</span><span class="sep">•</span><span>Jun 21</span></div></div></article>
+    </div>
+  </div>
+</section>
+
+<!-- ══ TEAM ══ -->
+<section id="team">
+  <div class="wrap">
+    <div class="sec-head">
+      <div><span class="eyebrow" data-reveal="up">The Citizens Behind It</span><h2 class="sh disp-l" data-reveal="up" style="--d:70ms">Meet the team.</h2></div>
+    </div>
+    <div class="team-grid" id="teamGrid">
+      <div class="haptic tcard" data-reveal="zoom" style="--d:0ms"><div class="pfp"><img src="assets/alvin.png" alt="Alvin"></div><h4>Alvin</h4><div class="role">Founder</div><div class="bio">The boss — calls the shots and keeps the community alive.</div><div class="socials"><a href="https://x.com/sickofnfts" target="_blank" rel="noopener" aria-label="Alvin on X"><svg viewBox="0 0 24 24"><path d="M18 2h3l-7 8 8 12h-6l-5-7-5 7H2l8-9L2 2h6l4 6z"/></svg></a></div></div>
+      <div class="haptic tcard" data-reveal="zoom" style="--d:70ms"><div class="pfp"><img src="assets/dee.png" alt="Dee"></div><h4>Dee</h4><div class="role">Core Team / Partnerships</div><div class="bio">Oversees content &amp; branding and manages community collaborations.</div><div class="socials"><a href="https://x.com/deekamix" target="_blank" rel="noopener" aria-label="Dee on X"><svg viewBox="0 0 24 24"><path d="M18 2h3l-7 8 8 12h-6l-5-7-5 7H2l8-9L2 2h6l4 6z"/></svg></a></div></div>
+      <div class="haptic tcard" data-reveal="zoom" style="--d:140ms"><div class="pfp"><img src="assets/spykidoo.png" alt="Spykidoo"></div><h4>Spykidoo</h4><div class="role">Core Team</div><div class="bio">Oversees the day-to-day activity of the community.</div><div class="socials"><a href="https://x.com/OnlySpykidoo" target="_blank" rel="noopener" aria-label="Spykidoo on X"><svg viewBox="0 0 24 24"><path d="M18 2h3l-7 8 8 12h-6l-5-7-5 7H2l8-9L2 2h6l4 6z"/></svg></a></div></div>
+      <div class="haptic tcard" data-reveal="zoom" style="--d:210ms"><div class="pfp"><img src="assets/maleic.png" alt="Maleic"></div><h4>Maleic</h4><div class="role">Collaboration Manager</div><div class="bio">Handles inbound &amp; outbound collaborations for the community.</div><div class="socials"><a href="https://x.com/Maleicofweb0" target="_blank" rel="noopener" aria-label="Maleic on X"><svg viewBox="0 0 24 24"><path d="M18 2h3l-7 8 8 12h-6l-5-7-5 7H2l8-9L2 2h6l4 6z"/></svg></a></div></div>
+      <div class="haptic tcard" data-reveal="zoom" style="--d:280ms"><div class="pfp"><img src="assets/demi.png" alt="Demi"></div><h4>Demi</h4><div class="role">Collaboration Manager</div><div class="bio">Handles inbound &amp; outbound collaborations for the community.</div><div class="socials"><a href="https://x.com/_demiox" target="_blank" rel="noopener" aria-label="Demi on X"><svg viewBox="0 0 24 24"><path d="M18 2h3l-7 8 8 12h-6l-5-7-5 7H2l8-9L2 2h6l4 6z"/></svg></a></div></div>
+      <div class="haptic tcard" data-reveal="zoom" style="--d:0ms"><div class="pfp"><img src="assets/ola.png" alt="Ola"></div><h4>Ola</h4><div class="role">Collaboration Manager</div><div class="bio">Handles inbound &amp; outbound collaborations for the community.</div><div class="socials"><a href="https://x.com/BigOlawale" target="_blank" rel="noopener" aria-label="Ola on X"><svg viewBox="0 0 24 24"><path d="M18 2h3l-7 8 8 12h-6l-5-7-5 7H2l8-9L2 2h6l4 6z"/></svg></a></div></div>
+      <div class="haptic tcard" data-reveal="zoom" style="--d:70ms"><div class="pfp"><img src="assets/wada.png" alt="Wada"></div><h4>Wada</h4><div class="role">Collaboration Manager</div><div class="bio">Handles inbound &amp; outbound collaborations for the community.</div><div class="socials"><a href="https://x.com/Kingada20" target="_blank" rel="noopener" aria-label="Wada on X"><svg viewBox="0 0 24 24"><path d="M18 2h3l-7 8 8 12h-6l-5-7-5 7H2l8-9L2 2h6l4 6z"/></svg></a></div></div>
+      <div class="haptic tcard" data-reveal="zoom" style="--d:140ms"><div class="pfp"><img src="assets/chalif.png" alt="Chalif"></div><h4>Chalif</h4><div class="role">Collaboration Manager</div><div class="bio">Handles inbound &amp; outbound collaborations for the community.</div><div class="socials"><a href="https://x.com/chalif_1" target="_blank" rel="noopener" aria-label="Chalif on X"><svg viewBox="0 0 24 24"><path d="M18 2h3l-7 8 8 12h-6l-5-7-5 7H2l8-9L2 2h6l4 6z"/></svg></a></div></div>
+      <div class="haptic tcard" data-reveal="zoom" style="--d:210ms"><div class="pfp"><img src="assets/fearless.png" alt="Fearless"></div><h4>Fearless</h4><div class="role">Collaboration Manager</div><div class="bio">Handles inbound &amp; outbound collaborations for the community.</div><div class="socials"><a href="https://x.com/Dfw_Ashh" target="_blank" rel="noopener" aria-label="Fearless on X"><svg viewBox="0 0 24 24"><path d="M18 2h3l-7 8 8 12h-6l-5-7-5 7H2l8-9L2 2h6l4 6z"/></svg></a></div></div>
+      <div class="haptic tcard" data-reveal="zoom" style="--d:280ms"><div class="pfp"><img src="assets/schoolboy.png" alt="Schoolboy"></div><h4>Schoolboy</h4><div class="role">Content Writer</div><div class="bio">Handles writing and articles for the community.</div><div class="socials"><a href="https://x.com/0xschlboy" target="_blank" rel="noopener" aria-label="Schoolboy on X"><svg viewBox="0 0 24 24"><path d="M18 2h3l-7 8 8 12h-6l-5-7-5 7H2l8-9L2 2h6l4 6z"/></svg></a></div></div>
+      <div class="haptic tcard" data-reveal="zoom" style="--d:0ms"><div class="pfp"><img src="assets/frontroad-gee.png" alt="Frontroad Gee"></div><h4>Frontroad Gee</h4><div class="role">Artist</div><div class="bio">Handles art creation &amp; design for the community.</div><div class="socials"><a href="https://x.com/frontroadgee23" target="_blank" rel="noopener" aria-label="Frontroad Gee on X"><svg viewBox="0 0 24 24"><path d="M18 2h3l-7 8 8 12h-6l-5-7-5 7H2l8-9L2 2h6l4 6z"/></svg></a></div></div>
+      <div class="haptic tcard" data-reveal="zoom" style="--d:70ms"><div class="pfp"><img src="assets/davinci.png" alt="Davinci"></div><h4>Davinci</h4><div class="role">Artist</div><div class="bio">Handles art creation &amp; design for the community.</div><div class="socials"><a href="https://x.com/davydavincii" target="_blank" rel="noopener" aria-label="Davinci on X"><svg viewBox="0 0 24 24"><path d="M18 2h3l-7 8 8 12h-6l-5-7-5 7H2l8-9L2 2h6l4 6z"/></svg></a></div></div>
+      <div class="haptic tcard" data-reveal="zoom" style="--d:140ms"><div class="pfp"><img src="assets/stace.png" alt="Stace"></div><h4>Stace</h4><div class="role">Space Host</div><div class="bio">Organizes Twitter Spaces for the community.</div><div class="socials"><a href="https://x.com/Staceomi" target="_blank" rel="noopener" aria-label="Stace on X"><svg viewBox="0 0 24 24"><path d="M18 2h3l-7 8 8 12h-6l-5-7-5 7H2l8-9L2 2h6l4 6z"/></svg></a></div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ══ JOIN ══ -->
+<section id="voices">
+  <div class="wrap">
+    <div class="sec-head">
+      <div><span class="eyebrow" data-reveal="up">From the Community</span><h2 class="sh disp-l" data-reveal="up" style="--d:70ms">What Citizens say.</h2></div>
+      
+    </div>
+    <div class="voices-marquee">
+      <div class="voices-track">
+        <div class="vcard"><p class="vq">Being a Ordinals Enjoyoor, after everything went awol, Eth chain became some challenge for me, i need a platform to help me navigate, thankfully, i found Dash at that crucial moment of need, and yea, its been up since then for me.</p><div class="who"><span class="av"><i>E</i></span><div><div class="nm">Eaglecash <svg class="vf" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 1.8 3 .1 1 2.8 2.4 1.7-.9 2.8.9 2.8-2.4 1.7-1 2.8-3 .1L12 22l-2.4-1.8-3-.1-1-2.8L3.2 15l.9-2.8L3.2 9.4l2.4-1.7 1-2.8 3-.1z"/><path d="M9.5 12.3l1.8 1.8 3.4-3.6" stroke="#0a1120" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div><div class="h">Dash Citizen</div></div></div></div>
+        <div class="vcard"><p class="vq">Dash made me play secondary more. I learned, relearned, and became a better player.</p><div class="who"><span class="av"><i>j</i></span><div><div class="nm">juw <svg class="vf" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 1.8 3 .1 1 2.8 2.4 1.7-.9 2.8.9 2.8-2.4 1.7-1 2.8-3 .1L12 22l-2.4-1.8-3-.1-1-2.8L3.2 15l.9-2.8L3.2 9.4l2.4-1.7 1-2.8 3-.1z"/><path d="M9.5 12.3l1.8 1.8 3.4-3.6" stroke="#0a1120" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div><div class="h">Dash Citizen</div></div></div></div>
+        <div class="vcard"><p class="vq">Been bullish on dash and I know they cooking at their official launch no doubt</p><div class="who"><span class="av"><i>Z</i></span><div><div class="nm">Zeno <svg class="vf" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 1.8 3 .1 1 2.8 2.4 1.7-.9 2.8.9 2.8-2.4 1.7-1 2.8-3 .1L12 22l-2.4-1.8-3-.1-1-2.8L3.2 15l.9-2.8L3.2 9.4l2.4-1.7 1-2.8 3-.1z"/><path d="M9.5 12.3l1.8 1.8 3.4-3.6" stroke="#0a1120" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div><div class="h">Dash Citizen</div></div></div></div>
+        <div class="vcard"><p class="vq">Joining Dash has been one of my best decisions yet since joining the space. I’ve learnt quite a lot just from being a part of the community and I’m really happy to be a member of this community.</p><div class="who"><span class="av"><i>K</i></span><div><div class="nm">Kris <svg class="vf" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 1.8 3 .1 1 2.8 2.4 1.7-.9 2.8.9 2.8-2.4 1.7-1 2.8-3 .1L12 22l-2.4-1.8-3-.1-1-2.8L3.2 15l.9-2.8L3.2 9.4l2.4-1.7 1-2.8 3-.1z"/><path d="M9.5 12.3l1.8 1.8 3.4-3.6" stroke="#0a1120" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div><div class="h">Dash Citizen</div></div></div></div>
+        <div class="vcard"><p class="vq">Dash isn’t just a community but feel like family, joining dash I got better in communication and understanding more of the hang of NFTs and I have won more.</p><div class="who"><span class="av"><i>T</i></span><div><div class="nm">Trojan <svg class="vf" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 1.8 3 .1 1 2.8 2.4 1.7-.9 2.8.9 2.8-2.4 1.7-1 2.8-3 .1L12 22l-2.4-1.8-3-.1-1-2.8L3.2 15l.9-2.8L3.2 9.4l2.4-1.7 1-2.8 3-.1z"/><path d="M9.5 12.3l1.8 1.8 3.4-3.6" stroke="#0a1120" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div><div class="h">Dash Citizen</div></div></div></div>
+        <div class="vcard"><p class="vq">Joining DashHQ has been one of the best decisions I've made in the NFT space. It's genuinely welcoming and feels like family. Beyond the great vibes, the alpha calls are consistently top-tier and have played a huge role in my growth. I'm grateful to be surrounded by people who genuinely want to see each other win.</p><div class="who"><span class="av"><i>n</i></span><div><div class="nm">Nuel <svg class="vf" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 1.8 3 .1 1 2.8 2.4 1.7-.9 2.8.9 2.8-2.4 1.7-1 2.8-3 .1L12 22l-2.4-1.8-3-.1-1-2.8L3.2 15l.9-2.8L3.2 9.4l2.4-1.7 1-2.8 3-.1z"/><path d="M9.5 12.3l1.8 1.8 3.4-3.6" stroke="#0a1120" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div><div class="h">Dash Citizen</div></div></div></div>
+        <div class="vcard"><p class="vq">Ngl, it’s feels great to be a part of Dash HQ family. Since I joined, I can always look back and say I’m proud to be part this awesome community. Shout out to the founder, the collab managers and members. Dash HQ, never stops to cook.</p><div class="who"><span class="av"><i>T</i></span><div><div class="nm">Tobiloba <svg class="vf" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 1.8 3 .1 1 2.8 2.4 1.7-.9 2.8.9 2.8-2.4 1.7-1 2.8-3 .1L12 22l-2.4-1.8-3-.1-1-2.8L3.2 15l.9-2.8L3.2 9.4l2.4-1.7 1-2.8 3-.1z"/><path d="M9.5 12.3l1.8 1.8 3.4-3.6" stroke="#0a1120" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div><div class="h">Dash Citizen</div></div></div></div>
+        <div class="vcard"><p class="vq">I'm still very new to Dash community but it's been nice been a part of something real. The community is full of sound minds and I love how we show up for each other. And one thing that really stood out for me and made me join Dash is how the team go all out for their community and even projects. In a space where everything seems forced at the moment, I love how intentional everything about this community is.</p><div class="who"><span class="av"><i>t</i></span><div><div class="nm">t33Girl <svg class="vf" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 1.8 3 .1 1 2.8 2.4 1.7-.9 2.8.9 2.8-2.4 1.7-1 2.8-3 .1L12 22l-2.4-1.8-3-.1-1-2.8L3.2 15l.9-2.8L3.2 9.4l2.4-1.7 1-2.8 3-.1z"/><path d="M9.5 12.3l1.8 1.8 3.4-3.6" stroke="#0a1120" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div><div class="h">Dash Citizen</div></div></div></div>
+        <div class="vcard" aria-hidden="true"><p class="vq">Being a Ordinals Enjoyoor, after everything went awol, Eth chain became some challenge for me, i need a platform to help me navigate, thankfully, i found Dash at that crucial moment of need, and yea, its been up since then for me.</p><div class="who"><span class="av"><i>E</i></span><div><div class="nm">Eaglecash <svg class="vf" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 1.8 3 .1 1 2.8 2.4 1.7-.9 2.8.9 2.8-2.4 1.7-1 2.8-3 .1L12 22l-2.4-1.8-3-.1-1-2.8L3.2 15l.9-2.8L3.2 9.4l2.4-1.7 1-2.8 3-.1z"/><path d="M9.5 12.3l1.8 1.8 3.4-3.6" stroke="#0a1120" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div><div class="h">Dash Citizen</div></div></div></div>
+        <div class="vcard" aria-hidden="true"><p class="vq">Dash made me play secondary more. I learned, relearned, and became a better player.</p><div class="who"><span class="av"><i>j</i></span><div><div class="nm">juw <svg class="vf" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 1.8 3 .1 1 2.8 2.4 1.7-.9 2.8.9 2.8-2.4 1.7-1 2.8-3 .1L12 22l-2.4-1.8-3-.1-1-2.8L3.2 15l.9-2.8L3.2 9.4l2.4-1.7 1-2.8 3-.1z"/><path d="M9.5 12.3l1.8 1.8 3.4-3.6" stroke="#0a1120" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div><div class="h">Dash Citizen</div></div></div></div>
+        <div class="vcard" aria-hidden="true"><p class="vq">Been bullish on dash and I know they cooking at their official launch no doubt</p><div class="who"><span class="av"><i>Z</i></span><div><div class="nm">Zeno <svg class="vf" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 1.8 3 .1 1 2.8 2.4 1.7-.9 2.8.9 2.8-2.4 1.7-1 2.8-3 .1L12 22l-2.4-1.8-3-.1-1-2.8L3.2 15l.9-2.8L3.2 9.4l2.4-1.7 1-2.8 3-.1z"/><path d="M9.5 12.3l1.8 1.8 3.4-3.6" stroke="#0a1120" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div><div class="h">Dash Citizen</div></div></div></div>
+        <div class="vcard" aria-hidden="true"><p class="vq">Joining Dash has been one of my best decisions yet since joining the space. I’ve learnt quite a lot just from being a part of the community and I’m really happy to be a member of this community.</p><div class="who"><span class="av"><i>K</i></span><div><div class="nm">Kris <svg class="vf" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 1.8 3 .1 1 2.8 2.4 1.7-.9 2.8.9 2.8-2.4 1.7-1 2.8-3 .1L12 22l-2.4-1.8-3-.1-1-2.8L3.2 15l.9-2.8L3.2 9.4l2.4-1.7 1-2.8 3-.1z"/><path d="M9.5 12.3l1.8 1.8 3.4-3.6" stroke="#0a1120" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div><div class="h">Dash Citizen</div></div></div></div>
+        <div class="vcard" aria-hidden="true"><p class="vq">Dash isn’t just a community but feel like family, joining dash I got better in communication and understanding more of the hang of NFTs and I have won more.</p><div class="who"><span class="av"><i>T</i></span><div><div class="nm">Trojan <svg class="vf" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 1.8 3 .1 1 2.8 2.4 1.7-.9 2.8.9 2.8-2.4 1.7-1 2.8-3 .1L12 22l-2.4-1.8-3-.1-1-2.8L3.2 15l.9-2.8L3.2 9.4l2.4-1.7 1-2.8 3-.1z"/><path d="M9.5 12.3l1.8 1.8 3.4-3.6" stroke="#0a1120" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div><div class="h">Dash Citizen</div></div></div></div>
+        <div class="vcard" aria-hidden="true"><p class="vq">Joining DashHQ has been one of the best decisions I've made in the NFT space. It's genuinely welcoming and feels like family. Beyond the great vibes, the alpha calls are consistently top-tier and have played a huge role in my growth. I'm grateful to be surrounded by people who genuinely want to see each other win.</p><div class="who"><span class="av"><i>n</i></span><div><div class="nm">Nuel <svg class="vf" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 1.8 3 .1 1 2.8 2.4 1.7-.9 2.8.9 2.8-2.4 1.7-1 2.8-3 .1L12 22l-2.4-1.8-3-.1-1-2.8L3.2 15l.9-2.8L3.2 9.4l2.4-1.7 1-2.8 3-.1z"/><path d="M9.5 12.3l1.8 1.8 3.4-3.6" stroke="#0a1120" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div><div class="h">Dash Citizen</div></div></div></div>
+        <div class="vcard" aria-hidden="true"><p class="vq">Ngl, it’s feels great to be a part of Dash HQ family. Since I joined, I can always look back and say I’m proud to be part this awesome community. Shout out to the founder, the collab managers and members. Dash HQ, never stops to cook.</p><div class="who"><span class="av"><i>T</i></span><div><div class="nm">Tobiloba <svg class="vf" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 1.8 3 .1 1 2.8 2.4 1.7-.9 2.8.9 2.8-2.4 1.7-1 2.8-3 .1L12 22l-2.4-1.8-3-.1-1-2.8L3.2 15l.9-2.8L3.2 9.4l2.4-1.7 1-2.8 3-.1z"/><path d="M9.5 12.3l1.8 1.8 3.4-3.6" stroke="#0a1120" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div><div class="h">Dash Citizen</div></div></div></div>
+        <div class="vcard" aria-hidden="true"><p class="vq">I'm still very new to Dash community but it's been nice been a part of something real. The community is full of sound minds and I love how we show up for each other. And one thing that really stood out for me and made me join Dash is how the team go all out for their community and even projects. In a space where everything seems forced at the moment, I love how intentional everything about this community is.</p><div class="who"><span class="av"><i>t</i></span><div><div class="nm">t33Girl <svg class="vf" viewBox="0 0 24 24" fill="currentColor"><path d="M12 2l2.4 1.8 3 .1 1 2.8 2.4 1.7-.9 2.8.9 2.8-2.4 1.7-1 2.8-3 .1L12 22l-2.4-1.8-3-.1-1-2.8L3.2 15l.9-2.8L3.2 9.4l2.4-1.7 1-2.8 3-.1z"/><path d="M9.5 12.3l1.8 1.8 3.4-3.6" stroke="#0a1120" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg></div><div class="h">Dash Citizen</div></div></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══ FAQ ══ -->
+<section id="faq">
+  <div class="wrap">
+    <div class="sec-head">
+      <div><span class="eyebrow" data-reveal="up">Questions</span><h2 class="sh disp-l" data-reveal="up" style="--d:70ms">Before you apply.</h2></div>
+    </div>
+    <div class="faq-list">
+      <details class="faq-item" data-reveal="up" open><summary><span class="q">How do I become a Dash Citizen?</span><span class="ic">+</span></summary><div class="a">To become a Dash Citizen, submit your application through our official website. All applications are reviewed by the founder, who personally selects members to maintain the quality and alignment of the community.</div></details>
+      <details class="faq-item" data-reveal="up" style="--d:50ms"><summary><span class="q">Is there a fee to join?</span><span class="ic">+</span></summary><div class="a">No. Membership as a Dash Citizen is completely free — there are no joining fees or subscription costs.</div></details>
+      <details class="faq-item" data-reveal="up" style="--d:100ms"><summary><span class="q">What exactly do I get access to?</span><span class="ic">+</span></summary><div class="a">As a Dash Citizen, you receive high-quality alpha and early insights, access to our exclusive tools and resources, and entry into a private, high-signal community of talented traders, builders and Web3 enthusiasts.</div></details>
+      <details class="faq-item" data-reveal="up" style="--d:150ms"><summary><span class="q">Do I need to be an experienced trader?</span><span class="ic">+</span></summary><div class="a">You don't need to be a professional trader, but we recommend at least an intermediate-level understanding of Web3 and NFTs. This ensures you can actively participate and get the most value from the group.</div></details>
+      <details class="faq-item" data-reveal="up" style="--d:200ms"><summary><span class="q">How active is the community?</span><span class="ic">+</span></summary><div class="a">Very active. Dash Citizens are known for consistent daily engagement, alpha sharing and collaborative opportunities — making it one of the most active communities in the space.</div></details>
+    </div>
+  </div>
+</section>
+
+<!-- ══ JOIN ══ -->
+<section id="join">
+  <div class="wrap">
+    <div class="join-card">
+      <div class="jglow"></div>
+      <div class="ji">
+        <span class="eyebrow" data-reveal="up" style="justify-content:center">Citizenship</span>
+        <h2 class="sh disp-l" data-reveal="blur" style="--d:80ms">Ready to be always ahead of the curve?</h2>
+        <p data-reveal="up" style="--d:180ms">Spots are limited. The bar is high. The results speak for themselves.</p>
+        <a href="#" class="btn btn-p magnetic" data-reveal="up" style="--d:240ms;font-size:16px;padding:18px 44px">Apply for Citizenship →</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ══ SUBSCRIBE (Substack) ══
+     DEV: set the Substack publication handle in the SUBSTACK_PUB constant in the
+     subscribe <script> below (e.g. "dashhq" for dashhq.substack.com). The form then
+     subscribes the reader directly via Substack — no backend, no third party.
+     If a subscribe ever needs confirmation, it falls back to opening the Substack
+     subscribe page prefilled with their email. -->
+<section id="subscribe">
+  <div class="wrap">
+    <div class="sub-card" data-reveal="up">
+      <div class="sub-copy">
+        <span class="eyebrow">The Dash Dispatch</span>
+        <h3>Alpha in your inbox.</h3>
+        <p>Get our research drops, mint breakdowns and market notes straight from the HQ — no noise, just signal. Delivered through our Substack.</p>
+      </div>
+      <form class="sub-form" id="subForm" novalidate>
+        <div class="sub-row">
+          <input type="email" name="email" id="subEmail" placeholder="you@email.com" autocomplete="email" aria-label="Email address" required>
+          <button type="submit">Subscribe</button>
+        </div>
+        <div class="sub-note"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg> Powered by Substack. Unsubscribe anytime.</div>
+        <div class="sub-msg" id="subMsg" role="status"></div>
+      </form>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap foot">
+    <div class="fbrand">
+      <a href="#hero" class="logo"><span class="logo-mark-img"></span> DASH HQ</a>
+      <p>The most trusted intelligence layer in Web3. Where real alpha meets real community.</p>
+      <div class="fsocials">
+        <a href="https://x.com/DASHHQX" target="_blank" rel="noopener" aria-label="Dash HQ on X"><svg viewBox="0 0 24 24"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg></a>
+        <a href="#join" aria-label="Join the Dash HQ Discord"><svg viewBox="0 0 24 24"><path d="M20.317 4.369a19.79 19.79 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.865-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.74 19.74 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.058a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.1 13.1 0 0 1-1.872-.892.077.077 0 0 1-.008-.128c.126-.094.252-.192.372-.291a.074.074 0 0 1 .078-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .079.009c.12.099.245.198.372.292a.077.077 0 0 1-.006.127c-.598.35-1.22.645-1.873.891a.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.84 19.84 0 0 0 6.002-3.03.077.077 0 0 0 .032-.056c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.028zM8.02 15.331c-1.183 0-2.157-1.086-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.332-.955 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.086-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.332-.946 2.418-2.157 2.418z"/></svg></a>
+        <a href="https://substack.com/@dashhq1" target="_blank" rel="noopener" aria-label="Dash HQ on Substack"><svg viewBox="0 0 24 24"><path d="M22.539 8.242H1.46V5.406h21.08zM1.46 10.812V24L12 18.11 22.54 24V10.812zM22.539 0H1.46v2.836h21.08z"/></svg></a>
+      </div>
+    </div>
+    <div class="fcols">
+      <div class="fcol"><h5>Community</h5><a href="#join">Apply Now</a><a href="#team">Team</a><a href="#about">About</a></div>
+      <div class="fcol"><h5>Resources</h5><a href="#blog">Research</a><a href="#faq">FAQ</a><a href="#subscribe">Newsletter</a></div>
+    </div>
+  </div>
+  <div class="foot-bottom">
+    <span class="cpy">© 2026 Dash HQ · Est. 2023. All rights reserved.</span>
+    <div class="foot-legal">
+      <button type="button" onclick="openLegal('terms')">Terms of Service</button>
+      <span class="sep">·</span>
+      <button type="button" onclick="openLegal('privacy')">Privacy Policy</button>
+    </div>
+  </div>
+</footer>
+
+<!-- ══ LEGAL MODALS ══
+     Plain-language starter policies tailored to Dash HQ (a Web3 community running a
+     private Discord + X + Substack newsletter). Have a lawyer review before launch;
+     replace the contact email with your real one. -->
+<div class="legal-ov" id="legalOv" onclick="if(event.target===this)closeLegal()">
+  <div class="legal-box" role="dialog" aria-modal="true" aria-labelledby="legalTitle">
+    <div class="legal-head">
+      <div>
+        <span class="eyebrow" id="legalEyebrow">Legal</span>
+        <h3 id="legalTitle">Terms of Service</h3>
+        <div class="upd" id="legalUpd">Last updated: July 6, 2026</div>
+      </div>
+      <button class="legal-x" onclick="closeLegal()" aria-label="Close">&times;</button>
+    </div>
+    <div class="legal-body" id="legalBody"></div>
+  </div>
+</div>
+
+
+
+<div id="researchModal" aria-hidden="true">
+  <button class="rm-close" onclick="closeResearch()" aria-label="Close research">&times;</button>
+  <div class="rm-scroll">
+    <div class="rv-grid" id="rvGrid">
+      <div class="rv-head"><span class="eyebrow" style="justify-content:center">The Research Vault</span><h2 class="sh disp-l">All Research.</h2></div>
+      <div class="rv-cards" id="rvCards"></div>
+    </div>
+    <div class="rv-article" id="rvArticle">
+      <div class="rv-backwrap"><button class="rv-back" onclick="showGrid()">← All research</button></div>
+      <article class="rv-panel" id="rvPanel"></article>
+    </div>
+  </div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
