@@ -15,6 +15,7 @@
     { "src": "/health",      "dest": "/api/index.py" },
     { "src": "/portal",      "dest": "/portal.html"  },
     { "src": "/portal.html", "dest": "/portal.html"  },
+    { "src": "/index.html",  "dest": "/", "status": 301 },
     { "src": "/",            "dest": "/index.html"   },
     { "src": "/(.*)",        "dest": "/$1"           }
   ]

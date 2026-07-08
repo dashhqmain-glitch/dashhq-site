@@ -173,13 +173,15 @@
   function cardHTML(p){return '<article class="post" role="button" tabindex="0" onclick="openPost(\''+p.id+'\')"><div class="thumb"><div class="glow"></div><div class="strip"></div></div><div class="pbody"><h3>'+p.title+'</h3><p class="pex">'+p.excerpt+'</p><div class="pmeta"><span>'+p.author+'</span><span class="sep">•</span><span>'+p.read+'</span><span class="sep">•</span><span>'+p.dateShort+'</span></div></div></article>';}
   function buildGrid(){cards.innerHTML=POSTS.map(cardHTML).join('');[].forEach.call(cards.children,function(el,i){el.style.animationDelay=(i*55)+'ms';});}
   function openModal(){modal.classList.add('open');modal.setAttribute('aria-hidden','false');document.body.style.overflow='hidden';}
-  window.openResearch=function(){buildGrid();article.classList.remove('on');grid.classList.add('on');openModal();modal.scrollTop=0;};
-  window.showGrid=function(){buildGrid();article.classList.remove('on');grid.classList.add('on');modal.scrollTop=0;};
+  window.openResearch=function(){buildGrid();article.classList.remove('on');grid.classList.add('on');openModal();requestAnimationFrame(function(){modal.scrollTop=0;});};
+  window.showGrid=function(){buildGrid();article.classList.remove('on');grid.classList.add('on');requestAnimationFrame(function(){modal.scrollTop=0;});};
   window.openPost=function(id){var p=null;for(var i=0;i<POSTS.length;i++){if(POSTS[i].id===id){p=POSTS[i];break;}}if(!p)return;
     var initial=p.author.replace(/[^a-zA-Z]/g,'').charAt(0).toUpperCase();
     var authorHTML=p.url?('<a href="'+p.url+'" target="_blank" rel="noopener" style="color:var(--sky)">'+p.author+'</a>'):p.author;
+    panel.style.animation='none';
     panel.innerHTML='<div class="rv-hero"><div class="g"></div><div class="s"></div></div><h1>'+p.title+'</h1><div class="rv-meta"><span>'+authorHTML+'</span><span class="sep">•</span><span>'+p.date+'</span><span class="sep">•</span><span>'+p.read+'</span></div><p class="rv-lede">'+p.excerpt+'</p><div class="rv-body">'+p.body+'</div><div class="rv-foot"><div class="av">'+initial+'</div><div><div style="color:#fff;font-weight:600">'+authorHTML+'</div><div style="font-size:12px;color:var(--muted)">Dash HQ Research</div></div></div>';
-    grid.classList.remove('on');article.classList.add('on');openModal();modal.scrollTop=0;};
+    grid.classList.remove('on');article.classList.add('on');openModal();
+    requestAnimationFrame(function(){panel.style.animation='';modal.scrollTop=0;});};
   window.closeResearch=function(){modal.classList.remove('open');modal.setAttribute('aria-hidden','true');document.body.style.overflow='';};
   // Intentional backdrop dismiss: close only on a deliberate tap on the empty
   // glass area — same element down+up, negligible movement (so scrolls, drags
