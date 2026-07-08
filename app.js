@@ -249,15 +249,26 @@
   if(window.matchMedia('(prefers-reduced-motion:reduce)').matches)return;
   var half=0,pos=0,paused=false,last=null;
   var marquee=track.parentElement;
+  // Prime a GPU layer before the loop starts
+  track.style.transform='translate3d(0,0,0)';
   if(window.matchMedia('(hover:hover)').matches){
     marquee.addEventListener('mouseenter',function(){paused=true;});
     marquee.addEventListener('mouseleave',function(){paused=false;});
   }
   function step(ts){
-    if(!half)half=track.scrollWidth/2;
+    if(!half){
+      half=track.scrollWidth/2;
+      // scrollWidth not ready yet (layout still pending) — retry next frame
+      if(half<200){half=0;last=null;requestAnimationFrame(step);return;}
+    }
     if(!last)last=ts;
     var dt=Math.min(ts-last,50);last=ts;
-    if(!paused){pos+=(half/48000)*dt;if(pos>=half)pos-=half;track.style.transform='translateX(-'+pos+'px)';}
+    if(!paused){
+      pos+=(half/48000)*dt;
+      if(pos>=half)pos-=half;
+      // translate3d forces GPU compositing on iOS Safari; translateX does not
+      track.style.transform='translate3d(-'+pos.toFixed(2)+'px,0,0)';
+    }
     requestAnimationFrame(step);
   }
   requestAnimationFrame(step);
