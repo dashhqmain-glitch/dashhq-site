@@ -1,7 +1,21 @@
 {
   "version": 2,
-  "rewrites": [
-    { "source": "/auth/:path*", "destination": "/api/index" },
-    { "source": "/health",      "destination": "/api/index" }
+  "builds": [
+    { "src": "api/index.py",  "use": "@vercel/python" },
+    { "src": "index.html",    "use": "@vercel/static" },
+    { "src": "portal.html",   "use": "@vercel/static" },
+    { "src": "styles.css",    "use": "@vercel/static" },
+    { "src": "portal.css",    "use": "@vercel/static" },
+    { "src": "app.js",        "use": "@vercel/static" },
+    { "src": "portal.js",     "use": "@vercel/static" },
+    { "src": "assets/**",     "use": "@vercel/static" }
+  ],
+  "routes": [
+    { "src": "/auth/(.*)",   "dest": "/api/index.py" },
+    { "src": "/health",      "dest": "/api/index.py" },
+    { "src": "/portal",      "dest": "/portal.html"  },
+    { "src": "/portal.html", "dest": "/portal.html"  },
+    { "src": "/",            "dest": "/index.html"   },
+    { "src": "/(.*)",        "dest": "/$1"           }
   ]
 }
