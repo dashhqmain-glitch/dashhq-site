@@ -1,8 +1,8 @@
 // ── Config ──────────────────────────────────────────────────────────────────
-// Automatically uses localhost in dev, production API in prod. No edits needed.
+// Localhost → local FastAPI server. Production → same domain (Vercel routes /auth/* to Python).
 const BACKEND_URL = ['localhost', '127.0.0.1'].includes(window.location.hostname)
   ? 'http://localhost:8000'
-  : 'https://api.dashhq.site';
+  : 'https://dashhq.site';
 const TOKEN_KEY = 'dashhq_citizen_token';
 
 // ── State machine ────────────────────────────────────────────────────────────
