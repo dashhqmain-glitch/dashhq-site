@@ -1,4 +1,5 @@
 {
+  "version": 2,
   "rewrites": [
     { "source": "/auth/:path*", "destination": "/api/index" },
     { "source": "/health",      "destination": "/api/index" }
