@@ -241,6 +241,23 @@
   place();
 })();
 
+/* ════ CLEAN HASH URLS — intercept every #anchor click site-wide ════ */
+(function(){
+  document.addEventListener('click',function(e){
+    var a=e.target.closest('a[href^="#"]');
+    if(!a)return;
+    var hash=a.getAttribute('href');
+    e.preventDefault();
+    if(hash&&hash.length>1){
+      var target=document.querySelector(hash);
+      if(target)target.scrollIntoView({behavior:'smooth'});
+    }else{
+      window.scrollTo({top:0,behavior:'smooth'});
+    }
+    history.replaceState(null,'','/');
+  });
+})();
+
 /* ════ LEGAL MODALS ════ */
 (function(){
   var CONTACT='dashhqmain@gmail.com';
