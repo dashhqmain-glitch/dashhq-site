@@ -179,6 +179,7 @@
     var initial=p.author.replace(/[^a-zA-Z]/g,'').charAt(0).toUpperCase();
     var authorHTML=p.url?('<a href="'+p.url+'" target="_blank" rel="noopener" style="color:var(--sky)">'+p.author+'</a>'):p.author;
     panel.style.animation='none';
+    void panel.offsetWidth;
     panel.innerHTML='<div class="rv-hero"><div class="g"></div><div class="s"></div></div><h1>'+p.title+'</h1><div class="rv-meta"><span>'+authorHTML+'</span><span class="sep">•</span><span>'+p.date+'</span><span class="sep">•</span><span>'+p.read+'</span></div><p class="rv-lede">'+p.excerpt+'</p><div class="rv-body">'+p.body+'</div><div class="rv-foot"><div class="av">'+initial+'</div><div><div style="color:#fff;font-weight:600">'+authorHTML+'</div><div style="font-size:12px;color:var(--muted)">Dash HQ Research</div></div></div>';
     grid.classList.remove('on');article.classList.add('on');openModal();
     requestAnimationFrame(function(){panel.style.animation='';modal.scrollTop=0;});};
