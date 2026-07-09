@@ -5,8 +5,9 @@
    .btn-g) IS restored below, scoped under #portalModal so it can't leak
    onto the main site's buttons but still keeps its original distinct style. */
 
-#portalModal{position:fixed;inset:0;z-index:320;display:none;overflow-y:auto;background:radial-gradient(ellipse 90% 55% at 50% -8%,rgba(27,66,255,.2),rgba(5,8,15,.97) 55%,#05080F 85%)}
+#portalModal{position:fixed;inset:0;z-index:320;display:none;overflow-y:auto;background:radial-gradient(ellipse 70% 45% at 50% -5%,rgba(27,66,255,.28),transparent 65%),#05080F}
 #portalModal.open{display:block;animation:rmIn .4s ease}
+#portalParticles{position:fixed;inset:0;z-index:0;pointer-events:none}
 
 #portalModal .btn{display:inline-flex;align-items:center;gap:9px;font-weight:600;font-size:15px;padding:14px 26px;border-radius:40px;cursor:pointer;border:1px solid transparent;transition:transform .15s,box-shadow .3s,background .3s}
 #portalModal .btn-p{background:var(--primary);color:#fff;box-shadow:0 10px 30px rgba(27,66,255,.45)}

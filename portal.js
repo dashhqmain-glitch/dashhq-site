@@ -11,7 +11,8 @@ function setState(s) {
 
   const demo = document.querySelector('.demo');
   if (!demo) return;
-  demo.classList.toggle('show', s === 'member' || s === 'notmember');
+  const portalOpen = document.getElementById('portalModal')?.classList.contains('open');
+  demo.classList.toggle('show', portalOpen && (s === 'member' || s === 'notmember'));
   demo.querySelectorAll('button[data-state]').forEach(el => {
     el.classList.toggle('active', el.dataset.state === s);
     if (el.dataset.state === 'member') el.classList.toggle('hide', s !== 'member');
@@ -78,6 +79,8 @@ function closePortal() {
   modal.classList.remove('open');
   modal.setAttribute('aria-hidden', 'true');
   document.body.style.overflow = '';
+  const demo = document.querySelector('.demo');
+  if (demo) demo.classList.remove('show');
 }
 (function () {
   const modal = document.getElementById('portalModal');
@@ -115,3 +118,44 @@ async function init() {
 }
 
 document.addEventListener('DOMContentLoaded', init);
+
+// ── Particle network (portal's own backdrop, only draws while open) ─────────
+(function () {
+  const c = document.getElementById('portalParticles');
+  const modal = document.getElementById('portalModal');
+  if (!c || !modal) return;
+  const x = c.getContext('2d');
+  let w, h, pts, raf;
+  function size() { w = c.width = innerWidth; h = c.height = innerHeight; }
+  function init() {
+    size();
+    const n = Math.min(64, Math.floor(w * h / 18000));
+    pts = [];
+    for (let i = 0; i < n; i++) pts.push({ x: Math.random() * w, y: Math.random() * h, vx: (Math.random() - .5) * .26, vy: (Math.random() - .5) * .26 });
+  }
+  function loop() {
+    if (modal.classList.contains('open')) {
+      x.clearRect(0, 0, w, h);
+      for (const p of pts) {
+        p.x += p.vx; p.y += p.vy;
+        if (p.x < 0 || p.x > w) p.vx *= -1;
+        if (p.y < 0 || p.y > h) p.vy *= -1;
+      }
+      for (let i = 0; i < pts.length; i++) {
+        for (let j = i + 1; j < pts.length; j++) {
+          const dx = pts[i].x - pts[j].x, dy = pts[i].y - pts[j].y, d = Math.hypot(dx, dy);
+          if (d < 130) {
+            x.strokeStyle = 'rgba(91,155,248,' + (.14 * (1 - d / 130)) + ')';
+            x.lineWidth = 1;
+            x.beginPath(); x.moveTo(pts[i].x, pts[i].y); x.lineTo(pts[j].x, pts[j].y); x.stroke();
+          }
+        }
+        x.fillStyle = 'rgba(120,160,255,.6)';
+        x.beginPath(); x.arc(pts[i].x, pts[i].y, 1.4, 0, 7); x.fill();
+      }
+    }
+    raf = requestAnimationFrame(loop);
+  }
+  init(); loop();
+  addEventListener('resize', () => { cancelAnimationFrame(raf); init(); loop(); });
+})();
