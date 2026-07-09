@@ -83,6 +83,13 @@ section{position:relative;z-index:2}
 .cube-stage{position:relative;width:min(620px,86vw);margin:54px auto 0;perspective:1300px;z-index:4}
 .cube-svg-el{width:100%;height:auto;display:block;cursor:grab;touch-action:none;will-change:transform;
   filter:drop-shadow(0 0 60px rgba(27,66,255,.7)) drop-shadow(0 0 120px rgba(27,66,255,.28))}
+/* Touch devices: no filter/perspective on the cube's 3D context — this
+   combination has proven unreliable on some real iOS Safari hardware
+   (see app.js's cube IIFE for the matching JS-side skip). */
+@media(hover:none){
+  .cube-stage{perspective:none}
+  .cube-svg-el{filter:none;will-change:auto}
+}
 .cube-corona{position:absolute;left:50%;bottom:-4%;width:70%;height:34%;transform:translateX(-50%);background:radial-gradient(ellipse 75% 100% at 50% 80%,rgba(27,66,255,.6),rgba(27,66,255,.18) 42%,transparent 75%);filter:blur(26px);z-index:-1}
 .cube-chip{position:absolute;z-index:6;background:rgba(8,12,28,.82);border:1px solid var(--border2);border-radius:14px;padding:12px 16px 12px 18px;backdrop-filter:blur(22px);box-shadow:0 18px 40px -18px rgba(0,0,0,.7);overflow:hidden}
 .cube-chip::before{content:"";position:absolute;left:0;top:0;bottom:0;width:3px;background:linear-gradient(var(--electric),var(--teal))}

@@ -103,10 +103,17 @@
   });
 })();
 
-/* ════ CUBE: drag + emerge-on-scroll ════ */
+/* ════ CUBE: drag + emerge-on-scroll (desktop only — see below for touch) ════ */
 (function(){
   const stage=document.getElementById('cubeStage'); if(!stage) return;
   const cube=stage.querySelector('.cube-svg-el'); if(!cube) return;
+  // Touch devices: skip the whole continuous-transform interactive loop.
+  // A heavy multi-gradient SVG getting its transform rewritten every frame
+  // forever (idle wobble, even at rest) has proven unreliable on some real
+  // iOS Safari devices — the cube silently fails to render at all on some
+  // hardware while working fine on others. Rendering it fully static on
+  // touch removes that whole risk category; desktop keeps the full effect.
+  if(window.matchMedia('(hover:none)').matches) return;
   let tx=0,ty=0,rx=0,ry=0, dtx=0,dty=0,drx=0,dry=0, dragging=false,sx=0,sy=0,bx=0,by=0, emerge=0, t=0;
   const LIM={tx:60,ty:44,rx:14,ry:20};
   const clamp=(v,m)=>v<-m?-m:(v>m?m:v);
