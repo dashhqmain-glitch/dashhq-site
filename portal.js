@@ -64,6 +64,37 @@ async function verifyToken(token) {
   }
 }
 
+// ── Portal overlay open/close (mirrors app.js's research-modal pattern) ──────
+function openPortal() {
+  const modal = document.getElementById('portalModal');
+  if (!modal) return;
+  modal.classList.add('open');
+  modal.setAttribute('aria-hidden', 'false');
+  document.body.style.overflow = 'hidden';
+}
+function closePortal() {
+  const modal = document.getElementById('portalModal');
+  if (!modal) return;
+  modal.classList.remove('open');
+  modal.setAttribute('aria-hidden', 'true');
+  document.body.style.overflow = '';
+}
+(function () {
+  const modal = document.getElementById('portalModal');
+  if (!modal) return;
+  // Same intentional-backdrop-dismiss logic as the research modal: close only
+  // on a deliberate tap on the empty glass area, never on the card/controls.
+  let downT = null, downX = 0, downY = 0;
+  modal.addEventListener('pointerdown', e => { downT = e.target; downX = e.clientX; downY = e.clientY; });
+  modal.addEventListener('pointerup', e => {
+    const t = e.target;
+    const dead = t === modal || t.classList.contains('rm-scroll');
+    const moved = Math.hypot(e.clientX - downX, e.clientY - downY);
+    if (dead && t === downT && moved < 8) closePortal();
+  });
+  window.addEventListener('keydown', e => { if (e.key === 'Escape' && modal.classList.contains('open')) closePortal(); });
+})();
+
 // ── Bootstrap: URL params → sessionStorage → idle ────────────────────────────
 async function init() {
   const params = new URLSearchParams(window.location.search);
@@ -73,24 +104,14 @@ async function init() {
   // Clean the URL so the token isn't bookmarkable
   if (token || error) history.replaceState({}, '', window.location.pathname);
 
-  if (error) { setState('prelogin'); return; }
-  if (token) { await verifyToken(token); return; }
+  if (error) { openPortal(); setState('prelogin'); return; }
+  if (token) { openPortal(); await verifyToken(token); return; }
 
   const saved = sessionStorage.getItem(TOKEN_KEY);
-  if (saved) { await verifyToken(saved); return; }
+  if (saved) { openPortal(); await verifyToken(saved); return; }
 
+  // Nothing to verify — leave the portal closed until the user opens it.
   setState('prelogin');
 }
 
 document.addEventListener('DOMContentLoaded', init);
-
-// ── Particle network ─────────────────────────────────────────────────────────
-(function(){
-  const c=document.getElementById('particles');if(!c)return;const x=c.getContext('2d');let w,h,pts,raf;
-  function size(){w=c.width=innerWidth;h=c.height=innerHeight;}
-  function init(){size();const n=Math.min(64,Math.floor(w*h/18000));pts=[];for(let i=0;i<n;i++)pts.push({x:Math.random()*w,y:Math.random()*h,vx:(Math.random()-.5)*.26,vy:(Math.random()-.5)*.26});}
-  function loop(){x.clearRect(0,0,w,h);for(const p of pts){p.x+=p.vx;p.y+=p.vy;if(p.x<0||p.x>w)p.vx*=-1;if(p.y<0||p.y>h)p.vy*=-1;}
-    for(let i=0;i<pts.length;i++){for(let j=i+1;j<pts.length;j++){const dx=pts[i].x-pts[j].x,dy=pts[i].y-pts[j].y,d=Math.hypot(dx,dy);if(d<130){x.strokeStyle='rgba(91,155,248,'+(.14*(1-d/130))+')';x.lineWidth=1;x.beginPath();x.moveTo(pts[i].x,pts[i].y);x.lineTo(pts[j].x,pts[j].y);x.stroke();}}x.fillStyle='rgba(120,160,255,.6)';x.beginPath();x.arc(pts[i].x,pts[i].y,1.4,0,7);x.fill();}
-    raf=requestAnimationFrame(loop);}
-  init();loop();addEventListener('resize',()=>{cancelAnimationFrame(raf);init();loop();});
-})();

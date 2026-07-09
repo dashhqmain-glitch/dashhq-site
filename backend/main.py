@@ -60,7 +60,7 @@ async def discord_login():
 @app.get("/auth/discord/callback")
 @limiter.limit("10/minute")
 async def discord_callback(request: Request, code: str = None, error: str = None):
-    portal = f"{settings.frontend_url}/portal"
+    portal = f"{settings.frontend_url}/"
 
     if error or not code:
         return RedirectResponse(f"{portal}?error=access_denied")

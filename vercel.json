@@ -14,8 +14,8 @@
     { "src": "/auth/(.*)",   "dest": "/api/index.py" },
     { "src": "/cron/(.*)",   "dest": "/api/index.py" },
     { "src": "/health",      "dest": "/api/index.py" },
-    { "src": "/portal",      "dest": "/portal.html"  },
-    { "src": "/portal.html", "dest": "/portal", "status": 301 },
+    { "src": "/portal",      "dest": "/", "status": 301 },
+    { "src": "/portal.html", "dest": "/", "status": 301 },
     { "src": "/index.html",  "dest": "/", "status": 301 },
     { "src": "/",            "dest": "/index.html"   },
     { "src": "/(.*)",        "dest": "/$1"           }
