@@ -8,6 +8,7 @@ const TOKEN_KEY = 'dashhq_citizen_token';
 // ── State machine ────────────────────────────────────────────────────────────
 function setState(s) {
   document.querySelectorAll('.state').forEach(el => el.classList.toggle('on', el.dataset.state === s));
+  document.querySelectorAll('.demo button[data-state]').forEach(el => el.classList.toggle('active', el.dataset.state === s));
 }
 
 // Kept for the dev demo bar at the bottom of the page.

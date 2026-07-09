@@ -136,7 +136,7 @@ async def discord_callback(request: Request, code: str = None, error: str = None
             "avatar": _avatar_url(user),
             "is_member": is_member,
             "tier": tier,
-            "joined": joined_year or "2023",
+            "joined": joined_year or "—",
             "iat": int(time.time()),
             "exp": int(time.time()) + 3600,
         }

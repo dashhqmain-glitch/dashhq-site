@@ -80,7 +80,11 @@
   </div>
 </main>
 
-<div class="demo"><b>DEMO</b> <button onclick="setState('member')">Member</button> <button onclick="setState('notmember')">Not member</button> <button onclick="setState('prelogin')">Reset</button></div>
+<div class="demo">
+  <button data-state="member" onclick="setState('member')">Citizen</button>
+  <button data-state="notmember" onclick="setState('notmember')">Not member</button>
+  <button data-state="prelogin" onclick="setState('prelogin')">Reset</button>
+</div>
 
 
 <script src="portal.js"></script>

@@ -74,6 +74,7 @@ nav{position:fixed;top:0;left:0;right:0;z-index:60;display:flex;align-items:cent
 .demo b{color:var(--muted2);letter-spacing:.1em}
 .demo button{font-family:var(--mono);font-size:11px;color:var(--muted2);background:transparent;border:1px solid var(--border);border-radius:20px;padding:5px 11px;cursor:pointer;transition:all .2s}
 .demo button:hover{color:#fff;border-color:var(--electric)}
+.demo button.active{color:#fff;border-color:var(--electric);background:rgba(27,66,255,.28)}
 .portal-pfp{width:72px;height:72px;border-radius:50%;margin:8px auto 14px;background:conic-gradient(from 180deg,var(--electric),var(--teal),var(--primary),var(--electric));padding:2px}
 .portal-pfp img{display:block;width:100%;height:100%;border-radius:50%;object-fit:cover;background:#0a1120}
 @media(max-width:480px){.portal{padding:110px 16px 70px}nav{padding:14px 18px}.auth{padding:26px 20px}}
