@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     discord_redirect_uri: str = ""
     discord_guild_id: str = ""
     jwt_secret: str = "not_set"
-    frontend_url: str = "https://dashhq.site"
+    frontend_url: str = "https://www.dashhq.site"
 
     discord_bot_token: Optional[str] = None
     citizen_role_id: Optional[str] = None

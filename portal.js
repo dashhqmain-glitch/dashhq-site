@@ -2,7 +2,7 @@
 // Localhost → local FastAPI server. Production → same domain (Vercel routes /auth/* to Python).
 const BACKEND_URL = ['localhost', '127.0.0.1'].includes(window.location.hostname)
   ? 'http://localhost:8000'
-  : 'https://dashhq.site';
+  : 'https://www.dashhq.site';
 const TOKEN_KEY = 'dashhq_citizen_token';
 
 // ── State machine ────────────────────────────────────────────────────────────
