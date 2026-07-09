@@ -1,12 +1,17 @@
-/* Portal-specific styles only — index.html's styles.css already provides the
-   shared reset, :root variables, nav, logo, .fx/#particles/.glow background,
-   .eyebrow, and .btn/.btn-p/.btn-g button styles. Redefining any of those
-   here would silently override styles.css on the main page (later
-   stylesheet wins for equal specificity), so this file only contains
-   selectors that don't exist anywhere in styles.css. */
+/* Portal-specific styles — index.html's styles.css already provides the
+   shared reset, :root variables, nav, logo, and .fx/#particles/.glow
+   background, so those aren't redefined here (that would silently override
+   styles.css on the main page). The portal's own button look (.btn/.btn-p/
+   .btn-g) IS restored below, scoped under #portalModal so it can't leak
+   onto the main site's buttons but still keeps its original distinct style. */
 
 #portalModal{position:fixed;inset:0;z-index:320;display:none;overflow-y:auto;background:radial-gradient(ellipse 90% 55% at 50% -8%,rgba(27,66,255,.22),rgba(5,8,15,.5));-webkit-backdrop-filter:blur(22px) saturate(1.2);backdrop-filter:blur(22px) saturate(1.2)}
 #portalModal.open{display:block;animation:rmIn .4s ease}
+
+#portalModal .btn{display:inline-flex;align-items:center;gap:9px;font-weight:600;font-size:15px;padding:14px 26px;border-radius:40px;cursor:pointer;border:1px solid transparent;transition:transform .15s,box-shadow .3s,background .3s}
+#portalModal .btn-p{background:var(--primary);color:#fff;box-shadow:0 10px 30px rgba(27,66,255,.45)}
+#portalModal .btn-g{background:rgba(255,255,255,.05);border-color:var(--border2);color:var(--ghost)}
+#portalModal .btn:active{transform:scale(.98)}
 
 .portal{position:relative;z-index:5;min-height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px 24px 60px;text-align:center}
 .p-h{font-family:var(--display);font-weight:700;font-size:clamp(34px,5vw,62px);line-height:1.04;margin:18px 0 0;letter-spacing:-.02em}
@@ -52,4 +57,12 @@
 
 .portal-pfp{width:72px;height:72px;border-radius:50%;margin:8px auto 14px;background:conic-gradient(from 180deg,var(--electric),var(--teal),var(--primary),var(--electric));padding:2px}
 .portal-pfp img{display:block;width:100%;height:100%;border-radius:50%;object-fit:cover;background:#0a1120}
+
+.demo{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);z-index:340;display:none;gap:8px;align-items:center;font-family:var(--mono);font-size:11px;color:var(--muted);background:rgba(8,12,24,.8);border:1px solid var(--border);border-radius:30px;padding:7px 12px;backdrop-filter:blur(10px)}
+.demo.show{display:flex}
+.demo button{font-family:var(--mono);font-size:11px;color:var(--muted2);background:transparent;border:1px solid var(--border);border-radius:20px;padding:5px 11px;cursor:pointer;transition:all .2s}
+.demo button:hover{color:#fff;border-color:var(--electric)}
+.demo button.active{color:#fff;border-color:var(--electric);background:rgba(27,66,255,.28)}
+.demo button.hide{display:none}
+
 @media(max-width:480px){.portal{padding:16px 16px 40px}.auth{padding:26px 20px}}
