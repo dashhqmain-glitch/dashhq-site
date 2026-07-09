@@ -10,6 +10,7 @@ function setState(s) {
   document.querySelectorAll('.state').forEach(el => el.classList.toggle('on', el.dataset.state === s));
 
   const demo = document.querySelector('.demo');
+  if (!demo) return;
   demo.classList.toggle('show', s === 'member' || s === 'notmember');
   demo.querySelectorAll('button[data-state]').forEach(el => {
     el.classList.toggle('active', el.dataset.state === s);
