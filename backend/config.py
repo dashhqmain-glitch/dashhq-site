@@ -11,8 +11,11 @@ class Settings(BaseSettings):
     frontend_url: str = "https://dashhq.site"
 
     discord_bot_token: Optional[str] = None
-    tier_gold_role_id: Optional[str] = None
-    tier_silver_role_id: Optional[str] = None
+    citizen_role_id: Optional[str] = None
+
+    supabase_url: str = ""
+    supabase_service_role_key: str = ""
+    cron_secret: str = ""
 
     model_config = {"env_file": ".env"}
 

@@ -1,5 +1,6 @@
 import time
 import urllib.parse
+from datetime import datetime, timezone
 
 import httpx
 import jwt
@@ -93,7 +94,7 @@ async def discord_callback(request: Request, code: str = None, error: str = None
         user = user_res.json()
         user_id = user["id"]
 
-        # 3. Check guild membership + roles
+        # 3. Check guild membership + Citizen role
         is_member = False
         tier = "CITIZEN"
         nick = None
@@ -105,17 +106,18 @@ async def discord_callback(request: Request, code: str = None, error: str = None
                 headers={"Authorization": f"Bot {settings.discord_bot_token}"},
             )
             if member_res.status_code == 200:
-                is_member = True
                 m = member_res.json()
                 roles = m.get("roles", [])
                 nick = m.get("nick")
                 raw_joined = m.get("joined_at", "")
                 joined_year = raw_joined[:4] if raw_joined else None
 
-                if settings.tier_gold_role_id and settings.tier_gold_role_id in roles:
-                    tier = "GOLD TIER"
-                elif settings.tier_silver_role_id and settings.tier_silver_role_id in roles:
-                    tier = "SILVER TIER"
+                # Membership requires holding the Citizen role, not just guild presence.
+                is_member = (
+                    settings.citizen_role_id in roles
+                    if settings.citizen_role_id
+                    else True
+                )
         else:
             guilds_res = await client.get(
                 f"{DISCORD_API}/users/@me/guilds",
@@ -152,6 +154,98 @@ async def auth_me(token: str = Query(...)):
         raise HTTPException(status_code=401, detail="Token expired")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
+
+
+async def _fetch_all_guild_members(client: httpx.AsyncClient) -> list[dict]:
+    members = []
+    after = "0"
+    while True:
+        res = await client.get(
+            f"{DISCORD_API}/guilds/{settings.discord_guild_id}/members",
+            params={"limit": 1000, "after": after},
+            headers={"Authorization": f"Bot {settings.discord_bot_token}"},
+        )
+        res.raise_for_status()
+        page = res.json()
+        if not page:
+            break
+        members.extend(page)
+        after = page[-1]["user"]["id"]
+        if len(page) < 1000:
+            break
+    return members
+
+
+def _member_row(m: dict) -> dict:
+    user = m["user"]
+    roles = m.get("roles", [])
+    nick = m.get("nick")
+    display_name = nick or user.get("global_name") or user["username"]
+    return {
+        "discord_id": user["id"],
+        "username": user["username"],
+        "global_name": user.get("global_name"),
+        "nickname": nick,
+        "display_name": display_name,
+        "avatar_url": _avatar_url(user),
+        "roles": roles,
+        "tier": "CITIZEN",
+        "joined_at": m.get("joined_at"),
+        "is_active": True,
+        "left_at": None,
+    }
+
+
+async def _supabase_upsert_members(client: httpx.AsyncClient, rows: list[dict]) -> None:
+    headers = {
+        "apikey": settings.supabase_service_role_key,
+        "Authorization": f"Bearer {settings.supabase_service_role_key}",
+        "Content-Type": "application/json",
+        "Prefer": "resolution=merge-duplicates,return=minimal",
+    }
+    batch_size = 500
+    for i in range(0, len(rows), batch_size):
+        batch = rows[i : i + batch_size]
+        res = await client.post(
+            f"{settings.supabase_url}/rest/v1/members",
+            headers=headers,
+            json=batch,
+        )
+        res.raise_for_status()
+
+
+async def _supabase_mark_departed(client: httpx.AsyncClient, run_started_at: str) -> None:
+    # Any row still marked active that this run didn't touch has left the guild.
+    headers = {
+        "apikey": settings.supabase_service_role_key,
+        "Authorization": f"Bearer {settings.supabase_service_role_key}",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal",
+    }
+    res = await client.patch(
+        f"{settings.supabase_url}/rest/v1/members",
+        headers=headers,
+        params={"is_active": "eq.true", "updated_at": f"lt.{run_started_at}"},
+        json={"is_active": False, "left_at": datetime.now(timezone.utc).isoformat()},
+    )
+    res.raise_for_status()
+
+
+@app.get("/cron/sync-members")
+async def sync_members(request: Request):
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    run_started_at = datetime.now(timezone.utc).isoformat()
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        guild_members = await _fetch_all_guild_members(client)
+        rows = [_member_row(m) for m in guild_members if not m["user"].get("bot")]
+        await _supabase_upsert_members(client, rows)
+        await _supabase_mark_departed(client, run_started_at)
+
+    return {"synced": len(rows), "run_started_at": run_started_at}
 
 
 @app.get("/health")

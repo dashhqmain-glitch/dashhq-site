@@ -1,7 +1,7 @@
 {
   "version": 2,
   "builds": [
-    { "src": "api/index.py",  "use": "@vercel/python" },
+    { "src": "api/index.py",  "use": "@vercel/python", "config": { "maxDuration": 60 } },
     { "src": "index.html",    "use": "@vercel/static" },
     { "src": "portal.html",   "use": "@vercel/static" },
     { "src": "styles.css",    "use": "@vercel/static" },
@@ -12,11 +12,15 @@
   ],
   "routes": [
     { "src": "/auth/(.*)",   "dest": "/api/index.py" },
+    { "src": "/cron/(.*)",   "dest": "/api/index.py" },
     { "src": "/health",      "dest": "/api/index.py" },
     { "src": "/portal",      "dest": "/portal.html"  },
     { "src": "/portal.html", "dest": "/portal", "status": 301 },
     { "src": "/index.html",  "dest": "/", "status": 301 },
     { "src": "/",            "dest": "/index.html"   },
     { "src": "/(.*)",        "dest": "/$1"           }
+  ],
+  "crons": [
+    { "path": "/cron/sync-members", "schedule": "0 6 * * *" }
   ]
 }
