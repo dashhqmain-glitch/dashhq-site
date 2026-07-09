@@ -1,18 +1,3 @@
-/* ════ X (TWITTER) DEEP LINK — open the native app if installed, else web ════ */
-function openX(e, handle) {
-  if (e) e.preventDefault();
-  var web = 'https://x.com/' + handle;
-  var isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
-  if (!isMobile) { window.open(web, '_blank', 'noopener'); return false; }
-  var fallback = setTimeout(function () { window.location = web; }, 700);
-  window.addEventListener('blur', function onBlur() {
-    clearTimeout(fallback);
-    window.removeEventListener('blur', onBlur);
-  });
-  window.location = 'twitter://user?screen_name=' + handle;
-  return false;
-}
-
 /* ════ PARTICLE NETWORK ════ */
 (function(){
   const c=document.getElementById('particles'); if(!c) return;
