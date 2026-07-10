@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import re
 import time
 import urllib.parse
@@ -8,7 +9,7 @@ import httpx
 import jwt
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 from nacl.exceptions import BadSignatureError
 from nacl.signing import VerifyKey
 from pydantic import BaseModel, field_validator
@@ -18,11 +19,24 @@ from slowapi.util import get_remote_address
 
 from config import settings
 
+logger = logging.getLogger("dashhq")
+
 limiter = Limiter(key_func=get_remote_address)
 
 app = FastAPI(title="Dash HQ API")
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+
+# Backup net: any route that raises something we didn't explicitly plan for
+# (a third-party API changing shape, a network hiccup mid-request, etc.)
+# lands here instead of crashing the function or leaking a raw traceback.
+# HTTPException and validation errors already have their own clean handling
+# in FastAPI, so this only catches genuinely unexpected failures.
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(request: Request, exc: Exception):
+    logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+    return JSONResponse(status_code=500, content={"error": "Something went wrong. Please try again."})
 
 app.add_middleware(
     CORSMiddleware,
@@ -80,6 +94,18 @@ async def discord_callback(request: Request, code: str = None, error: str = None
     if error or not code:
         return RedirectResponse(f"{portal}?error=access_denied")
 
+    try:
+        return await _discord_callback_flow(code)
+    except Exception:
+        # Any surprise here (Discord API hiccup, unexpected response shape)
+        # should bounce the user back to the site with a clear error state,
+        # not strand them on a raw JSON crash page mid-login.
+        logger.exception("Discord OAuth callback failed")
+        return RedirectResponse(f"{portal}?error=server_error")
+
+
+async def _discord_callback_flow(code: str) -> RedirectResponse:
+    portal = f"{settings.frontend_url}/"
     async with httpx.AsyncClient() as client:
         # 1. Exchange code for access token
         token_res = await client.post(
@@ -416,33 +442,38 @@ async def submit_application(request: Request, application: ApplicationIn):
 
         # Notify the team via a bot message with Accept/Decline buttons. If this
         # fails for any reason, the application is still safely saved above —
-        # we don't want a Discord hiccup to lose someone's submission.
+        # we don't want a Discord hiccup to lose someone's submission, or to
+        # make the applicant see an error when their submission went through.
         if settings.discord_bot_token and settings.discord_applications_channel_id:
-            components = [{
-                "type": 1,
-                "components": [
-                    {"type": 2, "style": 3, "label": "Accept", "custom_id": f"accept:{saved['id']}"},
-                    {"type": 2, "style": 4, "label": "Decline", "custom_id": f"decline:{saved['id']}"},
-                    _x_profile_button(saved["x_profile"]),
-                ],
-            }]
-            msg_res = await _discord_post_with_retry(
-                client,
-                f"{DISCORD_API}/channels/{settings.discord_applications_channel_id}/messages",
-                {"Authorization": f"Bot {settings.discord_bot_token}"},
-                {"embeds": [_application_embed(saved)], "components": components},
-            )
-            if msg_res.status_code < 300:
-                msg = msg_res.json()
-                await client.patch(
-                    f"{settings.supabase_url}/rest/v1/applications",
-                    headers=_supabase_headers(prefer="return=minimal"),
-                    params={"id": f"eq.{saved['id']}"},
-                    json={
-                        "discord_message_id": msg["id"],
-                        "discord_channel_id": settings.discord_applications_channel_id,
-                    },
+            try:
+                components = [{
+                    "type": 1,
+                    "components": [
+                        {"type": 2, "style": 3, "label": "Accept", "custom_id": f"accept:{saved['id']}"},
+                        {"type": 2, "style": 4, "label": "Decline", "custom_id": f"decline:{saved['id']}"},
+                        _x_profile_button(saved["x_profile"]),
+                    ],
+                }]
+                msg_res = await _discord_post_with_retry(
+                    client,
+                    f"{DISCORD_API}/channels/{settings.discord_applications_channel_id}/messages",
+                    {"Authorization": f"Bot {settings.discord_bot_token}"},
+                    {"embeds": [_application_embed(saved)], "components": components},
                 )
+                if msg_res.status_code < 300:
+                    msg = msg_res.json()
+                    patch_res = await client.patch(
+                        f"{settings.supabase_url}/rest/v1/applications",
+                        headers=_supabase_headers(prefer="return=minimal"),
+                        params={"id": f"eq.{saved['id']}"},
+                        json={
+                            "discord_message_id": msg["id"],
+                            "discord_channel_id": settings.discord_applications_channel_id,
+                        },
+                    )
+                    patch_res.raise_for_status()
+            except (httpx.HTTPError, KeyError, ValueError):
+                logger.exception("Discord notification failed for application %s", saved.get("id"))
 
     return {"status": "received"}
 
@@ -485,27 +516,37 @@ async def discord_interactions(request: Request):
     reviewer = member_user.get("global_name") or member_user.get("username", "someone")
     status = "accepted" if action == "accept" else "declined"
 
-    async with httpx.AsyncClient(timeout=15) as client:
-        res = await client.get(
-            f"{settings.supabase_url}/rest/v1/applications",
-            headers=_supabase_headers(),
-            params={"id": f"eq.{app_id}", "select": "*"},
-        )
-        rows = res.json()
-        if not rows:
-            return {"type": 4, "data": {"content": "Application not found.", "flags": 64}}
-        application = rows[0]
+    # A Supabase hiccup here shouldn't surface as a broken interaction with
+    # no readable message — fall back to a clear ephemeral reply so the mod
+    # knows to just click the button again, instead of Discord showing
+    # "This interaction failed" with no explanation.
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            res = await client.get(
+                f"{settings.supabase_url}/rest/v1/applications",
+                headers=_supabase_headers(),
+                params={"id": f"eq.{app_id}", "select": "*"},
+            )
+            res.raise_for_status()
+            rows = res.json()
+            if not rows:
+                return {"type": 4, "data": {"content": "Application not found.", "flags": 64}}
+            application = rows[0]
 
-        await client.patch(
-            f"{settings.supabase_url}/rest/v1/applications",
-            headers=_supabase_headers(prefer="return=minimal"),
-            params={"id": f"eq.{app_id}"},
-            json={
-                "status": status,
-                "reviewed_by": reviewer,
-                "reviewed_at": datetime.now(timezone.utc).isoformat(),
-            },
-        )
+            patch_res = await client.patch(
+                f"{settings.supabase_url}/rest/v1/applications",
+                headers=_supabase_headers(prefer="return=minimal"),
+                params={"id": f"eq.{app_id}"},
+                json={
+                    "status": status,
+                    "reviewed_by": reviewer,
+                    "reviewed_at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+            patch_res.raise_for_status()
+    except (httpx.HTTPError, KeyError, IndexError):
+        logger.exception("Discord interaction failed for application %s", app_id)
+        return {"type": 4, "data": {"content": "Something went wrong saving that — please try the button again.", "flags": 64}}
 
     # Accept/Decline buttons are done their job and go away, but the X
     # profile link stays on the message permanently so the team can always
@@ -542,6 +583,15 @@ GAS_CHAINS = {
 # hiccup serves the last known price instead of an error.
 _PRICE_CACHE: dict[str, tuple[float, dict]] = {}
 _PRICE_TTL = 20  # seconds
+_CACHE_MAX_SIZE = 500  # generous for this app's real traffic; just a backstop
+
+
+def _cap_cache(cache: dict) -> None:
+    # A warm serverless instance can live for a while — this is a cheap
+    # backstop against unbounded growth, not a real eviction policy. A full
+    # reset is fine since every entry is trivially re-fetchable.
+    if len(cache) > _CACHE_MAX_SIZE:
+        cache.clear()
 
 
 async def _get_coingecko_prices(client: httpx.AsyncClient, ids: list[str]) -> dict[str, dict]:
@@ -561,6 +611,7 @@ async def _get_coingecko_prices(client: httpx.AsyncClient, ids: list[str]) -> di
             for coin_id, d in res.json().items():
                 if d and "usd" in d:
                     _PRICE_CACHE[coin_id] = (now, d)
+            _cap_cache(_PRICE_CACHE)
         except httpx.HTTPError:
             pass  # fall through — serve whatever's cached, even if stale
     return {i: _PRICE_CACHE[i][1] for i in ids if i in _PRICE_CACHE}
@@ -619,11 +670,15 @@ async def toolkit_ticker(request: Request, symbols: str = Query(...)):
             for sym, res in zip(to_resolve, results):
                 if isinstance(res, Exception) or res.status_code != 200:
                     continue
-                coins = res.json().get("coins") or []
+                try:
+                    coins = res.json().get("coins") or []
+                except ValueError:
+                    continue  # malformed body for this one symbol — skip it, don't fail the batch
                 exact = next((c for c in coins if (c.get("symbol") or "").upper() == sym), None)
                 pick = exact or (coins[0] if coins else None)
                 if pick:
                     _COIN_ID_CACHE[sym] = pick["id"]
+            _cap_cache(_COIN_ID_CACHE)
 
         ids_by_symbol = {s: _COIN_ID_CACHE[s] for s in syms if s in _COIN_ID_CACHE}
         out: dict[str, dict] = {s: {"error": True} for s in syms}
@@ -677,10 +732,9 @@ async def rug_check(request: Request, payload: RugCheckIn):
                 params={"address": payload.address, "chainID": payload.chain_id},
             )
             res.raise_for_status()
-        except httpx.HTTPError:
+            data = res.json()
+        except (httpx.HTTPError, ValueError):
             raise HTTPException(status_code=502, detail="Could not reach the honeypot scanner")
-
-    data = res.json()
     honeypot = data.get("honeypotResult") or {}
     simulation = data.get("simulationResult") or {}
     contract = data.get("contractCode") or {}
