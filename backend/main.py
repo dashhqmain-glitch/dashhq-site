@@ -330,6 +330,14 @@ def _trunc(s: str, n: int = 1000) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
+def _x_profile_button(x_profile: str) -> dict:
+    # A Link-style button (style 5) — Discord opens the URL directly on
+    # click, no interaction/custom_id involved. Kept in the message's
+    # components permanently, including after Accept/Decline replaces the
+    # other buttons, so the team can always reach the applicant's profile.
+    return {"type": 2, "style": 5, "label": "View X Profile", "url": x_profile}
+
+
 def _application_embed(app_row: dict, status: str = "pending", reviewer: str = None) -> dict:
     color = {"pending": 0x1B42FF, "accepted": 0x10B981, "declined": 0xEF4444}[status]
     footer = f"Application ID: {app_row['id']}"
@@ -401,6 +409,7 @@ async def submit_application(request: Request, application: ApplicationIn):
                 "components": [
                     {"type": 2, "style": 3, "label": "Accept", "custom_id": f"accept:{saved['id']}"},
                     {"type": 2, "style": 4, "label": "Decline", "custom_id": f"decline:{saved['id']}"},
+                    _x_profile_button(saved["x_profile"]),
                 ],
             }]
             msg_res = await _discord_post_with_retry(
@@ -484,23 +493,17 @@ async def discord_interactions(request: Request):
             },
         )
 
-        if action == "accept":
-            # Follow-up message via the interaction's own webhook token — the
-            # applicant's info + a direct link to their X profile, so the team
-            # can go send the invite immediately.
-            followup_embed = {
-                "title": f"{application['name']} — Ready to invite",
-                "description": f"[Open X profile]({application['x_profile']})",
-                "color": 0x10B981,
-            }
-            await client.post(
-                f"{DISCORD_API}/webhooks/{payload['application_id']}/{payload['token']}",
-                json={"embeds": [followup_embed]},
-            )
+    # Accept/Decline buttons are done their job and go away, but the X
+    # profile link stays on the message permanently so the team can always
+    # reach the applicant, whatever the decision.
+    updated_components = [{"type": 1, "components": [_x_profile_button(application["x_profile"])]}]
 
     return {
         "type": 7,  # UPDATE_MESSAGE — edits the original message in place
-        "data": {"embeds": [_application_embed(application, status=status, reviewer=reviewer)], "components": []},
+        "data": {
+            "embeds": [_application_embed(application, status=status, reviewer=reviewer)],
+            "components": updated_components,
+        },
     }
 
 
