@@ -378,24 +378,50 @@ def _x_profile_button(x_profile: str) -> dict:
     return {"type": 2, "style": 5, "label": "View X Profile", "url": x_profile}
 
 
-def _application_embed(app_row: dict, status: str = "pending", reviewer: str = None) -> dict:
+def _application_embed(app_row: dict, status: str = "pending", reviewer: str = None, invite_url: str = None) -> dict:
     color = {"pending": 0x1B42FF, "accepted": 0x10B981, "declined": 0xEF4444}[status]
     footer = f"Application ID: {app_row['id']}"
     if status != "pending":
         icon = "✅" if status == "accepted" else "❌"
         footer = f"{icon} {status.capitalize()} by {reviewer} · {footer}"
+    fields = [
+        {"name": "Name / Alias", "value": _trunc(app_row["name"]), "inline": True},
+        {"name": "X Profile", "value": _trunc(app_row["x_profile"]), "inline": True},
+        {"name": "Intro & Role", "value": _trunc(app_row["intro"]), "inline": False},
+        {"name": "Communities", "value": _trunc(app_row["communities"]), "inline": False},
+        {"name": "Adding Value", "value": _trunc(app_row["value"]), "inline": False},
+    ]
+    if invite_url:
+        # Plain text, not a button, so it can just be selected and copied
+        # straight out of the embed to hand to the applicant.
+        fields.append({"name": "Invite Link (one-time use)", "value": invite_url, "inline": False})
     return {
         "title": f"New Citizenship Application — {app_row['name']}",
         "color": color,
-        "fields": [
-            {"name": "Name / Alias", "value": _trunc(app_row["name"]), "inline": True},
-            {"name": "X Profile", "value": _trunc(app_row["x_profile"]), "inline": True},
-            {"name": "Intro & Role", "value": _trunc(app_row["intro"]), "inline": False},
-            {"name": "Communities", "value": _trunc(app_row["communities"]), "inline": False},
-            {"name": "Adding Value", "value": _trunc(app_row["value"]), "inline": False},
-        ],
+        "fields": fields,
         "footer": {"text": footer},
     }
+
+
+async def _create_one_time_invite(client: httpx.AsyncClient) -> str | None:
+    # Single-use, single-person invite for a freshly accepted applicant.
+    # Discord disables the code itself once max_uses is hit — no cleanup
+    # needed on our end. Not fatal if this fails (missing permission, channel
+    # not configured, etc.) — the accept action itself should still succeed.
+    if not settings.discord_invite_channel_id:
+        return None
+    try:
+        res = await client.post(
+            f"{DISCORD_API}/channels/{settings.discord_invite_channel_id}/invites",
+            headers={"Authorization": f"Bot {settings.discord_bot_token}"},
+            json={"max_age": 604800, "max_uses": 1, "unique": True},  # 7-day window, one use
+        )
+        res.raise_for_status()
+        code = res.json()["code"]
+        return f"https://discord.gg/{code}"
+    except (httpx.HTTPError, KeyError, ValueError):
+        logger.exception("Failed to create one-time Discord invite")
+        return None
 
 
 async def _discord_post_with_retry(
@@ -544,6 +570,10 @@ async def discord_interactions(request: Request):
                 },
             )
             patch_res.raise_for_status()
+
+            invite_url = None
+            if status == "accepted" and settings.discord_bot_token:
+                invite_url = await _create_one_time_invite(client)
     except (httpx.HTTPError, KeyError, IndexError):
         logger.exception("Discord interaction failed for application %s", app_id)
         return {"type": 4, "data": {"content": "Something went wrong saving that — please try the button again.", "flags": 64}}
@@ -556,7 +586,7 @@ async def discord_interactions(request: Request):
     return {
         "type": 7,  # UPDATE_MESSAGE — edits the original message in place
         "data": {
-            "embeds": [_application_embed(application, status=status, reviewer=reviewer)],
+            "embeds": [_application_embed(application, status=status, reviewer=reviewer, invite_url=invite_url)],
             "components": updated_components,
         },
     }

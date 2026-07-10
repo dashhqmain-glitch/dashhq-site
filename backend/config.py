@@ -19,6 +19,7 @@ class Settings(BaseSettings):
 
     discord_public_key: str = ""
     discord_applications_channel_id: str = ""
+    discord_invite_channel_id: str = ""  # channel accepted citizens land in
 
     model_config = {"env_file": ".env"}
 
