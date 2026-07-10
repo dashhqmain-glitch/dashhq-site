@@ -34,3 +34,29 @@ create trigger members_set_updated_at
 -- The backend talks to Supabase using the service_role key, which bypasses
 -- RLS automatically, so this table doesn't need any policies to still work.
 alter table members enable row level security;
+
+create table if not exists applications (
+  id                  uuid primary key default gen_random_uuid(),
+  name                text not null,
+  x_profile           text not null,
+  intro               text not null,
+  communities         text not null,
+  value               text not null,
+  followed_team       boolean not null default false,
+  status              text not null default 'pending', -- pending | accepted | declined
+  reviewed_by         text,
+  reviewed_at         timestamptz,
+  discord_channel_id  text,
+  discord_message_id  text,
+  submitted_at        timestamptz not null default now(),
+  updated_at          timestamptz not null default now()
+);
+
+create index if not exists applications_status_idx on applications (status);
+
+drop trigger if exists applications_set_updated_at on applications;
+create trigger applications_set_updated_at
+  before update on applications
+  for each row execute function set_updated_at();
+
+alter table applications enable row level security;

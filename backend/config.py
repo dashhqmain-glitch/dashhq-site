@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     supabase_service_role_key: str = ""
     cron_secret: str = ""
 
+    discord_public_key: str = ""
+    discord_applications_channel_id: str = ""
+
     model_config = {"env_file": ".env"}
 
 

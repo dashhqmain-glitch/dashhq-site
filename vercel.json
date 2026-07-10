@@ -4,21 +4,28 @@
     { "src": "api/index.py",  "use": "@vercel/python", "config": { "maxDuration": 60 } },
     { "src": "index.html",    "use": "@vercel/static" },
     { "src": "portal.html",   "use": "@vercel/static" },
+    { "src": "apply.html",    "use": "@vercel/static" },
     { "src": "styles.css",    "use": "@vercel/static" },
     { "src": "portal.css",    "use": "@vercel/static" },
+    { "src": "apply.css",     "use": "@vercel/static" },
     { "src": "app.js",        "use": "@vercel/static" },
     { "src": "portal.js",     "use": "@vercel/static" },
+    { "src": "apply.js",      "use": "@vercel/static" },
     { "src": "assets/**",     "use": "@vercel/static" }
   ],
   "routes": [
-    { "src": "/auth/(.*)",   "dest": "/api/index.py" },
-    { "src": "/cron/(.*)",   "dest": "/api/index.py" },
-    { "src": "/health",      "dest": "/api/index.py" },
-    { "src": "/portal",      "dest": "/", "status": 301 },
-    { "src": "/portal.html", "dest": "/", "status": 301 },
-    { "src": "/index.html",  "dest": "/", "status": 301 },
-    { "src": "/",            "dest": "/index.html"   },
-    { "src": "/(.*)",        "dest": "/$1"           }
+    { "src": "/auth/(.*)",     "dest": "/api/index.py" },
+    { "src": "/cron/(.*)",     "dest": "/api/index.py" },
+    { "src": "/discord/(.*)",  "dest": "/api/index.py" },
+    { "src": "/applications",  "dest": "/api/index.py" },
+    { "src": "/health",        "dest": "/api/index.py" },
+    { "src": "/portal",       "dest": "/", "status": 301 },
+    { "src": "/portal.html",  "dest": "/", "status": 301 },
+    { "src": "/index.html",   "dest": "/", "status": 301 },
+    { "src": "/apply",        "dest": "/apply.html"  },
+    { "src": "/apply.html",   "dest": "/apply", "status": 301 },
+    { "src": "/",             "dest": "/index.html"   },
+    { "src": "/(.*)",         "dest": "/$1"           }
   ],
   "crons": [
     { "path": "/cron/sync-members", "schedule": "0 6 * * *" }
