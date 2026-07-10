@@ -404,7 +404,7 @@
 
             <div class="hub-tabs" role="tablist">
               <button class="hub-tab active" data-hub="card" onclick="Hub.go('card')" role="tab" aria-selected="true">
-                <svg viewBox="0 0 24 24"><rect x="2.5" y="5.5" width="19" height="13" rx="2.5"/><path d="M2.5 9.5h19"/></svg> Card
+                <svg viewBox="0 0 24 24"><rect x="2.5" y="5.5" width="19" height="13" rx="2.5"/><path d="M2.5 9.5h19"/></svg> Membership Card
               </button>
               <button class="hub-tab" data-hub="toolkit" onclick="Hub.go('toolkit')" role="tab" aria-selected="false">
                 <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg> Toolkit
@@ -416,6 +416,7 @@
 
             <!-- ── PANEL: CARD ── -->
             <div class="hub-panel on" data-hub-panel="card">
+              <div class="card-label">Your Dash HQ Membership Card</div>
               <div class="portal-pfp"><img id="cardAvatar" src="" alt=""></div>
               <div class="card" id="memberCard">
                 <div class="holo"></div>
@@ -442,7 +443,7 @@
                   <span>Share to X</span>
                 </button>
               </div>
-              <p class="card-hint">Downloads straight from your browser — no upload, nothing leaves your device. Sharing opens X with a caption already written for you.</p>
+              <p class="card-hint">This membership card is downloadable and shareable — it's your proof of Dash Citizenship. Downloads straight from your browser — no upload, nothing leaves your device. Sharing opens X with a caption already written for you.</p>
               <div class="row">
                 <a href="#blog" onclick="closePortal()" class="btn btn-p">Enter Research →</a>
               </div>
@@ -450,18 +451,22 @@
 
             <!-- ── PANEL: TOOLKIT ── -->
             <div class="hub-panel" data-hub-panel="toolkit">
-              <div class="tk-jump" id="tkJump">
-                <button data-jump="ticker">Price Ticker</button>
-                <button data-jump="gas">Gas Tracker</button>
-                <button data-jump="wallet">Wallet Card</button>
-                <button data-jump="pnl">DCA / PnL</button>
-                <button data-jump="ape">Ape Math</button>
-                <button data-jump="pairs">New Pairs</button>
-                <button data-jump="rug">Rug Check</button>
-                <button data-jump="slip">Slippage</button>
+              <div class="tk-launcher" id="tkLauncher">
+                <button class="tk-tile" onclick="Hub.openTool('ticker')"><span class="tt-ic"><svg viewBox="0 0 24 24"><path d="M3 17l5-5 4 4 8-9"/><path d="M21 7v5h-5"/></svg></span><span class="tt-name">Price Ticker</span><span class="tt-desc">Live prices, watchlist</span></button>
+                <button class="tk-tile" onclick="Hub.openTool('gas')"><span class="tt-ic"><svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 0 1-3.4 0"/></svg></span><span class="tt-name">Gas Tracker</span><span class="tt-desc">Live gwei &amp; costs</span></button>
+                <button class="tk-tile" onclick="Hub.openTool('wallet')"><span class="tt-ic"><svg viewBox="0 0 24 24"><rect x="2.5" y="6" width="19" height="13" rx="2.5"/><path d="M16 12.5h3"/></svg></span><span class="tt-name">Wallet Card</span><span class="tt-desc">Shorten, copy, QR</span></button>
+                <button class="tk-tile" onclick="Hub.openTool('pnl')"><span class="tt-ic"><svg viewBox="0 0 24 24"><path d="M4 19V5M4 19h16M9 15l3-4 3 2 4-6"/></svg></span><span class="tt-name">DCA / PnL</span><span class="tt-desc">Avg entry &amp; PnL</span></button>
+                <button class="tk-tile" onclick="Hub.openTool('ape')"><span class="tt-ic"><svg viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 10-12h-7z"/></svg></span><span class="tt-name">Ape Math</span><span class="tt-desc">The meme calculator</span></button>
+                <button class="tk-tile" onclick="Hub.openTool('pairs')"><span class="tt-ic"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/></svg></span><span class="tt-name">New Pairs</span><span class="tt-desc">Fresh listings feed</span></button>
+                <button class="tk-tile" onclick="Hub.openTool('rug')"><span class="tt-ic"><svg viewBox="0 0 24 24"><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/></svg></span><span class="tt-name">Rug Check</span><span class="tt-desc">Red-flag risk scan</span></button>
+                <button class="tk-tile" onclick="Hub.openTool('slip')"><span class="tt-ic"><svg viewBox="0 0 24 24"><path d="M3 12c2-4 4-6 9-6s7 2 9 6c-2 4-4 6-9 6s-7-2-9-6z"/><circle cx="12" cy="12" r="2"/></svg></span><span class="tt-name">Slippage</span><span class="tt-desc">Price impact estimate</span></button>
               </div>
 
-              <div class="tools-stack">
+              <div class="tk-focusbar" id="tkFocusbar" style="display:none">
+                <button class="tk-back" onclick="Hub.backToGrid()">← All tools</button>
+              </div>
+
+              <div class="tools-stack" id="toolsStack" style="display:none">
 
                 <!-- 1. PRICE TICKER -->
                 <section class="tool-card" id="tool-ticker">

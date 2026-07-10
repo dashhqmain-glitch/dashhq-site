@@ -18,6 +18,11 @@
 .p-h{font-family:var(--display);font-weight:700;font-size:clamp(34px,5vw,62px);line-height:1.04;margin:18px 0 0;letter-spacing:-.02em}
 .p-sub{color:var(--muted2);max-width:46ch;margin:18px auto 0;font-size:16px}
 
+/* when verified and inside the Hub, drop the marketing header — the hub's
+   own identity strip replaces it, so we're not stacking two headers */
+.portal.in-hub{padding-top:96px}
+.portal.in-hub .eyebrow,.portal.in-hub .p-h,.portal.in-hub .p-sub{display:none}
+
 .auth{position:relative;width:min(440px,100%);margin:46px auto 0;border-radius:24px;border:1px solid var(--border2);background:linear-gradient(180deg,#0d1326,#080c18);padding:36px 32px;box-shadow:0 40px 100px -30px rgba(0,0,0,.65),0 40px 100px -40px rgba(27,66,255,.4);overflow:hidden}
 .auth::before{content:"";position:absolute;inset:0;border-radius:24px;padding:1px;background:linear-gradient(150deg,rgba(77,114,255,.6),transparent 45%);-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude;pointer-events:none}
 .state{display:none}
@@ -94,15 +99,25 @@
 .cardbtn.share-x:hover{background:#1a1a1a}
 .cardbtn:active{transform:scale(.97)}
 .card-hint{color:var(--muted);font-size:12px;margin-top:16px;line-height:1.6}
+.card-label{font-family:var(--mono);font-size:11.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--sky);margin-bottom:14px}
 
 /* ═══════════ TOOLKIT SHARED ═══════════ */
-.tk-jump{display:flex;gap:8px;overflow-x:auto;padding-bottom:6px;margin-bottom:22px;scrollbar-width:none}
-.tk-jump::-webkit-scrollbar{display:none}
-.tk-jump button{flex:none;font-family:var(--mono);font-size:11.5px;color:var(--muted2);background:var(--card);border:1px solid var(--border);border-radius:20px;padding:8px 14px;cursor:pointer;transition:all .2s;white-space:nowrap}
-.tk-jump button:hover{color:#fff;border-color:var(--border2)}
-.tools-stack{display:flex;flex-direction:column;gap:18px}
-.tool-card{border:1px solid var(--border);border-radius:18px;background:var(--card);padding:22px;scroll-margin-top:100px}
-.tool-head{display:flex;align-items:flex-start;gap:14px;margin-bottom:18px}
+.tk-launcher{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px}
+.tk-tile{display:flex;flex-direction:column;align-items:flex-start;gap:9px;padding:16px;border-radius:14px;border:1px solid var(--border);background:var(--card);cursor:pointer;text-align:left;transition:all .2s;color:#fff;font-family:var(--body)}
+.tk-tile:hover{border-color:rgba(77,114,255,.5);background:rgba(27,66,255,.08);transform:translateY(-2px)}
+.tk-tile:active{transform:scale(.98)}
+.tt-ic{width:38px;height:38px;border-radius:11px;display:grid;place-items:center;background:linear-gradient(135deg,rgba(77,114,255,.25),rgba(34,211,238,.12));border:1px solid var(--border2)}
+.tt-ic svg{width:18px;height:18px;stroke:var(--sky);fill:none;stroke-width:1.8}
+.tt-name{font-weight:700;font-size:14.5px;font-family:var(--display)}
+.tt-desc{font-size:12px;color:var(--muted2)}
+.tk-focusbar{display:flex;margin-bottom:14px;scroll-margin-top:100px}
+.tk-back{font-family:var(--mono);font-size:13px;color:var(--sky);background:rgba(255,255,255,.05);border:1px solid var(--border2);border-radius:30px;padding:9px 16px;cursor:pointer}
+.tk-back:hover{color:#fff;border-color:var(--electric)}
+.tools-stack .tool-card{display:none}
+.tools-stack .tool-card.active{display:block}
+.tools-stack{display:flex;flex-direction:column;gap:12px}
+.tool-card{border:1px solid var(--border);border-radius:16px;background:var(--card);padding:16px;scroll-margin-top:100px}
+.tool-head{display:flex;align-items:flex-start;gap:12px;margin-bottom:14px}
 .tool-ic{width:42px;height:42px;border-radius:12px;flex:none;display:grid;place-items:center;background:linear-gradient(135deg,rgba(77,114,255,.25),rgba(34,211,238,.12));border:1px solid var(--border2)}
 .tool-ic svg{width:20px;height:20px;stroke:var(--sky);fill:none;stroke-width:1.8}
 .tool-head h3{font-family:var(--display);font-weight:700;font-size:17px}
@@ -114,8 +129,8 @@
 #portalModal .btn.small{padding:11px 18px;font-size:13.5px;flex:none}
 
 /* 1. price ticker */
-.tk-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;margin-top:16px}
-.tk-item{border:1px solid var(--border);border-radius:13px;padding:14px;background:rgba(255,255,255,.02);position:relative}
+.tk-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px;margin-top:14px}
+.tk-item{border:1px solid var(--border);border-radius:12px;padding:11px;background:rgba(255,255,255,.02);position:relative}
 .tk-item .rm{position:absolute;top:8px;right:8px;width:20px;height:20px;border-radius:50%;background:rgba(255,255,255,.06);color:var(--muted2);font-size:11px;line-height:20px;text-align:center;cursor:pointer;border:0}
 .tk-item .sym{font-family:var(--mono);font-weight:700;font-size:13px;color:var(--muted2)}
 .tk-item .px{font-family:var(--mono);font-weight:700;font-size:19px;margin-top:6px}
@@ -184,13 +199,17 @@
 .pairs-liq{flex:1;min-width:180px}
 .pairs-liq label{font-size:12px;color:var(--muted2);display:block;margin-bottom:6px;font-family:var(--mono)}
 .pairs-liq input{width:100%;accent-color:var(--electric)}
-.pairs-feed{display:flex;flex-direction:column;gap:8px;margin-top:16px;max-height:420px;overflow-y:auto}
-.pair-row{display:flex;align-items:center;gap:12px;padding:12px 14px;border:1px solid var(--border);border-radius:12px;background:rgba(255,255,255,.02);animation:fade .4s ease}
+.pairs-feed{display:flex;flex-direction:column;gap:6px;margin-top:12px;max-height:340px;overflow-y:auto}
+.pair-row{display:flex;align-items:center;gap:10px;padding:9px 12px;border:1px solid var(--border);border-radius:10px;background:rgba(255,255,255,.02);animation:fade .4s ease;flex-wrap:wrap}
 .pair-row.fresh{border-color:rgba(16,185,129,.4);background:rgba(16,185,129,.05)}
 .pair-chain{font-family:var(--mono);font-size:10px;padding:4px 8px;border-radius:20px;background:rgba(77,114,255,.15);color:var(--sky);flex:none}
-.pair-name{font-weight:600;font-size:14px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.pair-liq{font-family:var(--mono);font-size:12.5px;color:var(--muted2);flex:none}
+.pair-name{font-weight:600;font-size:14px;flex:1 1 100px;min-width:100px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pair-liq{font-family:var(--mono);font-size:12.5px;color:var(--muted2);flex:none;margin-left:auto}
 .pair-age{font-family:var(--mono);font-size:11.5px;color:var(--muted);flex:none;width:56px;text-align:right}
+.pair-copy{flex:none;width:26px;height:26px;border-radius:50%;background:rgba(255,255,255,.06);border:1px solid var(--border2);color:var(--muted2);display:grid;place-items:center;cursor:pointer;transition:all .2s}
+.pair-copy:hover{color:#fff;border-color:var(--electric);background:rgba(27,66,255,.12)}
+.pair-copy svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:1.8}
+.pair-copy.copied{color:var(--green);border-color:rgba(16,185,129,.5);background:rgba(16,185,129,.12)}
 
 /* 7. rug checker */
 .rug-out{margin-top:18px}
@@ -254,12 +273,56 @@
   .tk-grid{grid-template-columns:repeat(auto-fill,minmax(130px,1fr))}
   .wcard-row{flex-direction:column;align-items:flex-start}
   .profile-id{text-align:left}
+  .tool-card{padding:13px}
+  .tool-head{gap:9px;margin-bottom:11px}
+  .tk-launcher{grid-template-columns:repeat(2,1fr);gap:8px}
+  .tk-tile{padding:12px;gap:6px}
+  .tt-ic{width:32px;height:32px}
+  .tt-ic svg{width:15px;height:15px}
+  .tt-name{font-size:13px}
+  .tt-desc{font-size:11px}
+  .card{padding:14px}
+  .card .name{font-size:17px}
+  .card .brand{font-size:11px}
+  .card-label{font-size:10.5px}
+  .tool-ic{width:36px;height:36px}
+  .tool-ic svg{width:17px;height:17px}
+  .tool-head h3{font-size:15.5px}
+  .tool-head p{font-size:12px}
+  .gas-big{font-size:clamp(32px,11vw,44px)}
+  .ape-mult{font-size:clamp(26px,9vw,36px)}
+  .profile-av{width:60px;height:60px}
+  .profile-av i{font-size:22px}
+  .profile-name{font-size:18px}
+  .pnl-row{grid-template-columns:1fr 1fr auto;gap:8px}
+  .pnl-row input{font-size:13.5px;padding:10px 11px}
+  .ape-grid{gap:10px}
 }
 @media(max-width:480px){
   .portal{padding:16px 16px 40px}
+  .portal.in-hub{padding-top:84px}
   .auth{padding:26px 20px}
   .hub-head{gap:10px}
   .hub-name{max-width:140px}
   .pairs-filters{flex-direction:column;align-items:stretch}
   .pairs-filters select{width:100%}
+  .pair-row{padding:10px 12px}
+  .pair-name{flex:1 1 100%;order:1;font-size:13.5px;white-space:normal;overflow:visible;text-overflow:clip}
+  .pair-chain{order:0}
+  .pair-liq{order:2;margin-left:0}
+  .pair-age{order:3}
+  .card .name{font-size:19px}
+  .card .brand{font-size:12px}
+  .card{padding:16px}
+  .q-count,.gas-est-row{font-size:12px}
+  .auth.wide{padding:16px 12px 20px}
+  .tk-launcher{grid-template-columns:1fr 1fr;gap:8px}
+  .tool-card{padding:12px;border-radius:13px}
+  .gas-big{font-size:clamp(28px,10vw,38px)}
+  .ape-mult{font-size:clamp(24px,8vw,32px)}
+  .tool-ic{width:32px;height:32px}
+  .tool-ic svg{width:15px;height:15px}
+  .tool-head h3{font-size:14.5px}
+  .tool-head p{font-size:11.5px}
+  .card-label{font-size:10.5px}
 }

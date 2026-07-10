@@ -9,6 +9,7 @@ const TOKEN_KEY = 'dashhq_citizen_token';
 function setState(s) {
   document.querySelectorAll('.state').forEach(el => el.classList.toggle('on', el.dataset.state === s));
   document.getElementById('auth')?.classList.toggle('wide', s === 'member');
+  document.querySelector('.portal')?.classList.toggle('in-hub', s === 'member');
   if (s === 'member') Hub.init();
 }
 
@@ -127,14 +128,21 @@ var Hub = (function () {
     if (inited) return; inited = true;
     Ticker.init(); Gas.init(); Pnl.init(); Ape.calc(); Pairs.init(); Slip.calc();
     Profile.init();
-    document.querySelectorAll('#tkJump button').forEach(function (b) {
-      b.addEventListener('click', function () {
-        var el = document.getElementById('tool-' + b.dataset.jump);
-        if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      });
-    });
   }
-  return { go: go, init: init };
+  function openTool(id) {
+    document.getElementById('tkLauncher').style.display = 'none';
+    document.getElementById('tkFocusbar').style.display = 'flex';
+    var stack = document.getElementById('toolsStack');
+    stack.style.display = 'block';
+    stack.querySelectorAll('.tool-card').forEach(function (c) { c.classList.toggle('active', c.id === 'tool-' + id); });
+    document.getElementById('tkFocusbar').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+  function backToGrid() {
+    document.getElementById('tkLauncher').style.display = 'grid';
+    document.getElementById('tkFocusbar').style.display = 'none';
+    document.getElementById('toolsStack').style.display = 'none';
+  }
+  return { go: go, init: init, openTool: openTool, backToGrid: backToGrid };
 })();
 
 // ── CARD ACTIONS — download + share ───────────────────────────────────────────
@@ -506,11 +514,19 @@ var Pairs = (function () {
       return (data.data || []).map(function (p) {
         var a = p.attributes;
         var poolAddr = (a.address || p.id.split('_').pop());
+        // The pool's own address isn't what you'd paste into a swap or a
+        // rug check — the base token (the new asset itself) is, and
+        // GeckoTerminal always prefixes its relationship ids with the
+        // exact network slug we requested, so stripping that gives the
+        // raw contract/mint address for any chain (EVM hex or Solana base58).
+        var baseTokenId = ((p.relationships || {}).base_token || {}).data && p.relationships.base_token.data.id;
+        var tokenAddr = baseTokenId && baseTokenId.indexOf(net + '_') === 0 ? baseTokenId.slice(net.length + 1) : null;
         return {
           name: a.name,
           liq: parseFloat(a.reserve_in_usd) || 0,
           born: new Date(a.pool_created_at).getTime(),
-          url: 'https://www.geckoterminal.com/' + net + '/pools/' + poolAddr
+          url: 'https://www.geckoterminal.com/' + net + '/pools/' + poolAddr,
+          tokenAddr: tokenAddr
         };
       });
     } catch (e) { return []; }
@@ -531,8 +547,24 @@ var Pairs = (function () {
       var ageMin = Math.floor((now - p.born) / 60000);
       var ageTxt = ageMin < 1 ? 'now' : ageMin + 'm ago';
       var fresh = ageMin < 10;
-      return '<a href="' + p.url + '" target="_blank" rel="noopener" class="pair-row' + (fresh ? ' fresh' : '') + '"><span class="pair-chain">' + chain.toUpperCase() + '</span><span class="pair-name">' + p.name + '</span><span class="pair-liq">$' + Math.round(p.liq).toLocaleString('en-US') + '</span><span class="pair-age">' + ageTxt + '</span></a>';
+      var copyBtn = p.tokenAddr
+        ? '<button class="pair-copy" title="Copy contract address" aria-label="Copy contract address" onclick="Pairs.copyAddress(event,\'' + p.tokenAddr + '\')"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg></button>'
+        : '';
+      return '<a href="' + p.url + '" target="_blank" rel="noopener" class="pair-row' + (fresh ? ' fresh' : '') + '"><span class="pair-chain">' + chain.toUpperCase() + '</span><span class="pair-name">' + p.name + '</span><span class="pair-liq">$' + Math.round(p.liq).toLocaleString('en-US') + '</span><span class="pair-age">' + ageTxt + '</span>' + copyBtn + '</a>';
     }).join('') || '<div class="pin-empty">No pairs match these filters right now.</div>';
+  }
+  function copyAddress(ev, addr) {
+    // Rows are links out to GeckoTerminal — stop the click from also
+    // navigating away before the copy has a chance to register.
+    ev.preventDefault();
+    ev.stopPropagation();
+    var btn = ev.currentTarget;
+    navigator.clipboard.writeText(addr).then(function () {
+      var orig = btn.innerHTML;
+      btn.classList.add('copied');
+      btn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></svg>';
+      setTimeout(function () { btn.classList.remove('copied'); btn.innerHTML = orig; }, 1400);
+    });
   }
   async function refresh() {
     var chain = document.getElementById('pairsChain').value;
@@ -543,7 +575,7 @@ var Pairs = (function () {
     refresh();
     setInterval(refresh, 45000); // respectful poll interval for a free public API
   }
-  return { init: init, render: render, refresh: refresh };
+  return { init: init, render: render, refresh: refresh, copyAddress: copyAddress };
 })();
 
 // ── 7. RUG RISK CHECKER — real backend-proxied honeypot.is check ─────────────
@@ -651,7 +683,7 @@ var Profile = (function () {
     var el = document.getElementById('profilePins');
     if (!pins.length) { el.innerHTML = '<div class="pin-empty">No pinned tools yet.</div>'; return; }
     el.innerHTML = pins.map(function (k) {
-      return '<div class="pin-chip" onclick="Hub.go(\'toolkit\');setTimeout(function(){document.getElementById(\'tool-' + k + '\').scrollIntoView({behavior:\'smooth\'});},150);"><svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round">' + (PIN_ICONS[k] || '') + '</svg><span>' + (TOOL_LABELS[k] || k) + '</span></div>';
+      return '<div class="pin-chip" onclick="Hub.go(\'toolkit\');Hub.openTool(\'' + k + '\');"><svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round">' + (PIN_ICONS[k] || '') + '</svg><span>' + (TOOL_LABELS[k] || k) + '</span></div>';
     }).join('');
   }
   function saveBio() {
