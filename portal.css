@@ -128,8 +128,10 @@
    popup is a native OS widget — without an explicit background on each
    <option>, some browsers (Windows Chrome/Edge) render it with a default
    white popup behind our inherited white text, making every row invisible
-   except whichever one has the system hover highlight. */
-.tool-body select option{background:#0d1326;color:#fff}
+   except whichever one has the system hover highlight. Scoped to the whole
+   modal (not just .tool-body) so any select added anywhere in the portal
+   gets this automatically. */
+#portalModal select option{background:var(--navy);color:#fff}
 .tk-addrow{display:flex;gap:10px}
 .tk-addrow input{flex:1;min-width:0}
 #portalModal .btn.small{padding:11px 18px;font-size:13.5px;flex:none}
