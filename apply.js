@@ -169,9 +169,26 @@ var Apply = (function(){
     });
   }
 
+  function bindCharCounts(){
+    ['intro','communities','value'].forEach(function(key){
+      var f = FIELDS.find(function(x){ return x.key === key; });
+      var input = document.getElementById(f.el);
+      var counter = document.getElementById('cc-' + key);
+      if(!input || !counter) return;
+      function update(){
+        var len = input.value.length;
+        counter.textContent = len + ' / 600';
+        counter.classList.toggle('near-limit', len >= 480 && len < 600);
+        counter.classList.toggle('at-limit', len >= 600);
+      }
+      input.addEventListener('input', update);
+      update();
+    });
+  }
+
   function init(){
     updateProgress(); updateNav();
-    bindFollowChips(); bindEnterKey();
+    bindFollowChips(); bindEnterKey(); bindCharCounts();
   }
 
   return { next:next, back:back, jump:jump, init:init };

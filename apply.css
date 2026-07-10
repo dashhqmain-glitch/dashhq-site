@@ -54,6 +54,9 @@ nav{position:fixed;top:0;left:0;right:0;z-index:60;display:flex;align-items:cent
 .q-input,.q-textarea{width:100%;margin-top:26px;background:var(--card);border:1px solid var(--border2);border-radius:14px;padding:16px 18px;color:#fff;font-family:var(--body);font-size:16px;transition:border-color .25s,box-shadow .25s;resize:vertical}
 .q-input:focus,.q-textarea:focus{outline:0;border-color:var(--electric);box-shadow:0 0 0 4px rgba(27,66,255,.18)}
 .q-input::placeholder,.q-textarea::placeholder{color:var(--muted)}
+.char-count{margin-top:8px;text-align:right;color:var(--muted);font-size:12px;font-family:var(--mono)}
+.char-count.near-limit{color:var(--gold)}
+.char-count.at-limit{color:var(--red)}
 .q-error{display:none;margin-top:12px;color:var(--red);font-size:13.5px;font-family:var(--mono)}
 .step.err .q-error{display:block}
 .step.err .q-input,.step.err .q-textarea{border-color:var(--red)}

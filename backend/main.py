@@ -282,12 +282,16 @@ class ApplicationIn(BaseModel):
         v = v.strip()
         if len(v.split()) < 8:
             raise ValueError("must be at least 8 words — give a real answer, not a one-liner")
+        if len(v) > 600:
+            raise ValueError("must be 600 characters or fewer — keep it concise")
         return v
 
     @field_validator("communities")
     @classmethod
     def _min_2_words(cls, v: str) -> str:
         v = v.strip()
+        if len(v) > 600:
+            raise ValueError("must be 600 characters or fewer — keep it concise")
         if len(v.split()) < 2:
             raise ValueError("list at least one real community")
         return v
