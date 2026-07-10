@@ -301,8 +301,12 @@ var Ticker = (function () {
 
 // ── 2. GAS TRACKER — real public RPC + CoinGecko ──────────────────────────────
 var Gas = (function () {
-  var gwei = null, nativePrice = null;
+  var gwei = null, nativePrice = null, solanaFees = null;
   var GAS_UNITS = { transfer: 21000, swap: 150000, mint: 220000 };
+  // Rough compute-unit estimates for Solana — actual usage varies a lot by
+  // program, so this is illustrative, same spirit as the EVM gas-unit table.
+  var SOLANA_CU = { transfer: 450, swap: 200000, mint: 300000 };
+  var SOLANA_BASE_FEE_LAMPORTS = 5000; // fixed protocol fee per signature
   // Public, keyless RPCs + the CoinGecko id for each chain's native gas token.
   var CHAINS = {
     ethereum: { label: 'Ethereum mainnet', symbol: 'ETH' },
@@ -311,7 +315,8 @@ var Gas = (function () {
     arbitrum: { label: 'Arbitrum One', symbol: 'ETH' },
     optimism: { label: 'Optimism', symbol: 'ETH' },
     base: { label: 'Base', symbol: 'ETH' },
-    avalanche: { label: 'Avalanche C-Chain', symbol: 'AVAX' }
+    avalanche: { label: 'Avalanche C-Chain', symbol: 'AVAX' },
+    solana: { label: 'Solana', symbol: 'SOL', isSolana: true }
   };
   var current = 'ethereum';
 
@@ -321,10 +326,10 @@ var Gas = (function () {
   async function fetchGasData(chain) {
     try {
       var res = await fetch(BACKEND_URL + '/toolkit/gas?chain=' + encodeURIComponent(chain));
-      if (!res.ok) return { gwei: null, nativeUsd: null };
+      if (!res.ok) return { gwei: null, nativeUsd: null, solanaFees: null };
       var data = await res.json();
-      return { gwei: data.gwei, nativeUsd: data.native_usd };
-    } catch (e) { return { gwei: null, nativeUsd: null }; }
+      return { gwei: data.gwei, nativeUsd: data.native_usd, solanaFees: data.solana_fees || null };
+    } catch (e) { return { gwei: null, nativeUsd: null, solanaFees: null }; }
   }
   // Sub-1-gwei readings are common now (L2s especially, sometimes L1 too) —
   // a fixed decimal count either shows "0" or wastes space, so scale the
@@ -337,7 +342,12 @@ var Gas = (function () {
   }
   function render() {
     document.getElementById('gasChainLabel').textContent = CHAINS[current].label;
-    if (gwei == null) { document.getElementById('gasBig').textContent = '—'; return; }
+    document.getElementById('gasUnitWord').textContent = CHAINS[current].isSolana ? 'µlamports/CU' : 'gwei';
+    if (CHAINS[current].isSolana) { renderSolana(); return; }
+    renderEvm();
+  }
+  function renderEvm() {
+    if (gwei == null) { document.getElementById('gasBig').textContent = '—'; document.getElementById('gasTiers').innerHTML = ''; document.getElementById('gasCosts').innerHTML = ''; return; }
     document.getElementById('gasBig').textContent = fmtGwei(gwei);
     var tiers = [
       { k: 'slow', label: 'Slow', mult: 0.85 },
@@ -357,17 +367,40 @@ var Gas = (function () {
       return '<div class="gas-cost"><div class="cl">' + t.label + '</div><div class="cv">' + (usdTxt != null ? usdTxt : costNative.toFixed(6) + ' ' + symbol) + '</div></div>';
     }).join('');
   }
+  function renderSolana() {
+    if (!solanaFees) { document.getElementById('gasBig').textContent = '—'; document.getElementById('gasTiers').innerHTML = ''; document.getElementById('gasCosts').innerHTML = ''; return; }
+    document.getElementById('gasBig').textContent = solanaFees.avg.toLocaleString('en-US');
+    var tiers = [
+      { k: 'slow', label: 'Slow', v: solanaFees.slow },
+      { k: 'avg', label: 'Average', v: solanaFees.avg },
+      { k: 'fast', label: 'Fast', v: solanaFees.fast }
+    ];
+    document.getElementById('gasTiers').innerHTML = tiers.map(function (t) {
+      return '<div class="gas-tier ' + t.k + '"><div class="tl">' + t.label + '</div><div class="tv">' + t.v.toLocaleString('en-US') + ' µ◎/CU</div></div>';
+    }).join('');
+    var type = document.getElementById('gasTxType').value;
+    var cu = SOLANA_CU[type];
+    document.getElementById('gasCosts').innerHTML = tiers.map(function (t) {
+      // base fee (fixed) + priority fee (micro-lamports/CU × estimated CU)
+      var lamports = SOLANA_BASE_FEE_LAMPORTS + (t.v * cu / 1e6);
+      var sol = lamports / 1e9;
+      var costUsd = nativePrice != null ? sol * nativePrice : null;
+      var usdTxt = costUsd == null ? null : (costUsd < 0.01 ? '<$0.01' : '$' + costUsd.toFixed(2));
+      return '<div class="gas-cost"><div class="cl">' + t.label + '</div><div class="cv">' + (usdTxt != null ? usdTxt : sol.toFixed(6) + ' SOL') + '</div></div>';
+    }).join('');
+  }
   async function refresh() {
     var chain = current;
     var data = await fetchGasData(chain);
     if (chain !== current) return; // user switched chains mid-fetch — drop the stale result
     if (data.gwei != null) gwei = data.gwei;
     if (data.nativeUsd != null) nativePrice = data.nativeUsd;
+    solanaFees = data.solanaFees;
     render();
   }
   function switchChain() {
     current = document.getElementById('gasChain').value;
-    gwei = null; nativePrice = null;
+    gwei = null; nativePrice = null; solanaFees = null;
     render();
     refresh();
   }
@@ -578,7 +611,7 @@ var Pairs = (function () {
   return { init: init, render: render, refresh: refresh, copyAddress: copyAddress };
 })();
 
-// ── 7. RUG RISK CHECKER — real backend-proxied honeypot.is check ─────────────
+// ── 7. RUG RISK CHECKER — real backend-proxied honeypot.is / rugcheck.xyz ────
 var Rug = (function () {
   async function check() {
     var addr = (document.getElementById('rugInput').value || '').trim();
@@ -588,7 +621,9 @@ var Rug = (function () {
     badge.className = 'rug-badge'; badge.textContent = 'Checking…';
     document.getElementById('rugChecklist').innerHTML = '';
     out.style.display = 'block';
-    var chainId = parseInt(document.getElementById('rugChain').value, 10);
+    // "1".."43114" for EVM chains, or the literal string "solana" —
+    // the backend branches on this to pick the right scanner.
+    var chainId = document.getElementById('rugChain').value;
     try {
       var res = await fetch(BACKEND_URL + '/toolkit/rug-check', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },

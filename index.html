@@ -495,11 +495,12 @@
                         <option value="optimism">Optimism</option>
                         <option value="base">Base</option>
                         <option value="avalanche">Avalanche</option>
+                        <option value="solana">Solana</option>
                       </select>
                     </div>
                     <div class="gas-readout">
                       <div class="gas-big" id="gasBig">—</div>
-                      <div class="gas-unit">gwei · <span id="gasChainLabel">Ethereum mainnet</span></div>
+                      <div class="gas-unit"><span id="gasUnitWord">gwei</span> · <span id="gasChainLabel">Ethereum mainnet</span></div>
                     </div>
                     <div class="gas-tiers" id="gasTiers"></div>
                     <div class="gas-est-row">
@@ -618,6 +619,7 @@
                         <option value="10">Optimism</option>
                         <option value="8453">Base</option>
                         <option value="43114">Avalanche</option>
+                        <option value="solana">Solana</option>
                       </select>
                     </div>
                     <div class="tk-addrow">
@@ -629,7 +631,7 @@
                       <div class="rug-checklist" id="rugChecklist"></div>
                       <a href="#blog" onclick="closePortal()" class="rug-link">Read: Anatomy of a Rug Pull →</a>
                     </div>
-                    <p class="ape-disclaimer">Simulation-based EVM chains only — no honeypot simulator exists yet for non-EVM chains like Solana.</p>
+                    <p class="ape-disclaimer">EVM chains are simulation-tested for honeypots; Solana is scanned for authority, liquidity, and known risk flags instead — the two aren't directly comparable checks.</p>
                   </div>
                 </section>
 

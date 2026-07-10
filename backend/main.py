@@ -12,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 from nacl.exceptions import BadSignatureError
 from nacl.signing import VerifyKey
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -647,9 +647,49 @@ async def _get_coingecko_prices(client: httpx.AsyncClient, ids: list[str]) -> di
     return {i: _PRICE_CACHE[i][1] for i in ids if i in _PRICE_CACHE}
 
 
+# Solana has no "gas price" in the EVM sense — the base network fee is a
+# fixed protocol constant (5000 lamports/signature), and the variable part
+# is a priority fee (micro-lamports per compute unit) that recent blocks
+# actually paid. Handled as its own branch below rather than forced into
+# the eth_gasPrice-shaped GAS_CHAINS map.
+SOLANA_RPC = "https://api.mainnet-beta.solana.com"
+SOLANA_BASE_FEE_LAMPORTS = 5000
+
+
+async def _fetch_solana_priority_fees(client: httpx.AsyncClient) -> dict | None:
+    try:
+        res = await client.post(
+            SOLANA_RPC,
+            json={"jsonrpc": "2.0", "id": 1, "method": "getRecentPrioritizationFees", "params": []},
+        )
+        res.raise_for_status()
+        fees = sorted(r["prioritizationFee"] for r in res.json().get("result", []))
+        if not fees:
+            return None
+        return {
+            "slow": fees[int(len(fees) * 0.25)],
+            "avg": fees[len(fees) // 2],
+            "fast": fees[int(len(fees) * 0.9)],
+        }
+    except (httpx.HTTPError, KeyError, ValueError, IndexError):
+        return None
+
+
 @app.get("/toolkit/gas")
 @limiter.limit("60/minute")
 async def toolkit_gas(request: Request, chain: str = Query("ethereum")):
+    if chain == "solana":
+        async with httpx.AsyncClient(timeout=10) as client:
+            fees = await _fetch_solana_priority_fees(client)
+            prices = await _get_coingecko_prices(client, ["solana"])
+            native_data = prices.get("solana")
+        return {
+            "gwei": None,
+            "native_usd": native_data["usd"] if native_data else None,
+            "solana_fees": fees,
+            "solana_base_fee_lamports": SOLANA_BASE_FEE_LAMPORTS,
+        }
+
     if chain not in GAS_CHAINS:
         raise HTTPException(status_code=400, detail="unsupported chain")
     cfg = GAS_CHAINS[chain]
@@ -724,47 +764,43 @@ async def toolkit_ticker(request: Request, symbols: str = Query(...)):
     return out
 
 
-# honeypot.is only simulates EVM chains — there is no free equivalent for
-# non-EVM chains (Solana etc.), so the rug checker is intentionally EVM-only.
+# honeypot.is simulates EVM chains; Solana has no equivalent buy/sell
+# simulator, so it's checked separately via rugcheck.xyz's public API
+# (mint/freeze authority, liquidity, and known risk flags instead of a tax
+# simulation) — a different kind of check, not a lesser one.
 ALLOWED_CHAIN_IDS = {1, 56, 137, 42161, 10, 8453, 43114}
+SOLANA_MINT_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
 
 class RugCheckIn(BaseModel):
     address: str
-    chain_id: int = 1
+    chain_id: str = "1"  # numeric-string EVM chain id, or the literal "solana"
 
-    @field_validator("address")
-    @classmethod
-    def _valid_address(cls, v: str) -> str:
-        v = v.strip()
-        if not re.match(r"^0x[a-fA-F0-9]{40}$", v):
-            raise ValueError("must be a valid EVM contract address (0x...)")
-        return v
-
-    @field_validator("chain_id")
-    @classmethod
-    def _valid_chain(cls, v: int) -> int:
-        if v not in ALLOWED_CHAIN_IDS:
-            raise ValueError("unsupported chain")
-        return v
+    @model_validator(mode="after")
+    def _validate(self) -> "RugCheckIn":
+        self.address = self.address.strip()
+        if self.chain_id == "solana":
+            if not SOLANA_MINT_RE.match(self.address):
+                raise ValueError("must be a valid Solana token mint address")
+        else:
+            if self.chain_id not in {str(c) for c in ALLOWED_CHAIN_IDS}:
+                raise ValueError("unsupported chain")
+            if not re.match(r"^0x[a-fA-F0-9]{40}$", self.address):
+                raise ValueError("must be a valid EVM contract address (0x...)")
+        return self
 
 
-@app.post("/toolkit/rug-check")
-@limiter.limit("20/minute")
-async def rug_check(request: Request, payload: RugCheckIn):
-    # Proxied server-side (rather than called from the browser) so the free
-    # honeypot.is API isn't hit by an uncontrolled client fan-out, and so it
-    # can share the same slowapi rate limiting as the rest of the API.
-    async with httpx.AsyncClient(timeout=10) as client:
-        try:
-            res = await client.get(
-                "https://api.honeypot.is/v2/IsHoneypot",
-                params={"address": payload.address, "chainID": payload.chain_id},
-            )
-            res.raise_for_status()
-            data = res.json()
-        except (httpx.HTTPError, ValueError):
-            raise HTTPException(status_code=502, detail="Could not reach the honeypot scanner")
+async def _rug_check_evm(client: httpx.AsyncClient, address: str, chain_id: str) -> dict:
+    try:
+        res = await client.get(
+            "https://api.honeypot.is/v2/IsHoneypot",
+            params={"address": address, "chainID": int(chain_id)},
+        )
+        res.raise_for_status()
+        data = res.json()
+    except (httpx.HTTPError, ValueError):
+        raise HTTPException(status_code=502, detail="Could not reach the honeypot scanner")
+
     honeypot = data.get("honeypotResult") or {}
     simulation = data.get("simulationResult") or {}
     contract = data.get("contractCode") or {}
@@ -794,6 +830,56 @@ async def rug_check(request: Request, payload: RugCheckIn):
         level, label = "low", "Looks Clean"
 
     return {"level": level, "label": label, "checks": checks}
+
+
+async def _rug_check_solana(client: httpx.AsyncClient, mint: str) -> dict:
+    try:
+        res = await client.get(f"https://api.rugcheck.xyz/v1/tokens/{mint}/report")
+        if res.status_code == 400:
+            raise HTTPException(status_code=400, detail="That doesn't look like a real Solana token mint")
+        res.raise_for_status()
+        data = res.json()
+    except httpx.HTTPError:
+        raise HTTPException(status_code=502, detail="Could not reach the Solana risk scanner")
+    except ValueError:
+        raise HTTPException(status_code=502, detail="Could not reach the Solana risk scanner")
+
+    rugged = bool(data.get("rugged"))
+    score = data.get("score_normalised") or 0
+    risks = data.get("risks") or []
+    has_danger = any((r.get("level") or "").lower() in ("danger", "high") for r in risks)
+    mint_authority = data.get("mintAuthority")
+    freeze_authority = data.get("freezeAuthority")
+    liquidity = data.get("totalMarketLiquidity") or 0
+
+    checks = [
+        {"label": "Not flagged as rugged", "pass": not rugged},
+        {"label": "Mint authority renounced", "pass": mint_authority is None},
+        {"label": "Freeze authority renounced", "pass": freeze_authority is None},
+        {"label": "No high-severity risk flags", "pass": not has_danger},
+        {"label": "Has active liquidity", "pass": liquidity > 0},
+    ]
+
+    if rugged or has_danger or score >= 60:
+        level, label = "high", "High Risk"
+    elif score >= 25 or mint_authority is not None or freeze_authority is not None:
+        level, label = "medium", "Caution"
+    else:
+        level, label = "low", "Looks Clean"
+
+    return {"level": level, "label": label, "checks": checks}
+
+
+@app.post("/toolkit/rug-check")
+@limiter.limit("20/minute")
+async def rug_check(request: Request, payload: RugCheckIn):
+    # Proxied server-side (rather than called from the browser) so these free
+    # APIs aren't hit by an uncontrolled client fan-out, and so they share
+    # the same slowapi rate limiting as the rest of the API.
+    async with httpx.AsyncClient(timeout=10) as client:
+        if payload.chain_id == "solana":
+            return await _rug_check_solana(client, payload.address)
+        return await _rug_check_evm(client, payload.address, payload.chain_id)
 
 
 @app.get("/health")
