@@ -198,30 +198,19 @@ var CardActions = (function () {
 
 // ── 1. PRICE TICKER — real CoinGecko data ─────────────────────────────────────
 var Ticker = (function () {
-  var state = {}; // sym -> {id, price, history[], chg, loading}
-  var idCache = {};
+  var state = {}; // sym -> {price, history[], chg, loading, error}
 
-  async function resolveId(sym) {
-    if (idCache[sym]) return idCache[sym];
+  // Resolving a symbol and fetching its price used to be two separate
+  // CoinGecko calls per token, called directly from the browser — slow, and
+  // prone to silently hitting CoinGecko's free-tier rate limit. Now proxied
+  // through one batched backend call for every tracked symbol at once.
+  async function fetchBatch(syms) {
+    if (!syms.length) return {};
     try {
-      var res = await fetch('https://api.coingecko.com/api/v3/search?query=' + encodeURIComponent(sym));
-      var data = await res.json();
-      var coins = data.coins || [];
-      var exact = coins.find(function (c) { return (c.symbol || '').toUpperCase() === sym; });
-      var pick = exact || coins[0];
-      if (!pick) return null;
-      idCache[sym] = pick.id;
-      return pick.id;
-    } catch (e) { return null; }
-  }
-  async function fetchPrice(id) {
-    try {
-      var res = await fetch('https://api.coingecko.com/api/v3/simple/price?ids=' + encodeURIComponent(id) + '&vs_currencies=usd&include_24hr_change=true');
-      var data = await res.json();
-      var d = data[id];
-      if (!d) return null;
-      return { price: d.usd, chg: d.usd_24h_change || 0 };
-    } catch (e) { return null; }
+      var res = await fetch(BACKEND_URL + '/toolkit/ticker?symbols=' + encodeURIComponent(syms.join(',')));
+      if (!res.ok) return {};
+      return await res.json();
+    } catch (e) { return {}; }
   }
   function sparkPath(hist) {
     if (hist.length < 2) return '';
@@ -239,7 +228,7 @@ var Ticker = (function () {
     grid.innerHTML = syms.map(function (sym) {
       var s = state[sym];
       if (s.loading) return '<div class="tk-item"><button class="rm" onclick="Ticker.remove(\'' + sym + '\')" aria-label="Remove">×</button><div class="sym">' + sym + '</div><div class="px">Loading…</div></div>';
-      if (s.error) return '<div class="tk-item"><button class="rm" onclick="Ticker.remove(\'' + sym + '\')" aria-label="Remove">×</button><div class="sym">' + sym + '</div><div class="px">Not found</div></div>';
+      if (s.error) return '<div class="tk-item"><button class="rm" onclick="Ticker.remove(\'' + sym + '\')" aria-label="Remove">×</button><div class="sym">' + sym + '</div><div class="px" style="cursor:pointer" onclick="Ticker.retry(\'' + sym + '\')" title="Click to retry">Not found — retry</div></div>';
       var up = s.chg >= 0;
       var path = sparkPath(s.history);
       return '<div class="tk-item"><button class="rm" onclick="Ticker.remove(\'' + sym + '\')" aria-label="Remove">×</button>'
@@ -250,17 +239,32 @@ var Ticker = (function () {
         + '</div>';
     }).join('');
   }
-  function seed(sym) {
+  function applyResult(sym, r) {
+    var s = state[sym];
+    if (!s) return; // removed while the request was in flight
+    s.loading = false; // always resolved here — never left hanging, success or not
+    if (!r || r.error || typeof r.price !== 'number') { s.error = true; return; }
+    s.error = false;
+    s.price = r.price;
+    s.chg = r.chg || 0;
+    s.history.push(r.price);
+    if (s.history.length > 30) s.history.shift();
+  }
+  async function seed(sym) {
     if (state[sym]) return;
     state[sym] = { loading: true, price: 0, history: [], chg: 0 };
     render();
-    resolveId(sym).then(function (id) {
-      if (!id) { state[sym].loading = false; state[sym].error = true; render(); return; }
-      state[sym].id = id;
-      return fetchPrice(id);
-    }).then(function (p) {
-      if (p && state[sym]) { state[sym].price = p.price; state[sym].chg = p.chg; state[sym].history = [p.price]; state[sym].loading = false; render(); }
-    }).catch(function () { if (state[sym]) { state[sym].loading = false; state[sym].error = true; render(); } });
+    var results = await fetchBatch([sym]);
+    applyResult(sym, results[sym]);
+    render();
+    // Fetch a second data point soon after so the sparkline has something to
+    // draw almost immediately, instead of waiting for the next full tick().
+    if (state[sym] && !state[sym].error) {
+      setTimeout(function () {
+        if (!state[sym]) return;
+        fetchBatch([sym]).then(function (r) { applyResult(sym, r[sym]); render(); });
+      }, 6000);
+    }
   }
   function add() {
     var input = document.getElementById('tickerInput');
@@ -270,25 +274,21 @@ var Ticker = (function () {
     seed(sym);
   }
   function remove(sym) { delete state[sym]; render(); }
+  function retry(sym) { delete state[sym]; seed(sym); }
   async function tick() {
-    var syms = Object.keys(state).filter(function (s) { return state[s].id && !state[s].loading; });
-    for (var i = 0; i < syms.length; i++) {
-      var sym = syms[i], s = state[sym];
-      var p = await fetchPrice(s.id);
-      if (p) {
-        s.history.push(p.price); if (s.history.length > 30) s.history.shift();
-        s.price = p.price; s.chg = p.chg;
-      }
-    }
+    var syms = Object.keys(state).filter(function (s) { return !state[s].loading; });
+    if (!syms.length) return;
+    var results = await fetchBatch(syms);
+    syms.forEach(function (sym) { applyResult(sym, results[sym]); });
     render();
     var u = document.getElementById('tickerUpdated');
     if (u) u.textContent = 'Updated just now';
   }
   function init() {
     seed('ETH'); seed('SOL');
-    setInterval(tick, 30000); // 30s — respectful of CoinGecko's free-tier rate limit
+    setInterval(tick, 15000); // one batched call regardless of watchlist size
   }
-  return { init: init, add: add, remove: remove };
+  return { init: init, add: add, remove: remove, retry: retry };
 })();
 
 // ── 2. GAS TRACKER — real public RPC + CoinGecko ──────────────────────────────
@@ -318,17 +318,26 @@ var Gas = (function () {
       return { gwei: data.gwei, nativeUsd: data.native_usd };
     } catch (e) { return { gwei: null, nativeUsd: null }; }
   }
+  // Sub-1-gwei readings are common now (L2s especially, sometimes L1 too) —
+  // a fixed decimal count either shows "0" or wastes space, so scale the
+  // precision to the actual magnitude instead.
+  function fmtGwei(v) {
+    if (v >= 10) return v.toFixed(1);
+    if (v >= 1) return v.toFixed(2);
+    if (v >= 0.01) return v.toFixed(4);
+    return v.toFixed(6);
+  }
   function render() {
     document.getElementById('gasChainLabel').textContent = CHAINS[current].label;
     if (gwei == null) { document.getElementById('gasBig').textContent = '—'; return; }
-    document.getElementById('gasBig').textContent = gwei.toFixed(1);
+    document.getElementById('gasBig').textContent = fmtGwei(gwei);
     var tiers = [
       { k: 'slow', label: 'Slow', mult: 0.85 },
       { k: 'avg', label: 'Average', mult: 1 },
       { k: 'fast', label: 'Fast', mult: 1.35 }
     ];
     document.getElementById('gasTiers').innerHTML = tiers.map(function (t) {
-      return '<div class="gas-tier ' + t.k + '"><div class="tl">' + t.label + '</div><div class="tv">' + (gwei * t.mult).toFixed(0) + ' gwei</div></div>';
+      return '<div class="gas-tier ' + t.k + '"><div class="tl">' + t.label + '</div><div class="tv">' + fmtGwei(gwei * t.mult) + ' gwei</div></div>';
     }).join('');
     var type = document.getElementById('gasTxType').value;
     var units = GAS_UNITS[type];
@@ -336,7 +345,8 @@ var Gas = (function () {
     document.getElementById('gasCosts').innerHTML = tiers.map(function (t) {
       var costNative = (gwei * t.mult) * units / 1e9;
       var costUsd = nativePrice != null ? costNative * nativePrice : null;
-      return '<div class="gas-cost"><div class="cl">' + t.label + '</div><div class="cv">' + (costUsd != null ? '$' + costUsd.toFixed(2) : costNative.toFixed(5) + ' ' + symbol) + '</div></div>';
+      var usdTxt = costUsd == null ? null : (costUsd < 0.01 ? '<$0.01' : '$' + costUsd.toFixed(2));
+      return '<div class="gas-cost"><div class="cl">' + t.label + '</div><div class="cv">' + (usdTxt != null ? usdTxt : costNative.toFixed(6) + ' ' + symbol) + '</div></div>';
     }).join('');
   }
   async function refresh() {

@@ -535,6 +535,37 @@ GAS_CHAINS = {
 }
 
 
+# Warm-instance cache: coingecko id -> (fetched_at, {usd, usd_24h_change}).
+# CoinGecko's free API has a real rate limit that a burst of concurrent
+# citizens (or rapid chain/tool switching) can trip together — short-lived
+# caching means those requests reuse one upstream call, and a rate-limit
+# hiccup serves the last known price instead of an error.
+_PRICE_CACHE: dict[str, tuple[float, dict]] = {}
+_PRICE_TTL = 20  # seconds
+
+
+async def _get_coingecko_prices(client: httpx.AsyncClient, ids: list[str]) -> dict[str, dict]:
+    now = time.time()
+    stale = [i for i in ids if i not in _PRICE_CACHE or now - _PRICE_CACHE[i][0] > _PRICE_TTL]
+    if stale:
+        try:
+            res = await client.get(
+                "https://api.coingecko.com/api/v3/simple/price",
+                params={
+                    "ids": ",".join(sorted(set(stale))),
+                    "vs_currencies": "usd",
+                    "include_24hr_change": "true",
+                },
+            )
+            res.raise_for_status()
+            for coin_id, d in res.json().items():
+                if d and "usd" in d:
+                    _PRICE_CACHE[coin_id] = (now, d)
+        except httpx.HTTPError:
+            pass  # fall through — serve whatever's cached, even if stale
+    return {i: _PRICE_CACHE[i][1] for i in ids if i in _PRICE_CACHE}
+
+
 @app.get("/toolkit/gas")
 @limiter.limit("60/minute")
 async def toolkit_gas(request: Request, chain: str = Query("ethereum")):
@@ -544,7 +575,6 @@ async def toolkit_gas(request: Request, chain: str = Query("ethereum")):
 
     async with httpx.AsyncClient(timeout=10) as client:
         gwei = None
-        native_usd = None
         try:
             rpc_res = await client.post(
                 cfg["rpc"],
@@ -556,17 +586,57 @@ async def toolkit_gas(request: Request, chain: str = Query("ethereum")):
         except (httpx.HTTPError, KeyError, ValueError):
             pass
 
-        try:
-            price_res = await client.get(
-                "https://api.coingecko.com/api/v3/simple/price",
-                params={"ids": cfg["coingecko_id"], "vs_currencies": "usd"},
-            )
-            price_res.raise_for_status()
-            native_usd = price_res.json()[cfg["coingecko_id"]]["usd"]
-        except (httpx.HTTPError, KeyError, ValueError):
-            pass
+        prices = await _get_coingecko_prices(client, [cfg["coingecko_id"]])
+        native_data = prices.get(cfg["coingecko_id"])
+        native_usd = native_data["usd"] if native_data else None
 
     return {"gwei": gwei, "native_usd": native_usd}
+
+
+# Warm-instance cache: symbol -> coingecko id. Resolving a symbol via /search
+# is the slow part; once resolved it never changes, so reuse it across
+# requests for the lifetime of this serverless instance.
+_COIN_ID_CACHE: dict[str, str] = {}
+
+
+@app.get("/toolkit/ticker")
+@limiter.limit("60/minute")
+async def toolkit_ticker(request: Request, symbols: str = Query(...)):
+    syms = [s.strip().upper() for s in symbols.split(",") if s.strip()][:20]
+    if not syms:
+        return {}
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        # Resolve any symbols we haven't seen before (one /search call each,
+        # only for cache misses) — everything else piggybacks on the cache.
+        to_resolve = [s for s in syms if s not in _COIN_ID_CACHE]
+        if to_resolve:
+            resolve_tasks = [
+                client.get("https://api.coingecko.com/api/v3/search", params={"query": s})
+                for s in to_resolve
+            ]
+            results = await asyncio.gather(*resolve_tasks, return_exceptions=True)
+            for sym, res in zip(to_resolve, results):
+                if isinstance(res, Exception) or res.status_code != 200:
+                    continue
+                coins = res.json().get("coins") or []
+                exact = next((c for c in coins if (c.get("symbol") or "").upper() == sym), None)
+                pick = exact or (coins[0] if coins else None)
+                if pick:
+                    _COIN_ID_CACHE[sym] = pick["id"]
+
+        ids_by_symbol = {s: _COIN_ID_CACHE[s] for s in syms if s in _COIN_ID_CACHE}
+        out: dict[str, dict] = {s: {"error": True} for s in syms}
+        if not ids_by_symbol:
+            return out
+
+        prices = await _get_coingecko_prices(client, list(ids_by_symbol.values()))
+        for sym, coin_id in ids_by_symbol.items():
+            d = prices.get(coin_id)
+            if d and "usd" in d:
+                out[sym] = {"price": d["usd"], "chg": d.get("usd_24h_change") or 0}
+
+    return out
 
 
 # honeypot.is only simulates EVM chains — there is no free equivalent for
