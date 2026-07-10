@@ -124,6 +124,12 @@
 .tool-head p{color:var(--muted2);font-size:13px;margin-top:4px}
 .tool-body input[type="text"],.tool-body input[type="number"],.tool-body select,.tool-body textarea{background:rgba(255,255,255,.04);border:1px solid var(--border2);border-radius:11px;padding:12px 14px;color:#fff;font-family:var(--body);font-size:14.5px;width:100%;transition:border-color .2s}
 .tool-body input:focus,.tool-body select:focus,.tool-body textarea:focus{outline:0;border-color:var(--electric)}
+/* The <select> itself picks up the dark theme fine, but its dropdown
+   popup is a native OS widget — without an explicit background on each
+   <option>, some browsers (Windows Chrome/Edge) render it with a default
+   white popup behind our inherited white text, making every row invisible
+   except whichever one has the system hover highlight. */
+.tool-body select option{background:#0d1326;color:#fff}
 .tk-addrow{display:flex;gap:10px}
 .tk-addrow input{flex:1;min-width:0}
 #portalModal .btn.small{padding:11px 18px;font-size:13.5px;flex:none}
