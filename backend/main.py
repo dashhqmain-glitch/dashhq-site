@@ -57,6 +57,16 @@ def _avatar_url(user: dict) -> str:
     return f"https://cdn.discordapp.com/embed/avatars/{idx}.png"
 
 
+def _member_avatar_url(guild_id: str, user: dict, member: dict) -> str:
+    """Prefer the citizen's server-specific (guild) avatar/pfp, fetched via
+    the bot, over their global Discord avatar — matches what members actually
+    see of each other inside the server, not their profile elsewhere."""
+    guild_avatar = member.get("avatar")
+    if guild_avatar:
+        return f"https://cdn.discordapp.com/guilds/{guild_id}/users/{user['id']}/avatars/{guild_avatar}.png?size=128"
+    return _avatar_url(user)
+
+
 @app.get("/auth/discord")
 async def discord_login():
     return RedirectResponse(_oauth_url())
@@ -104,6 +114,7 @@ async def discord_callback(request: Request, code: str = None, error: str = None
         tier = "CITIZEN"
         nick = None
         joined_year = None
+        avatar_url = _avatar_url(user)
 
         if settings.discord_bot_token:
             member_res = await client.get(
@@ -116,6 +127,9 @@ async def discord_callback(request: Request, code: str = None, error: str = None
                 nick = m.get("nick")
                 raw_joined = m.get("joined_at", "")
                 joined_year = raw_joined[:4] if raw_joined else None
+                # Pull pfp + details from the bot's guild member record, not
+                # the OAuth identity — reflects the real in-server profile.
+                avatar_url = _member_avatar_url(settings.discord_guild_id, user, m)
 
                 # Membership requires holding the Citizen role, not just guild presence.
                 is_member = (
@@ -138,7 +152,7 @@ async def discord_callback(request: Request, code: str = None, error: str = None
             "sub": user_id,
             "display_name": display_name.upper(),
             "handle": f"@{user['username']}",
-            "avatar": _avatar_url(user),
+            "avatar": avatar_url,
             "is_member": is_member,
             "tier": tier,
             "joined": joined_year or "—",
@@ -192,7 +206,7 @@ def _member_row(m: dict) -> dict:
         "global_name": user.get("global_name"),
         "nickname": nick,
         "display_name": display_name,
-        "avatar_url": _avatar_url(user),
+        "avatar_url": _member_avatar_url(settings.discord_guild_id, user, m),
         "roles": roles,
         "tier": "CITIZEN",
         "joined_at": m.get("joined_at"),
@@ -505,6 +519,127 @@ async def discord_interactions(request: Request):
             "components": updated_components,
         },
     }
+
+
+# Most public RPC endpoints don't send CORS headers (they're built for
+# server/wallet use, not raw browser fetch), so gas price has to be proxied
+# server-side rather than called directly from the client like the other tools.
+GAS_CHAINS = {
+    "ethereum": {"rpc": "https://ethereum-rpc.publicnode.com", "coingecko_id": "ethereum"},
+    "bsc": {"rpc": "https://bsc-rpc.publicnode.com", "coingecko_id": "binancecoin"},
+    "polygon": {"rpc": "https://polygon-bor-rpc.publicnode.com", "coingecko_id": "matic-network"},
+    "arbitrum": {"rpc": "https://arbitrum-one-rpc.publicnode.com", "coingecko_id": "ethereum"},
+    "optimism": {"rpc": "https://optimism-rpc.publicnode.com", "coingecko_id": "ethereum"},
+    "base": {"rpc": "https://base-rpc.publicnode.com", "coingecko_id": "ethereum"},
+    "avalanche": {"rpc": "https://avalanche-c-chain-rpc.publicnode.com", "coingecko_id": "avalanche-2"},
+}
+
+
+@app.get("/toolkit/gas")
+@limiter.limit("60/minute")
+async def toolkit_gas(request: Request, chain: str = Query("ethereum")):
+    if chain not in GAS_CHAINS:
+        raise HTTPException(status_code=400, detail="unsupported chain")
+    cfg = GAS_CHAINS[chain]
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        gwei = None
+        native_usd = None
+        try:
+            rpc_res = await client.post(
+                cfg["rpc"],
+                json={"jsonrpc": "2.0", "method": "eth_gasPrice", "params": [], "id": 1},
+                headers={"Content-Type": "application/json"},
+            )
+            rpc_res.raise_for_status()
+            gwei = int(rpc_res.json()["result"], 16) / 1e9
+        except (httpx.HTTPError, KeyError, ValueError):
+            pass
+
+        try:
+            price_res = await client.get(
+                "https://api.coingecko.com/api/v3/simple/price",
+                params={"ids": cfg["coingecko_id"], "vs_currencies": "usd"},
+            )
+            price_res.raise_for_status()
+            native_usd = price_res.json()[cfg["coingecko_id"]]["usd"]
+        except (httpx.HTTPError, KeyError, ValueError):
+            pass
+
+    return {"gwei": gwei, "native_usd": native_usd}
+
+
+# honeypot.is only simulates EVM chains — there is no free equivalent for
+# non-EVM chains (Solana etc.), so the rug checker is intentionally EVM-only.
+ALLOWED_CHAIN_IDS = {1, 56, 137, 42161, 10, 8453, 43114}
+
+
+class RugCheckIn(BaseModel):
+    address: str
+    chain_id: int = 1
+
+    @field_validator("address")
+    @classmethod
+    def _valid_address(cls, v: str) -> str:
+        v = v.strip()
+        if not re.match(r"^0x[a-fA-F0-9]{40}$", v):
+            raise ValueError("must be a valid EVM contract address (0x...)")
+        return v
+
+    @field_validator("chain_id")
+    @classmethod
+    def _valid_chain(cls, v: int) -> int:
+        if v not in ALLOWED_CHAIN_IDS:
+            raise ValueError("unsupported chain")
+        return v
+
+
+@app.post("/toolkit/rug-check")
+@limiter.limit("20/minute")
+async def rug_check(request: Request, payload: RugCheckIn):
+    # Proxied server-side (rather than called from the browser) so the free
+    # honeypot.is API isn't hit by an uncontrolled client fan-out, and so it
+    # can share the same slowapi rate limiting as the rest of the API.
+    async with httpx.AsyncClient(timeout=10) as client:
+        try:
+            res = await client.get(
+                "https://api.honeypot.is/v2/IsHoneypot",
+                params={"address": payload.address, "chainID": payload.chain_id},
+            )
+            res.raise_for_status()
+        except httpx.HTTPError:
+            raise HTTPException(status_code=502, detail="Could not reach the honeypot scanner")
+
+    data = res.json()
+    honeypot = data.get("honeypotResult") or {}
+    simulation = data.get("simulationResult") or {}
+    contract = data.get("contractCode") or {}
+    pair = data.get("pair") or {}
+    summary = data.get("summary") or {}
+
+    is_honeypot = bool(honeypot.get("isHoneypot"))
+    buy_tax = simulation.get("buyTax")
+    sell_tax = simulation.get("sellTax")
+    open_source = contract.get("openSource")
+    liquidity = pair.get("liquidity") if isinstance(pair, dict) else None
+
+    checks = [
+        {"label": "Not flagged as a honeypot", "pass": not is_honeypot},
+        {"label": "Contract source is verified/open", "pass": bool(open_source)},
+        {"label": "Buy tax under 10%", "pass": buy_tax is None or buy_tax < 10},
+        {"label": "Sell tax under 10%", "pass": sell_tax is None or sell_tax < 10},
+        {"label": "Has active liquidity", "pass": bool(liquidity) and liquidity > 0},
+    ]
+
+    risk = (summary.get("risk") or "").lower()
+    if is_honeypot or risk == "high" or (sell_tax is not None and sell_tax >= 50):
+        level, label = "high", "High Risk"
+    elif risk == "medium" or not open_source or (sell_tax is not None and sell_tax >= 10):
+        level, label = "medium", "Caution"
+    else:
+        level, label = "low", "Looks Clean"
+
+    return {"level": level, "label": label, "checks": checks}
 
 
 @app.get("/health")

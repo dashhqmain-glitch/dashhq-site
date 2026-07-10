@@ -392,28 +392,299 @@
         </div>
 
         <div class="state" data-state="member">
-          <div class="member">
-            <span class="welcome"><span class="d"></span> Welcome back, Citizen</span>
-            <div class="portal-pfp"><img id="cardAvatar" src="" alt=""></div>
-            <div class="card">
-              <div class="holo"></div>
-              <span class="logo-mark-img wm"></span>
-              <div class="ct">
-                <div class="top"><span class="brand">DASH CITIZEN</span><span class="tier" id="cardTier">★ CITIZEN</span></div>
-                <div>
-                  <div class="name" id="cardName">VALKYRIE.ETH</div>
-                  <div class="handle" id="cardHandle">@valkyrie_onchain</div>
-                </div>
-                <div class="meta">
-                  <div><div class="l">Member Since</div><div class="v" id="cardJoined">2024</div></div>
-                  <div><div class="l">Status</div><div class="v" style="color:var(--green)">Active</div></div>
+          <div class="hub" id="hub">
+
+            <div class="hub-head">
+              <div class="hub-id">
+                <span class="hub-av"><img id="hubAvatar" src="" alt=""></span>
+                <div class="hub-idtext"><div class="hub-name" id="hubName">Citizen</div><div class="hub-tier" id="hubTier">★ CITIZEN</div></div>
+              </div>
+              <button class="btn btn-g hub-signout" onclick="signOut()">Sign out</button>
+            </div>
+
+            <div class="hub-tabs" role="tablist">
+              <button class="hub-tab active" data-hub="card" onclick="Hub.go('card')" role="tab" aria-selected="true">
+                <svg viewBox="0 0 24 24"><rect x="2.5" y="5.5" width="19" height="13" rx="2.5"/><path d="M2.5 9.5h19"/></svg> Card
+              </button>
+              <button class="hub-tab" data-hub="toolkit" onclick="Hub.go('toolkit')" role="tab" aria-selected="false">
+                <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg> Toolkit
+              </button>
+              <button class="hub-tab" data-hub="profile" onclick="Hub.go('profile')" role="tab" aria-selected="false">
+                <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg> Profile
+              </button>
+            </div>
+
+            <!-- ── PANEL: CARD ── -->
+            <div class="hub-panel on" data-hub-panel="card">
+              <div class="portal-pfp"><img id="cardAvatar" src="" alt=""></div>
+              <div class="card" id="memberCard">
+                <div class="holo"></div>
+                <span class="logo-mark-img wm"></span>
+                <div class="ct">
+                  <div class="top"><span class="brand">DASH CITIZEN</span><span class="tier" id="cardTier">★ CITIZEN</span></div>
+                  <div>
+                    <div class="name" id="cardName">VALKYRIE.ETH</div>
+                    <div class="handle" id="cardHandle">@valkyrie_onchain</div>
+                  </div>
+                  <div class="meta">
+                    <div><div class="l">Member Since</div><div class="v" id="cardJoined">2024</div></div>
+                    <div><div class="l">Status</div><div class="v" style="color:var(--green)">Active</div></div>
+                  </div>
                 </div>
               </div>
+              <div class="card-actions">
+                <button class="cardbtn download" onclick="CardActions.download()">
+                  <svg viewBox="0 0 24 24"><path d="M12 3v13m0 0-4.5-4.5M12 16l4.5-4.5"/><path d="M4 19.5h16"/></svg>
+                  <span>Download</span>
+                </button>
+                <button class="cardbtn share-x" onclick="CardActions.shareX()">
+                  <svg viewBox="0 0 24 24"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+                  <span>Share to X</span>
+                </button>
+              </div>
+              <p class="card-hint">Downloads straight from your browser — no upload, nothing leaves your device. Sharing opens X with a caption already written for you.</p>
+              <div class="row">
+                <a href="#blog" onclick="closePortal()" class="btn btn-p">Enter Research →</a>
+              </div>
             </div>
-            <div class="row">
-              <a href="#blog" onclick="closePortal()" class="btn btn-p">Enter Research →</a>
-              <button class="btn btn-g" onclick="signOut()">Sign out</button>
+
+            <!-- ── PANEL: TOOLKIT ── -->
+            <div class="hub-panel" data-hub-panel="toolkit">
+              <div class="tk-jump" id="tkJump">
+                <button data-jump="ticker">Price Ticker</button>
+                <button data-jump="gas">Gas Tracker</button>
+                <button data-jump="wallet">Wallet Card</button>
+                <button data-jump="pnl">DCA / PnL</button>
+                <button data-jump="ape">Ape Math</button>
+                <button data-jump="pairs">New Pairs</button>
+                <button data-jump="rug">Rug Check</button>
+                <button data-jump="slip">Slippage</button>
+              </div>
+
+              <div class="tools-stack">
+
+                <!-- 1. PRICE TICKER -->
+                <section class="tool-card" id="tool-ticker">
+                  <div class="tool-head"><span class="tool-ic"><svg viewBox="0 0 24 24"><path d="M3 17l5-5 4 4 8-9"/><path d="M21 7v5h-5"/></svg></span><div><h3>Price Ticker</h3><p>Live prices for the tokens you care about.</p></div></div>
+                  <div class="tool-body">
+                    <div class="tk-addrow">
+                      <input type="text" id="tickerInput" placeholder="Add a token — e.g. ETH, SOL, ARB" autocomplete="off">
+                      <button class="btn btn-g small" onclick="Ticker.add()">Add</button>
+                    </div>
+                    <div class="tk-grid" id="tickerGrid"></div>
+                    <div class="tk-updated" id="tickerUpdated">Updating live…</div>
+                  </div>
+                </section>
+
+                <!-- 2. GAS TRACKER -->
+                <section class="tool-card" id="tool-gas">
+                  <div class="tool-head"><span class="tool-ic"><svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 0 1-3.4 0"/></svg></span><div><h3>Gas Tracker</h3><p>What it'll actually cost you right now.</p></div></div>
+                  <div class="tool-body">
+                    <div class="gas-est-row">
+                      <label class="gas-label" for="gasChain">Chain:</label>
+                      <select id="gasChain" onchange="Gas.switchChain()">
+                        <option value="ethereum" selected>Ethereum</option>
+                        <option value="bsc">BNB Chain</option>
+                        <option value="polygon">Polygon</option>
+                        <option value="arbitrum">Arbitrum</option>
+                        <option value="optimism">Optimism</option>
+                        <option value="base">Base</option>
+                        <option value="avalanche">Avalanche</option>
+                      </select>
+                    </div>
+                    <div class="gas-readout">
+                      <div class="gas-big" id="gasBig">—</div>
+                      <div class="gas-unit">gwei · <span id="gasChainLabel">Ethereum mainnet</span></div>
+                    </div>
+                    <div class="gas-tiers" id="gasTiers"></div>
+                    <div class="gas-est-row">
+                      <label class="gas-label" for="gasTxType">Estimate for:</label>
+                      <select id="gasTxType" onchange="Gas.render()">
+                        <option value="transfer">Simple transfer</option>
+                        <option value="swap" selected>Token swap</option>
+                        <option value="mint">NFT mint</option>
+                      </select>
+                    </div>
+                    <div class="gas-costs" id="gasCosts"></div>
+                  </div>
+                </section>
+
+                <!-- 3. WALLET CARD -->
+                <section class="tool-card" id="tool-wallet">
+                  <div class="tool-head"><span class="tool-ic"><svg viewBox="0 0 24 24"><rect x="2.5" y="6" width="19" height="13" rx="2.5"/><path d="M16 12.5h3"/></svg></span><div><h3>Wallet Card</h3><p>A clean, shareable ID for your address.</p></div></div>
+                  <div class="tool-body">
+                    <div class="tk-addrow">
+                      <input type="text" id="walletInput" placeholder="Paste any wallet address — any chain — or an ENS name" autocomplete="off">
+                      <button class="btn btn-g small" onclick="WalletCard.render()">Generate</button>
+                    </div>
+                    <div class="wcard" id="wcardOut" style="display:none">
+                      <div class="wcard-face">
+                        <div class="wcard-holo"></div>
+                        <span class="logo-mark-img wcard-wm"></span>
+                        <div class="wcard-addr" id="wcardAddr">0x0000…0000</div>
+                        <div class="wcard-ens" id="wcardEns"></div>
+                        <div class="wcard-row">
+                          <img id="wcardQr" class="wcard-qr" alt="Wallet QR code">
+                          <div class="wcard-btns">
+                            <button class="btn btn-g small" id="wcardCopy" onclick="WalletCard.copy()">Copy Address</button>
+                            <button class="btn btn-g small" onclick="WalletCard.downloadQr()">Download QR</button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                <!-- 4. DCA / PNL CALCULATOR -->
+                <section class="tool-card" id="tool-pnl">
+                  <div class="tool-head"><span class="tool-ic"><svg viewBox="0 0 24 24"><path d="M4 19V5M4 19h16M9 15l3-4 3 2 4-6"/></svg></span><div><h3>DCA / PnL Calculator</h3><p>Your average entry — and where you stand now.</p></div></div>
+                  <div class="tool-body">
+                    <div class="pnl-rows" id="pnlRows"></div>
+                    <button class="btn btn-g small" onclick="Pnl.addRow()">+ Add another buy</button>
+                    <div class="pnl-current">
+                      <label>Current price ($)</label>
+                      <input type="number" id="pnlCurrent" value="3200" min="0" step="any" oninput="Pnl.calc()">
+                    </div>
+                    <div class="pnl-summary" id="pnlSummary"></div>
+                  </div>
+                </section>
+
+                <!-- 5. APE MATH CALCULATOR -->
+                <section class="tool-card" id="tool-ape">
+                  <div class="tool-head"><span class="tool-ic"><svg viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 10-12h-7z"/></svg></span><div><h3>Ape Math Calculator</h3><p>The "what if" meme math — for fun, not for financial planning.</p></div></div>
+                  <div class="tool-body">
+                    <div class="ape-grid">
+                      <div class="ape-field"><label>Amount invested ($)</label><input type="number" id="apeAmount" value="500" min="0" oninput="Ape.calc()"></div>
+                      <div class="ape-field"><label>Current market cap ($)</label><input type="number" id="apeCurrentMc" value="2000000" min="0" oninput="Ape.calc()"></div>
+                    </div>
+                    <div class="ape-field">
+                      <label>Target market cap ($) — <span id="apeTargetLabel">20,000,000</span></label>
+                      <input type="range" id="apeTarget" min="100000" max="1000000000" step="100000" value="20000000" oninput="Ape.calc()">
+                      <input type="number" id="apeTargetNum" value="20000000" min="0" oninput="Ape.syncFromNum()">
+                    </div>
+                    <div class="ape-result">
+                      <div class="ape-mult" id="apeMult">40.0x</div>
+                      <div class="ape-value">→ <span id="apeValue">$20,000</span></div>
+                    </div>
+                    <p class="ape-disclaimer">⚠ Illustrative math only — not a prediction, not financial advice. Market caps do not move on command.</p>
+                  </div>
+                </section>
+
+                <!-- 6. NEW PAIR SCANNER -->
+                <section class="tool-card" id="tool-pairs">
+                  <div class="tool-head"><span class="tool-ic"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1"/></svg></span><div><h3>New Pair Scanner</h3><p>Freshly created pairs, as they land.</p></div></div>
+                  <div class="tool-body">
+                    <div class="pairs-filters">
+                      <select id="pairsChain" onchange="Pairs.refresh()">
+                        <option value="eth">Ethereum</option>
+                        <option value="bsc">BNB Chain</option>
+                        <option value="polygon_pos">Polygon</option>
+                        <option value="arbitrum">Arbitrum</option>
+                        <option value="optimism">Optimism</option>
+                        <option value="base">Base</option>
+                        <option value="avax">Avalanche</option>
+                        <option value="solana">Solana</option>
+                      </select>
+                      <select id="pairsAge" onchange="Pairs.render()">
+                        <option value="0">Any age</option>
+                        <option value="10">Last 10m</option>
+                        <option value="60">Last hour</option>
+                      </select>
+                      <div class="pairs-liq">
+                        <label>Min liquidity: $<span id="pairsLiqLabel">0</span></label>
+                        <input type="range" id="pairsLiq" min="0" max="200000" step="5000" value="0" oninput="Pairs.render()">
+                      </div>
+                    </div>
+                    <div class="pairs-feed" id="pairsFeed"></div>
+                  </div>
+                </section>
+
+                <!-- 7. RUG RISK CHECKER -->
+                <section class="tool-card" id="tool-rug">
+                  <div class="tool-head"><span class="tool-ic"><svg viewBox="0 0 24 24"><path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/></svg></span><div><h3>Rug Risk Checker</h3><p>A quick red-flag scan before you ape.</p></div></div>
+                  <div class="tool-body">
+                    <div class="gas-est-row">
+                      <label class="gas-label" for="rugChain">Chain:</label>
+                      <select id="rugChain">
+                        <option value="1" selected>Ethereum</option>
+                        <option value="56">BNB Chain</option>
+                        <option value="137">Polygon</option>
+                        <option value="42161">Arbitrum</option>
+                        <option value="10">Optimism</option>
+                        <option value="8453">Base</option>
+                        <option value="43114">Avalanche</option>
+                      </select>
+                    </div>
+                    <div class="tk-addrow">
+                      <input type="text" id="rugInput" placeholder="Paste a token contract address" autocomplete="off">
+                      <button class="btn btn-g small" onclick="Rug.check()">Check</button>
+                    </div>
+                    <div class="rug-out" id="rugOut" style="display:none">
+                      <div class="rug-badge" id="rugBadge"></div>
+                      <div class="rug-checklist" id="rugChecklist"></div>
+                      <a href="#blog" onclick="closePortal()" class="rug-link">Read: Anatomy of a Rug Pull →</a>
+                    </div>
+                    <p class="ape-disclaimer">Simulation-based EVM chains only — no honeypot simulator exists yet for non-EVM chains like Solana.</p>
+                  </div>
+                </section>
+
+                <!-- 8. PRICE IMPACT / SLIPPAGE ESTIMATOR -->
+                <section class="tool-card" id="tool-slip">
+                  <div class="tool-head"><span class="tool-ic"><svg viewBox="0 0 24 24"><path d="M3 12c2-4 4-6 9-6s7 2 9 6c-2 4-4 6-9 6s-7-2-9-6z"/><circle cx="12" cy="12" r="2"/></svg></span><div><h3>Price Impact / Slippage Estimator</h3><p>How much a trade will move the pool.</p></div></div>
+                  <div class="tool-body">
+                    <div class="slip-grid">
+                      <div class="ape-field"><label>Chain</label>
+                        <select id="slipChain" onchange="Slip.calc()">
+                          <option value="eth" selected>Ethereum</option>
+                          <option value="bsc">BNB Chain</option>
+                          <option value="polygon_pos">Polygon</option>
+                          <option value="arbitrum">Arbitrum</option>
+                          <option value="optimism">Optimism</option>
+                          <option value="base">Base</option>
+                          <option value="avax">Avalanche</option>
+                          <option value="solana">Solana</option>
+                        </select>
+                      </div>
+                      <div class="ape-field"><label>Pair (e.g. ETH/USDC)</label><input type="text" id="slipQuery" value="ETH/USDC" oninput="Slip.calc()"></div>
+                      <div class="ape-field"><label>Amount in ($)</label><input type="number" id="slipAmount" value="1000" min="0" oninput="Slip.calc()"></div>
+                    </div>
+                    <div class="slip-result" id="slipResult"></div>
+                  </div>
+                </section>
+
+              </div>
             </div>
+
+            <!-- ── PANEL: PROFILE ── -->
+            <div class="hub-panel" data-hub-panel="profile">
+              <div class="profile-id">
+                <span class="profile-av"><img id="profileAvatar" src="" alt=""></span>
+                <div class="profile-idtext">
+                  <div class="profile-name" id="profileName">VALKYRIE.ETH</div>
+                  <div class="profile-handle" id="profileHandle">@valkyrie_onchain</div>
+                  <div class="profile-tags"><span class="ptag gold" id="profileTierTag">★ Citizen</span><span class="ptag" id="profileSinceTag">Citizen since 2024</span></div>
+                </div>
+              </div>
+
+              <div class="profile-section">
+                <h4>Bio</h4>
+                <textarea id="profileBio" rows="3" placeholder="Tell the HQ a little about yourself…"></textarea>
+                <button class="btn btn-g small" onclick="Profile.saveBio()">Save Bio</button>
+                <span class="profile-savemsg" id="profileSaveMsg">Saved ✓</span>
+              </div>
+
+              <div class="profile-section">
+                <h4>Pinned Tools</h4>
+                <p class="profile-hint">Your most-used tools, one tap away. Pin from any tool in the Toolkit.</p>
+                <div class="profile-pins" id="profilePins"></div>
+              </div>
+
+              <div class="profile-section profile-stats-stub">
+                <h4>Activity &amp; Stats</h4>
+                <p class="profile-hint">Coming soon — win contributions, alpha calls followed, and community rank will live here.</p>
+              </div>
+            </div>
+
           </div>
         </div>
 
@@ -429,11 +700,6 @@
       </div>
     </main>
   </div>
-</div>
-<div class="demo">
-  <button data-state="member" onclick="setState('member')">Citizen</button>
-  <button data-state="notmember" onclick="setState('notmember')">Not member</button>
-  <button data-state="prelogin" onclick="signOut()">Reset</button>
 </div>
 
 <script src="app.js"></script>

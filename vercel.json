@@ -17,6 +17,7 @@
     { "src": "/auth/(.*)",     "dest": "/api/index.py" },
     { "src": "/cron/(.*)",     "dest": "/api/index.py" },
     { "src": "/discord/(.*)",  "dest": "/api/index.py" },
+    { "src": "/toolkit/(.*)",  "dest": "/api/index.py" },
     { "src": "/applications",  "dest": "/api/index.py" },
     { "src": "/health",        "dest": "/api/index.py" },
     { "src": "/portal",       "dest": "/", "status": 301 },
