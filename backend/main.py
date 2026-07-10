@@ -299,9 +299,15 @@ class ApplicationIn(BaseModel):
     @field_validator("x")
     @classmethod
     def _valid_x_profile(cls, v: str) -> str:
-        if not X_PROFILE_RE.match(v.strip()):
+        v = v.strip()
+        if not X_PROFILE_RE.match(v):
             raise ValueError("must be a valid X profile link or handle")
-        return v.strip()
+        # Normalize to a full URL — a bare handle like "@name" isn't a valid
+        # link target, so without this the Discord follow-up's clickable
+        # profile link would silently fail to render as clickable.
+        if v.startswith("http://") or v.startswith("https://"):
+            return v
+        return f"https://x.com/{v.lstrip('@')}"
 
     @field_validator("followedTeam")
     @classmethod
