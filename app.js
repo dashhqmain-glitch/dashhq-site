@@ -377,6 +377,39 @@
   window.closeLegal=function(){ ov.classList.remove('open'); document.body.style.overflow=''; };
   window.addEventListener('keydown',function(e){ if(e.key==='Escape'&&ov.classList.contains('open'))closeLegal(); });
 })();
+(function(){
+  // Substack's subscribe API blocks direct fetch() from other origins via
+  // its own bot protection (confirmed: real 403s). Rather than fight that,
+  // this form opens Substack's real subscribe page in a new tab with the
+  // email prefilled — a normal navigation, not an API call, so it can't be
+  // silently blocked the way the old fetch(mode:'no-cors') version was.
+  var SUBSTACK_PUB = "dashhq1";
+  const f=document.getElementById('subForm'); if(!f) return;
+  const email=document.getElementById('subEmail'), msg=document.getElementById('subMsg');
+  const row=f.querySelector('.sub-row');
+  const EMAIL_RE=/^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  function show(text,ok){ msg.textContent=text; msg.className='sub-msg show '+(ok?'ok':'err'); }
+  function reason(val){
+    if(!val) return 'Please enter your email address.';
+    if(val.indexOf('@')<0) return 'That email is missing an “@”.';
+    const parts=val.split('@');
+    if(parts.length>2) return 'An email can only contain one “@”.';
+    if(!parts[0]) return 'Add the part before the “@”.';
+    if(!parts[1]||parts[1].indexOf('.')<0) return 'Add the domain (e.g. name@gmail.com).';
+    if(/\.$/.test(val)||/\.\./.test(val)) return 'That domain looks incomplete.';
+    return 'That email address looks incomplete.';
+  }
+  email.addEventListener('input',function(){ row.classList.remove('valid','invalid'); msg.className='sub-msg'; });
+  f.addEventListener('submit',function(e){
+    e.preventDefault();
+    const val=(email.value||'').trim();
+    if(!EMAIL_RE.test(val)){ row.classList.add('invalid'); row.classList.remove('valid'); show(reason(val),false); email.focus(); return; }
+    row.classList.add('valid'); row.classList.remove('invalid');
+    window.open('https://'+SUBSTACK_PUB+'.substack.com/subscribe?email='+encodeURIComponent(val),'_blank','noopener');
+    show('Opening Substack in a new tab — confirm there to finish subscribing.',true);
+    f.reset(); row.classList.remove('valid');
+  });
+})();
 
 
 (function(){var el=document.getElementById('cursorGhost');if(!el)return;var tx=innerWidth/2,ty=innerHeight/2,cx=tx,cy=ty,shown=false;function m(e){var p=e.touches?e.touches[0]:e;tx=p.clientX;ty=p.clientY;if(!shown){shown=true;el.style.opacity=1;}}window.addEventListener('pointermove',m,{passive:true});window.addEventListener('pointerdown',m,{passive:true});document.addEventListener('mouseleave',function(){el.style.opacity=0;shown=false;});(function loop(){cx+=(tx-cx)*0.14;cy+=(ty-cy)*0.14;el.style.transform='translate('+cx.toFixed(1)+'px,'+cy.toFixed(1)+'px) translate(-50%,-50%)';requestAnimationFrame(loop);})();})();

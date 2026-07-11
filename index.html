@@ -280,14 +280,17 @@
 </section>
 
 <!-- ══ SUBSCRIBE (Substack) ══
-     DEV: publication handle is "dashhq1" (dashhq1.substack.com). Uses
-     Substack's own official embeddable widget (an iframe to their /embed
-     page) rather than posting to their API directly — a direct fetch()
-     from another origin gets silently blocked by Substack's own Cloudflare
-     bot protection (verified: real 403, invisible to a no-cors fetch, so
-     the old custom form always showed "You're in!" even when nothing was
-     ever submitted). The iframe runs the real, first-party Substack page,
-     so it isn't subject to that cross-origin block. -->
+     DEV: publication handle is "dashhq1" (dashhq1.substack.com). Posting
+     straight to Substack's API via fetch() gets silently blocked by their
+     own Cloudflare bot protection (verified: real 403 — with the old
+     mode:'no-cors' fetch that failure was invisible to our JS, so the form
+     always showed "You're in!" even when nothing was sent). Their embed
+     iframe avoids that, but it's cross-origin — we can't restyle it to
+     match the site, it always renders as Substack's own light widget.
+     This form is fully our own styling; on submit it opens Substack's
+     real subscribe page in a new tab with the email prefilled, which is
+     Substack's own supported integration path when you want full control
+     over the embedded design instead of using their iframe. -->
 <section id="subscribe">
   <div class="wrap">
     <div class="sub-card" data-reveal="up">
@@ -296,10 +299,14 @@
         <h3>Alpha in your inbox.</h3>
         <p>Get our research drops, mint breakdowns and market notes straight from the HQ — no noise, just signal. Delivered through our Substack.</p>
       </div>
-      <div class="sub-embed-wrap">
-        <iframe src="https://dashhq1.substack.com/embed" class="sub-embed" title="Subscribe to the Dash Dispatch" scrolling="no"></iframe>
-      </div>
-      <div class="sub-note"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg> Powered by Substack. Unsubscribe anytime.</div>
+      <form class="sub-form" id="subForm" novalidate>
+        <div class="sub-row">
+          <input type="email" name="email" id="subEmail" placeholder="you@email.com" autocomplete="email" aria-label="Email address" required>
+          <button type="submit">Subscribe</button>
+        </div>
+        <div class="sub-note"><svg viewBox="0 0 24 24"><rect x="3" y="11" width="18" height="10" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg> Powered by Substack. Unsubscribe anytime.</div>
+        <div class="sub-msg" id="subMsg" role="status"></div>
+      </form>
     </div>
   </div>
 </section>
