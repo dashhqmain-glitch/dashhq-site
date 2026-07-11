@@ -1,4 +1,8 @@
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+/* Form controls don't inherit font-family by default - without this every
+   input/button/select/textarea silently renders in the OS's generic UI
+   font instead of the site's actual typeface. */
+button,input,select,textarea,optgroup{font-family:inherit;font-size:inherit;line-height:inherit}
 :root{
   --bg:#05080F;--card:rgba(255,255,255,0.04);
   --border:rgba(255,255,255,0.08);--border2:rgba(255,255,255,0.14);

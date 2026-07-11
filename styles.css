@@ -1,4 +1,10 @@
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+/* Browsers don't inherit font-family into form controls by default - every
+   button, input, select, and textarea silently renders in the OS's generic
+   UI font (Arial etc.) instead of the site's actual typeface unless this is
+   set explicitly. Without it, anything interactive - login buttons, search
+   boxes, dropdowns - visually breaks from the rest of the page. */
+button,input,select,textarea,optgroup{font-family:inherit;font-size:inherit;line-height:inherit}
 :root{
   --bg:#05080F; --bg2:#0A0F1E; --navy:#0B1224;
   --card:rgba(255,255,255,0.04); --card2:rgba(27,66,255,0.07);
