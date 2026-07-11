@@ -19,8 +19,14 @@
 .p-sub{color:var(--muted2);max-width:46ch;margin:18px auto 0;font-size:16px}
 
 /* when verified and inside the Hub, drop the marketing header — the hub's
-   own identity strip replaces it, so we're not stacking two headers */
-.portal.in-hub{padding-top:96px}
+   own identity strip replaces it, so we're not stacking two headers.
+   Critically, also switch off vertical centering: .portal centers its
+   content for the short pre-login gate card, but the Hub is often taller
+   than the viewport and has genuinely scrollable content — centering it
+   meant on any viewport taller than the current tab's content, the whole
+   Hub visually floated in the middle/bottom of a mostly-empty screen
+   instead of starting at the top like a normal page. */
+.portal.in-hub{justify-content:flex-start;padding-top:8px}
 .portal.in-hub .eyebrow,.portal.in-hub .p-h,.portal.in-hub .p-sub{display:none}
 
 /* The pre-login "gate" (Verify Citizenship) is meant to read as one
@@ -111,9 +117,17 @@
 .portal-pfp{width:72px;height:72px;border-radius:50%;margin:8px auto 14px;background:conic-gradient(from 180deg,var(--electric),var(--teal),var(--primary),var(--electric));padding:2px}
 .portal-pfp img{display:block;width:100%;height:100%;border-radius:50%;object-fit:cover;background:#0a1120}
 
-.auth.wide{width:min(980px,100%);text-align:left;padding:26px 24px 34px}
+/* overflow:visible so .hub-nav's position:sticky resolves against the real
+   scrolling container (#portalModal) instead of getting stuck relative to
+   this box, which has no scroll of its own — a sticky descendant of an
+   overflow:hidden ancestor doesn't track page scroll the way you'd expect. */
+.auth.wide{width:min(980px,100%);text-align:left;padding:26px 24px 34px;overflow:visible}
 
 /* ═══════════ PORTAL HUB ═══════════ */
+/* Pinned so your identity + tab switcher are always reachable while
+   scrolling a tab's content, instead of scrolling away with everything
+   else — a frosted backdrop keeps content passing underneath legible. */
+.hub-nav{position:sticky;top:0;z-index:5;background:rgba(10,15,30,.92);-webkit-backdrop-filter:blur(16px);backdrop-filter:blur(16px);padding-top:2px;padding-bottom:18px;margin-bottom:20px;border-bottom:1px solid var(--border)}
 .hub-head{display:flex;align-items:center;justify-content:space-between;gap:14px;flex-wrap:wrap;margin-bottom:20px}
 .hub-id{display:flex;align-items:center;gap:12px;min-width:0}
 .hub-av{width:44px;height:44px;border-radius:50%;flex:none;background:conic-gradient(from 160deg,var(--electric),var(--teal),var(--primary),var(--electric));padding:2px}
@@ -124,7 +138,7 @@
 .hub-tier{font-family:var(--mono);font-size:11px;color:var(--gold);margin-top:2px}
 .hub-signout{padding:9px 16px;font-size:13px}
 
-.hub-tabs{display:flex;gap:8px;overflow-x:auto;padding-bottom:2px;border-bottom:1px solid var(--border);margin-bottom:22px;scrollbar-width:none}
+.hub-tabs{display:flex;gap:8px;overflow-x:auto;padding-bottom:2px;scrollbar-width:none}
 .hub-tabs::-webkit-scrollbar{display:none}
 .hub-tab{flex:none;display:flex;align-items:center;gap:8px;padding:11px 18px;border-radius:12px 12px 0 0;background:transparent;border:0;color:var(--muted2);font-family:var(--body);font-weight:600;font-size:14px;cursor:pointer;transition:all .2s;white-space:nowrap;position:relative}
 .hub-tab svg{width:17px;height:17px;stroke:currentColor;fill:none;stroke-width:1.8}
@@ -158,13 +172,13 @@
 .tt-ic svg{width:18px;height:18px;stroke:var(--sky);fill:none;stroke-width:1.8}
 .tt-name{font-weight:700;font-size:14.5px;font-family:var(--display)}
 .tt-desc{font-size:12px;color:var(--muted2)}
-.tk-focusbar{display:flex;margin-bottom:14px;scroll-margin-top:100px}
+.tk-focusbar{display:flex;margin-bottom:14px;scroll-margin-top:150px}
 .tk-back{font-family:var(--mono);font-size:13px;color:var(--sky);background:rgba(255,255,255,.05);border:1px solid var(--border2);border-radius:30px;padding:9px 16px;cursor:pointer}
 .tk-back:hover{color:#fff;border-color:var(--electric)}
 .tools-stack .tool-card{display:none}
 .tools-stack .tool-card.active{display:block}
 .tools-stack{display:flex;flex-direction:column;gap:12px}
-.tool-card{border:1px solid var(--border);border-radius:16px;background:var(--card);padding:16px;scroll-margin-top:100px}
+.tool-card{border:1px solid var(--border);border-radius:16px;background:var(--card);padding:16px;scroll-margin-top:150px}
 .tool-head{display:flex;align-items:flex-start;gap:12px;margin-bottom:14px}
 .tool-ic{width:42px;height:42px;border-radius:12px;flex:none;display:grid;place-items:center;background:linear-gradient(135deg,rgba(77,114,255,.25),rgba(34,211,238,.12));border:1px solid var(--border2)}
 .tool-ic svg{width:20px;height:20px;stroke:var(--sky);fill:none;stroke-width:1.8}
@@ -429,7 +443,7 @@
 }
 @media(max-width:480px){
   .portal{padding:16px 16px 40px}
-  .portal.in-hub{padding-top:84px}
+  .portal.in-hub{padding-top:6px}
   .auth{padding:26px 20px}
   .hub-head{gap:10px}
   .hub-name{max-width:140px}

@@ -400,24 +400,26 @@
         <div class="state" data-state="member">
           <div class="hub" id="hub">
 
-            <div class="hub-head">
-              <div class="hub-id">
-                <span class="hub-av"><img id="hubAvatar" src="" alt=""></span>
-                <div class="hub-idtext"><div class="hub-name" id="hubName">Citizen</div><div class="hub-tier" id="hubTier">★ CITIZEN</div></div>
+            <div class="hub-nav">
+              <div class="hub-head">
+                <div class="hub-id">
+                  <span class="hub-av"><img id="hubAvatar" src="" alt=""></span>
+                  <div class="hub-idtext"><div class="hub-name" id="hubName">Citizen</div><div class="hub-tier" id="hubTier">★ CITIZEN</div></div>
+                </div>
+                <button class="btn btn-g hub-signout" onclick="signOut()">Sign out</button>
               </div>
-              <button class="btn btn-g hub-signout" onclick="signOut()">Sign out</button>
-            </div>
 
-            <div class="hub-tabs" role="tablist">
-              <button class="hub-tab active" data-hub="card" onclick="Hub.go('card')" role="tab" aria-selected="true">
-                <svg viewBox="0 0 24 24"><rect x="2.5" y="5.5" width="19" height="13" rx="2.5"/><path d="M2.5 9.5h19"/></svg> Membership Card
-              </button>
-              <button class="hub-tab" data-hub="toolkit" onclick="Hub.go('toolkit')" role="tab" aria-selected="false">
-                <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg> Toolkit
-              </button>
-              <button class="hub-tab" data-hub="profile" onclick="Hub.go('profile')" role="tab" aria-selected="false">
-                <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg> Profile
-              </button>
+              <div class="hub-tabs" role="tablist">
+                <button class="hub-tab active" data-hub="card" onclick="Hub.go('card')" role="tab" aria-selected="true">
+                  <svg viewBox="0 0 24 24"><rect x="2.5" y="5.5" width="19" height="13" rx="2.5"/><path d="M2.5 9.5h19"/></svg> Membership Card
+                </button>
+                <button class="hub-tab" data-hub="toolkit" onclick="Hub.go('toolkit')" role="tab" aria-selected="false">
+                  <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg> Toolkit
+                </button>
+                <button class="hub-tab" data-hub="profile" onclick="Hub.go('profile')" role="tab" aria-selected="false">
+                  <svg viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 4-6 8-6s8 2 8 6"/></svg> Profile
+                </button>
+              </div>
             </div>
 
             <!-- ── PANEL: CARD ── -->
