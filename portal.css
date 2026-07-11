@@ -23,6 +23,54 @@
 .portal.in-hub{padding-top:96px}
 .portal.in-hub .eyebrow,.portal.in-hub .p-h,.portal.in-hub .p-sub{display:none}
 
+/* The pre-login "gate" (Verify Citizenship) is meant to read as one
+   complete screen, not a page you scroll. #portalModal's actual scroll
+   wrapper is .rm-scroll (shared with #researchModal, styles.css) which
+   carries its own generous 92px/100px top/bottom padding sized for a long
+   research article — on the gate screen that padding alone was pushing
+   total height past the viewport before .portal's own content even
+   started. Trimmed here via :has() so #researchModal and the Hub (which
+   has real, necessarily scrollable content) are both untouched — only
+   the pre-login/verifying/not-a-member states are affected. The
+   height-based tiers below trim spacing (never content) further as the
+   viewport gets shorter, on phones in landscape as much as small laptops. */
+#portalModal:not(:has(.portal.in-hub)) .rm-scroll{min-height:100dvh;padding:56px 24px 40px}
+@media(max-height:860px){
+  #portalModal:not(:has(.portal.in-hub)) .rm-scroll{padding:32px 24px 24px}
+  .portal:not(.in-hub){padding-top:16px;padding-bottom:16px}
+  .portal:not(.in-hub) .p-h{margin-top:14px;font-size:clamp(30px,4.6vw,52px)}
+  .portal:not(.in-hub) .p-sub{margin-top:14px}
+  .portal:not(.in-hub) .auth{margin-top:28px}
+}
+@media(max-height:700px){
+  #portalModal:not(:has(.portal.in-hub)) .rm-scroll{padding:20px 20px 16px}
+  .portal:not(.in-hub) .eyebrow{font-size:11px}
+  .portal:not(.in-hub) .p-h{margin-top:10px;font-size:clamp(26px,4.2vw,40px)}
+  .portal:not(.in-hub) .p-sub{margin-top:10px;font-size:14px}
+  .portal:not(.in-hub) .auth{margin-top:18px;padding:26px 26px}
+  .portal:not(.in-hub) .auth h3{font-size:22px}
+  .portal:not(.in-hub) .conn{margin-top:16px}
+  .portal:not(.in-hub) .cbtn{padding:12px}
+  .portal:not(.in-hub) .divider{margin:16px 0 4px}
+}
+@media(max-height:560px){
+  .portal:not(.in-hub) .p-sub{display:none}
+  .portal:not(.in-hub) .p-h{font-size:clamp(22px,4vw,32px)}
+  .portal:not(.in-hub) .auth{margin-top:14px;padding:20px 22px}
+}
+@media(max-height:420px){
+  #portalModal:not(:has(.portal.in-hub)) .rm-scroll{padding:12px 16px 10px}
+  .portal:not(.in-hub){padding-top:8px;padding-bottom:8px}
+  .portal:not(.in-hub) .eyebrow{display:none}
+  .portal:not(.in-hub) .p-h{margin-top:0;font-size:clamp(19px,3.6vw,26px)}
+  .portal:not(.in-hub) .auth{margin-top:10px;padding:16px 18px}
+  .portal:not(.in-hub) .auth h3{font-size:18px}
+  .portal:not(.in-hub) .auth .note{font-size:12.5px}
+  .portal:not(.in-hub) .conn{margin-top:12px}
+  .portal:not(.in-hub) .cbtn{padding:10px;font-size:13.5px}
+  .portal:not(.in-hub) .divider{margin:10px 0 4px}
+}
+
 .auth{position:relative;width:min(440px,100%);margin:46px auto 0;border-radius:24px;border:1px solid var(--border2);background:linear-gradient(180deg,#0d1326,#080c18);padding:36px 32px;box-shadow:0 40px 100px -30px rgba(0,0,0,.65),0 40px 100px -40px rgba(27,66,255,.4);overflow:hidden}
 .auth::before{content:"";position:absolute;inset:0;border-radius:24px;padding:1px;background:linear-gradient(150deg,rgba(77,114,255,.6),transparent 45%);-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude;pointer-events:none}
 .state{display:none}
@@ -219,7 +267,77 @@
 .pair-copy svg{width:13px;height:13px;stroke:currentColor;fill:none;stroke-width:1.8}
 .pair-copy.copied{color:var(--green);border-color:rgba(16,185,129,.5);background:rgba(16,185,129,.12)}
 
-/* 7. rug checker */
+/* 7. CA scanner */
+.scan-out{margin-top:18px;animation:fade .4s cubic-bezier(.16,1,.3,1)}
+.scan-id{display:flex;align-items:center;gap:12px}
+.scan-logo{width:44px;height:44px;border-radius:12px;flex:none;background:rgba(255,255,255,.04);border:1px solid var(--border2);object-fit:cover}
+.scan-idtext{flex:1;min-width:0}
+.scan-name{display:flex;align-items:baseline;gap:8px;font-family:var(--display);font-weight:700;font-size:18px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.scan-sym{font-family:var(--mono);font-size:12.5px;color:var(--muted2);font-weight:400}
+.scan-badges{display:flex;gap:6px;margin-top:6px}
+.scan-dex{font-family:var(--mono);font-size:10px;padding:4px 8px;border-radius:20px;background:rgba(255,255,255,.05);border:1px solid var(--border2);color:var(--muted2);text-transform:capitalize}
+.scan-copy{flex:none;width:34px;height:34px;border-radius:50%;background:rgba(255,255,255,.05);border:1px solid var(--border2);color:var(--muted2);display:grid;place-items:center;cursor:pointer;transition:all .2s}
+.scan-copy:hover{color:#fff;border-color:var(--electric);background:rgba(27,66,255,.12)}
+.scan-copy svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:1.8}
+.scan-copy.copied{color:var(--green);border-color:rgba(16,185,129,.5);background:rgba(16,185,129,.12)}
+.scan-price-row{display:flex;align-items:baseline;gap:12px;margin-top:20px}
+.scan-price{font-family:var(--display);font-weight:800;font-size:clamp(26px,6vw,34px);letter-spacing:-.01em}
+.scan-chg-24{font-family:var(--mono);font-weight:700;font-size:14px;padding:4px 10px;border-radius:20px}
+.scan-chg-24.up{color:var(--green);background:rgba(16,185,129,.12)}
+.scan-chg-24.down{color:var(--red);background:rgba(239,68,68,.12)}
+.scan-tf-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(64px,1fr));gap:8px;margin-top:14px}
+.scan-tf{background:rgba(255,255,255,.03);border-radius:10px;padding:9px 6px;text-align:center}
+.scan-tf .l{font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted2)}
+.scan-tf .v{font-family:var(--mono);font-weight:700;font-size:13px;margin-top:4px}
+.scan-tf .v.up{color:var(--green)}.scan-tf .v.down{color:var(--red)}
+.scan-pressure{margin-top:18px}
+.scan-pressure-bar{display:flex;height:8px;border-radius:20px;overflow:hidden;background:rgba(255,255,255,.05)}
+.scan-pressure-bar .buy{background:var(--green)}
+.scan-pressure-bar .sell{background:var(--red)}
+.scan-pressure-label{display:flex;justify-content:space-between;font-family:var(--mono);font-size:11px;color:var(--muted2);margin-top:7px}
+.scan-stats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-top:18px}
+.scan-stats .st{background:rgba(255,255,255,.03);border-radius:12px;padding:12px;text-align:center}
+.scan-stats .st .sl{font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted2)}
+.scan-stats .st .sv{font-family:var(--mono);font-weight:700;font-size:14.5px;margin-top:5px}
+.scan-meta{font-size:12px;color:var(--muted);margin-top:14px}
+.scan-links{display:flex;flex-wrap:wrap;gap:8px;margin-top:14px}
+.scan-links a{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:12px;color:var(--sky);background:rgba(91,155,248,.08);border:1px solid rgba(91,155,248,.25);border-radius:20px;padding:7px 12px;transition:all .2s}
+.scan-links a:hover{background:rgba(91,155,248,.16);border-color:rgba(91,155,248,.5)}
+.scan-links a svg{width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2}
+.scan-otherchains{margin-top:16px}
+.scan-otherchains .ocl{font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted2);margin-bottom:8px}
+.scan-otherchains-row{display:flex;flex-wrap:wrap;gap:6px}
+.scan-chain-pill{font-family:var(--mono);font-size:11px;padding:6px 11px;border-radius:20px;background:rgba(255,255,255,.04);border:1px solid var(--border2);color:var(--muted2);cursor:pointer;transition:all .2s}
+.scan-chain-pill:hover{color:#fff;border-color:var(--electric)}
+.scan-chain-pill.active{color:var(--sky);border-color:rgba(91,155,248,.5);background:rgba(91,155,248,.1)}
+
+.scan-more{margin-top:16px;border:1px solid var(--border);border-radius:14px;background:rgba(255,255,255,.02);overflow:hidden}
+.scan-more[open]{border-color:rgba(77,114,255,.35);background:rgba(27,66,255,.05)}
+.scan-more summary{list-style:none;cursor:pointer;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;font-family:var(--display);font-weight:700;font-size:14px;color:var(--ghost)}
+.scan-more summary::-webkit-details-marker{display:none}
+.scan-more summary .ic{flex:none;width:22px;height:22px;border-radius:7px;border:1px solid var(--border2);display:grid;place-items:center;color:var(--sky);font-size:15px;transition:transform .3s,background .3s}
+.scan-more[open] summary .ic{transform:rotate(45deg);background:var(--primary);border-color:var(--primary);color:#fff}
+.scan-more-body{padding:2px 16px 16px;animation:fade .3s cubic-bezier(.16,1,.3,1)}
+.scan-more-section{margin-top:14px}
+.scan-more-section:first-child{margin-top:0}
+.scan-more-section .msl{font-family:var(--mono);font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted2);margin-bottom:8px}
+.scan-detail-row{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--border);font-size:13px}
+.scan-detail-row:last-child{border-bottom:0}
+.scan-detail-row .dl{color:var(--muted2)}
+.scan-detail-row .dv{font-family:var(--mono);font-weight:600;color:#fff;text-align:right}
+.scan-detail-row .dv.copyable{display:flex;align-items:center;gap:6px;cursor:pointer;transition:color .2s}
+.scan-detail-row .dv.copyable:hover{color:var(--sky)}
+.scan-detail-row .dv.copyable svg{width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2;flex:none}
+.scan-mtf-wrap{overflow-x:auto}
+.scan-mtf-table{width:100%;border-collapse:collapse;font-size:12px;min-width:340px}
+.scan-mtf-table th{font-family:var(--mono);font-weight:600;font-size:9.5px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted2);padding:0 4px 8px;text-align:right}
+.scan-mtf-table th:first-child{text-align:left}
+.scan-mtf-table td{padding:7px 4px;text-align:right;font-family:var(--mono);border-top:1px solid var(--border)}
+.scan-mtf-table td:first-child{text-align:left;color:var(--muted2)}
+.scan-mtf-table td.up{color:var(--green)}
+.scan-mtf-table td.down{color:var(--red)}
+
+/* 8. rug checker */
 .rug-out{margin-top:18px}
 .rug-badge{text-align:center;padding:18px;border-radius:14px;font-family:var(--display);font-weight:800;font-size:20px;letter-spacing:.02em;margin-bottom:16px}
 .rug-badge.low{background:rgba(16,185,129,.12);color:var(--green);border:1px solid rgba(16,185,129,.4)}
@@ -232,7 +350,7 @@
 .rug-item.fail .ric{background:rgba(239,68,68,.16);color:var(--red)}
 .rug-link{display:inline-block;margin-top:14px;font-family:var(--mono);font-size:12.5px;color:var(--sky)}
 
-/* 8. slippage estimator (was numbered 9 in the original design — Mint
+/* 9. slippage estimator (was numbered 9 in the original design — Mint
    Tracker between this and Rug Checker was cut) */
 .slip-grid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
 .slip-result{margin-top:20px;display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
@@ -305,6 +423,9 @@
   .pnl-row{grid-template-columns:1fr 1fr auto;gap:8px}
   .pnl-row input{font-size:13.5px;padding:10px 11px}
   .ape-grid{gap:10px}
+  .scan-stats{grid-template-columns:1fr}
+  .scan-logo{width:38px;height:38px}
+  .scan-name{font-size:16px}
 }
 @media(max-width:480px){
   .portal{padding:16px 16px 40px}
@@ -333,4 +454,7 @@
   .tool-head h3{font-size:14.5px}
   .tool-head p{font-size:11.5px}
   .card-label{font-size:10.5px}
+  .scan-id{flex-wrap:wrap}
+  .scan-badges{flex-wrap:wrap}
+  .scan-copy{margin-left:auto}
 }

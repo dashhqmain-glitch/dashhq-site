@@ -64,19 +64,39 @@ async function verifyToken(token) {
 }
 
 // ── Portal overlay open/close (mirrors app.js's research-modal pattern) ──────
+let _scrollLockY = 0;
 function openPortal() {
   const modal = document.getElementById('portalModal');
   if (!modal) return;
   modal.classList.add('open');
   modal.setAttribute('aria-hidden', 'false');
-  document.body.style.overflow = 'hidden';
+  // Always open at the top, whatever scroll position it was left at last
+  // time it was open — reopening scrolled halfway down reads as the portal
+  // randomly jumping around rather than a stable, predictable panel.
+  modal.scrollTop = 0;
+  // overflow:hidden alone doesn't reliably stop the background page from
+  // scrolling/bouncing behind a position:fixed modal on iOS Safari and some
+  // Android browsers — pinning the body in place at its current scroll
+  // offset is the robust fix, since it removes any scrollable distance for
+  // a touch gesture to act on.
+  _scrollLockY = window.scrollY || document.documentElement.scrollTop || 0;
+  document.body.style.position = 'fixed';
+  document.body.style.top = -_scrollLockY + 'px';
+  document.body.style.left = '0';
+  document.body.style.right = '0';
+  document.body.style.width = '100%';
 }
 function closePortal() {
   const modal = document.getElementById('portalModal');
   if (!modal) return;
   modal.classList.remove('open');
   modal.setAttribute('aria-hidden', 'true');
-  document.body.style.overflow = '';
+  document.body.style.position = '';
+  document.body.style.top = '';
+  document.body.style.left = '';
+  document.body.style.right = '';
+  document.body.style.width = '';
+  window.scrollTo(0, _scrollLockY);
 }
 (function () {
   const modal = document.getElementById('portalModal');
@@ -123,6 +143,11 @@ var Hub = (function () {
       t.setAttribute('aria-selected', on ? 'true' : 'false');
     });
     document.querySelectorAll('.hub-panel').forEach(function (p) { p.classList.toggle('on', p.dataset.hubPanel === tab); });
+    // Switching tabs should reliably show the new tab from its own top —
+    // otherwise leftover scroll from whichever tab you were just on carries
+    // over, landing you mid-scroll on unrelated content.
+    var modal = document.getElementById('portalModal');
+    if (modal) modal.scrollTop = 0;
   }
   function init() {
     if (inited) return; inited = true;
@@ -141,6 +166,8 @@ var Hub = (function () {
     document.getElementById('tkLauncher').style.display = 'grid';
     document.getElementById('tkFocusbar').style.display = 'none';
     document.getElementById('toolsStack').style.display = 'none';
+    var modal = document.getElementById('portalModal');
+    if (modal) modal.scrollTop = 0;
   }
   return { go: go, init: init, openTool: openTool, backToGrid: backToGrid };
 })();
@@ -611,7 +638,242 @@ var Pairs = (function () {
   return { init: init, render: render, refresh: refresh, copyAddress: copyAddress };
 })();
 
-// ── 7. RUG RISK CHECKER — real backend-proxied honeypot.is / rugcheck.xyz ────
+// ── 7. CA SCANNER — real DexScreener data, chain auto-detected from the
+//    address itself, so every chain DexScreener indexes works with zero
+//    per-chain configuration on our side ─────────────────────────────────
+var CaScan = (function () {
+  var pairs = [];
+  var current = null;
+
+  var CHAIN_LABELS = {
+    ethereum: 'Ethereum', bsc: 'BNB Chain', polygon: 'Polygon', arbitrum: 'Arbitrum',
+    optimism: 'Optimism', base: 'Base', avalanche: 'Avalanche', solana: 'Solana'
+  };
+  function chainLabel(id) {
+    if (CHAIN_LABELS[id]) return CHAIN_LABELS[id];
+    // DexScreener indexes far more chains than our other tools' fixed
+    // lists — anything outside the standard set still gets a readable
+    // label instead of being dropped.
+    return id.charAt(0).toUpperCase() + id.slice(1).replace(/-/g, ' ');
+  }
+  function fmtPrice(n) {
+    if (n == null || isNaN(n)) return '—';
+    if (n >= 1) return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    if (n >= 0.01) return '$' + n.toFixed(4);
+    if (n >= 0.000001) return '$' + n.toFixed(8).replace(/0+$/, '').replace(/\.$/, '');
+    return '$' + n.toExponential(2);
+  }
+  function fmtCompact(n) {
+    if (n == null || isNaN(n)) return '—';
+    if (n >= 1e9) return '$' + (n / 1e9).toFixed(2) + 'B';
+    if (n >= 1e6) return '$' + (n / 1e6).toFixed(2) + 'M';
+    if (n >= 1e3) return '$' + (n / 1e3).toFixed(1) + 'K';
+    return '$' + Math.round(n).toLocaleString('en-US');
+  }
+  function fmtAge(ms) {
+    if (!ms) return null;
+    var diff = Date.now() - ms;
+    var mins = Math.floor(diff / 60000);
+    if (mins < 1) return 'just now';
+    if (mins < 60) return mins + 'm ago';
+    var hours = Math.floor(mins / 60);
+    if (hours < 24) return hours + 'h ago';
+    var days = Math.floor(hours / 24);
+    if (days < 30) return days + 'd ago';
+    var months = Math.floor(days / 30);
+    if (months < 12) return months + 'mo ago';
+    return Math.floor(months / 12) + 'y ago';
+  }
+  function bestPairPerChain(list) {
+    var byChain = {};
+    list.forEach(function (p) {
+      var liq = (p.liquidity && p.liquidity.usd) || 0;
+      var existing = byChain[p.chainId];
+      if (!existing || liq > ((existing.liquidity && existing.liquidity.usd) || 0)) byChain[p.chainId] = p;
+    });
+    return byChain;
+  }
+
+  async function check() {
+    var raw = (document.getElementById('scanInput').value || '').trim();
+    if (!raw) return;
+    var out = document.getElementById('scanOut');
+    var empty = document.getElementById('scanEmpty');
+    out.style.display = 'none';
+    empty.style.display = 'none';
+    var btn = document.querySelector('#tool-scan .tk-addrow .btn');
+    var origLabel = btn.textContent;
+    btn.textContent = 'Scanning…'; btn.disabled = true;
+    try {
+      var res = await fetch('https://api.dexscreener.com/latest/dex/tokens/' + encodeURIComponent(raw));
+      if (!res.ok) throw new Error('lookup failed');
+      var data = await res.json();
+      pairs = data.pairs || [];
+      if (!pairs.length) {
+        empty.textContent = 'No pools found for that address on any indexed chain.';
+        empty.style.display = 'block';
+        return;
+      }
+      var byChain = bestPairPerChain(pairs);
+      var best = pairs.reduce(function (a, b) {
+        return ((b.liquidity && b.liquidity.usd) || 0) > ((a.liquidity && a.liquidity.usd) || 0) ? b : a;
+      });
+      render(best, byChain);
+    } catch (e) {
+      empty.textContent = 'Could not reach the scanner right now — try again in a moment.';
+      empty.style.display = 'block';
+    } finally {
+      btn.textContent = origLabel; btn.disabled = false;
+    }
+  }
+
+  function render(pair, byChain) {
+    current = pair;
+    var out = document.getElementById('scanOut');
+    document.getElementById('scanEmpty').style.display = 'none';
+
+    var info = pair.info || {};
+    var logo = document.getElementById('scanLogo');
+    logo.src = info.imageUrl || '';
+    logo.alt = pair.baseToken.symbol || '';
+    document.getElementById('scanName').textContent = pair.baseToken.name || 'Unknown token';
+    document.getElementById('scanSym').textContent = pair.baseToken.symbol || '';
+    document.getElementById('scanChainBadge').textContent = chainLabel(pair.chainId).toUpperCase();
+    document.getElementById('scanDexBadge').textContent = pair.dexId || '';
+
+    var price = parseFloat(pair.priceUsd);
+    document.getElementById('scanPrice').textContent = fmtPrice(price);
+    var pc = pair.priceChange || {};
+    var chgEl = document.getElementById('scanChg24');
+    if (pc.h24 != null) {
+      var up24 = pc.h24 >= 0;
+      chgEl.className = 'scan-chg-24 ' + (up24 ? 'up' : 'down');
+      chgEl.textContent = (up24 ? '▲ ' : '▼ ') + Math.abs(pc.h24).toFixed(2) + '% (24h)';
+    } else {
+      chgEl.className = 'scan-chg-24'; chgEl.textContent = '';
+    }
+
+    var tfOrder = [['m5', '5m'], ['h1', '1h'], ['h6', '6h'], ['h24', '24h']];
+    document.getElementById('scanTfRow').innerHTML = tfOrder.filter(function (t) { return pc[t[0]] != null; }).map(function (t) {
+      var v = pc[t[0]], up = v >= 0;
+      return '<div class="scan-tf"><div class="l">' + t[1] + '</div><div class="v ' + (up ? 'up' : 'down') + '">' + (up ? '+' : '') + v.toFixed(1) + '%</div></div>';
+    }).join('');
+
+    var txns24 = (pair.txns && pair.txns.h24) || {};
+    var buys = txns24.buys || 0, sells = txns24.sells || 0, total = buys + sells;
+    var buyPct = total > 0 ? (buys / total) * 100 : 50;
+    document.getElementById('scanPressureBuy').style.width = buyPct + '%';
+    document.getElementById('scanPressureSell').style.width = (100 - buyPct) + '%';
+    document.getElementById('scanPressureLabel').innerHTML = total > 0
+      ? '<span>' + buys + ' buys (' + buyPct.toFixed(0) + '%)</span><span>' + sells + ' sells (' + (100 - buyPct).toFixed(0) + '%)</span>'
+      : '<span>No trades in the last 24h</span><span></span>';
+
+    document.getElementById('scanStats').innerHTML =
+      '<div class="st"><div class="sl">Market Cap</div><div class="sv">' + fmtCompact(pair.marketCap || pair.fdv) + '</div></div>'
+      + '<div class="st"><div class="sl">Liquidity</div><div class="sv">' + fmtCompact(pair.liquidity && pair.liquidity.usd) + '</div></div>'
+      + '<div class="st"><div class="sl">24h Volume</div><div class="sv">' + fmtCompact(pair.volume && pair.volume.h24) + '</div></div>';
+
+    var age = fmtAge(pair.pairCreatedAt);
+    document.getElementById('scanMeta').textContent = age ? 'Pair created ' + age : '';
+
+    var links = [];
+    (info.websites || []).slice(0, 1).forEach(function (w) {
+      links.push('<a href="' + w.url + '" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18"/></svg>' + (w.label || 'Website') + '</a>');
+    });
+    (info.socials || []).slice(0, 2).forEach(function (s) {
+      links.push('<a href="' + s.url + '" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M8 12h8M12 8v8"/></svg>' + s.type + '</a>');
+    });
+    links.push('<a href="' + pair.url + '" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" stroke-linecap="round"><path d="M7 17L17 7M7 7h10v10"/></svg>DexScreener</a>');
+    document.getElementById('scanLinks').innerHTML = links.join('');
+
+    var otherChains = Object.keys(byChain).filter(function (c) { return c !== pair.chainId; });
+    var ocEl = document.getElementById('scanOtherChains');
+    ocEl.innerHTML = otherChains.length
+      ? '<div class="ocl">Also trading on</div><div class="scan-otherchains-row">' + otherChains.map(function (c) {
+          return '<button class="scan-chain-pill" onclick="CaScan.switchChain(\'' + c + '\')">' + chainLabel(c) + '</button>';
+        }).join('') + '</div>'
+      : '';
+
+    document.getElementById('scanMoreBody').innerHTML = buildMoreDetails(pair);
+
+    out.style.display = 'block';
+  }
+
+  function fmtNative(n) {
+    if (n == null || isNaN(n)) return '—';
+    if (n >= 1) return n.toLocaleString('en-US', { maximumFractionDigits: 6 });
+    if (n >= 0.000001) return n.toFixed(10).replace(/0+$/, '').replace(/\.$/, '');
+    return n.toExponential(2);
+  }
+  function shortAddr(a) { return a && a.length > 14 ? a.slice(0, 6) + '…' + a.slice(-4) : (a || '—'); }
+  function copySvg() { return '<svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M4 16V5a1 1 0 0 1 1-1h11"/></svg>'; }
+
+  // Everything a trader would otherwise have to open DexScreener itself to
+  // find — pairing, native price, pool address, FDV vs circulating market
+  // cap, and the full 5m/1h/6h/24h volume + buy/sell breakdown — tucked
+  // into one dropdown so the main card above stays clean and scannable.
+  function buildMoreDetails(pair) {
+    var quote = pair.quoteToken || {};
+    var dexLabel = (pair.dexId || '—') + (pair.labels && pair.labels.length ? ' · ' + pair.labels.join('/').toUpperCase() : '');
+    var mcap = pair.marketCap, fdv = pair.fdv;
+
+    var pairInfo = '<div class="scan-more-section"><div class="msl">Pair Info</div>'
+      + '<div class="scan-detail-row"><span class="dl">Paired with</span><span class="dv">' + (quote.symbol || '—') + '</span></div>'
+      + '<div class="scan-detail-row"><span class="dl">Price (native)</span><span class="dv">' + fmtNative(parseFloat(pair.priceNative)) + ' ' + (quote.symbol || '') + '</span></div>'
+      + '<div class="scan-detail-row"><span class="dl">DEX</span><span class="dv">' + dexLabel + '</span></div>'
+      + '<div class="scan-detail-row"><span class="dl">Token contract</span><span class="dv copyable" onclick="CaScan.copyAddress()">' + shortAddr(pair.baseToken.address) + copySvg() + '</span></div>'
+      + '<div class="scan-detail-row"><span class="dl">Pair (LP) address</span><span class="dv copyable" onclick="CaScan.copyPairAddress(event)">' + shortAddr(pair.pairAddress) + copySvg() + '</span></div>'
+      + '</div>';
+
+    var valuation = '<div class="scan-more-section"><div class="msl">Valuation</div>'
+      + '<div class="scan-detail-row"><span class="dl">Market Cap</span><span class="dv">' + fmtCompact(mcap) + '</span></div>'
+      + (fdv != null && fdv !== mcap ? '<div class="scan-detail-row"><span class="dl">Fully Diluted Valuation</span><span class="dv">' + fmtCompact(fdv) + '</span></div>' : '')
+      + '</div>';
+
+    var tfKeys = [['m5', '5M'], ['h1', '1H'], ['h6', '6H'], ['h24', '24H']];
+    var vol = pair.volume || {}, txns = pair.txns || {};
+    function row(label, fn) {
+      return '<tr><td>' + label + '</td>' + tfKeys.map(function (t) { return '<td>' + fn(t[0]) + '</td>'; }).join('') + '</tr>';
+    }
+    var mtf = '<div class="scan-more-section"><div class="msl">Volume &amp; Trades by Timeframe</div>'
+      + '<div class="scan-mtf-wrap"><table class="scan-mtf-table"><thead><tr><th></th>' + tfKeys.map(function (t) { return '<th>' + t[1] + '</th>'; }).join('') + '</tr></thead><tbody>'
+      + row('Volume', function (k) { return fmtCompact(vol[k]); })
+      + row('Buys', function (k) { return (txns[k] && txns[k].buys != null) ? txns[k].buys : '—'; })
+      + row('Sells', function (k) { return (txns[k] && txns[k].sells != null) ? txns[k].sells : '—'; })
+      + '</tbody></table></div></div>';
+
+    return pairInfo + valuation + mtf;
+  }
+
+  function switchChain(chainId) {
+    var byChain = bestPairPerChain(pairs);
+    var pair = byChain[chainId];
+    if (pair) render(pair, byChain);
+  }
+
+  function copyAddress() {
+    if (!current) return;
+    navigator.clipboard.writeText(current.baseToken.address).then(function () {
+      var btn = document.getElementById('scanCopyBtn');
+      btn.classList.add('copied');
+      setTimeout(function () { btn.classList.remove('copied'); }, 1600);
+    });
+  }
+
+  function copyPairAddress(ev) {
+    if (!current || !current.pairAddress) return;
+    navigator.clipboard.writeText(current.pairAddress).then(function () {
+      var el = ev.currentTarget;
+      var orig = el.innerHTML;
+      el.innerHTML = 'Copied ✓';
+      setTimeout(function () { el.innerHTML = orig; }, 1600);
+    });
+  }
+
+  return { check: check, switchChain: switchChain, copyAddress: copyAddress, copyPairAddress: copyPairAddress };
+})();
+
+// ── 8. RUG RISK CHECKER — real backend-proxied honeypot.is / rugcheck.xyz ────
 var Rug = (function () {
   async function check() {
     var addr = (document.getElementById('rugInput').value || '').trim();
@@ -700,15 +962,16 @@ var Slip = (function () {
 var Profile = (function () {
   var PIN_ICONS = {
     ticker: '<path d="M3 17l5-5 4 4 8-9"/><path d="M21 7v5h-5"/>',
-    gas: '<path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9M13.7 21a2 2 0 0 1-3.4 0"/>',
+    gas: '<path d="M4 21V6a2 2 0 0 1 2-2h5a2 2 0 0 1 2 2v15"/><path d="M3 21h11"/><path d="M13 10h2a2 2 0 0 1 2 2v5.5a1.5 1.5 0 0 0 3 0V9l-3-3"/>',
     wallet: '<rect x="2.5" y="6" width="19" height="13" rx="2.5"/><path d="M16 12.5h3"/>',
     pnl: '<path d="M4 19V5M4 19h16M9 15l3-4 3 2 4-6"/>',
     ape: '<path d="M13 2 4 14h7l-1 8 10-12h-7z"/>',
     pairs: '<circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/>',
+    scan: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="M20 20l-4.8-4.8"/>',
     rug: '<path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/>',
-    slip: '<path d="M3 12c2-4 4-6 9-6s7 2 9 6c-2 4-4 6-9 6s-7-2-9-6z"/><circle cx="12" cy="12" r="2"/>'
+    slip: '<path d="M2 12c2-3 4-3 6 0s4 3 6 0 4-3 6 0"/><path d="M2 18c2-3 4-3 6 0s4 3 6 0 4-3 6 0"/>'
   };
-  var TOOL_LABELS = { ticker: 'Price Ticker', gas: 'Gas Tracker', wallet: 'Wallet Card', pnl: 'DCA / PnL', ape: 'Ape Math', pairs: 'New Pairs', rug: 'Rug Check', slip: 'Slippage' };
+  var TOOL_LABELS = { ticker: 'Price Ticker', gas: 'Gas Tracker', wallet: 'Wallet Card', pnl: 'DCA / PnL', ape: 'Ape Math', pairs: 'New Pairs', scan: 'CA Scanner', rug: 'Rug Check', slip: 'Slippage' };
   function getPins() {
     try { return JSON.parse(localStorage.getItem('dashhq_pinned_tools') || '["ticker","gas","rug"]'); }
     catch (e) { return ['ticker', 'gas', 'rug']; }
