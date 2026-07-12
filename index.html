@@ -564,6 +564,7 @@
                       <div class="bh-top"><span class="bh-eyebrow">Top Mover</span></div>
                       <div class="bento-stat" id="bentoMoverSym">ETH</div>
                       <div class="bh-desc" id="bentoMoverChg">+0.00%</div>
+                      <div class="bento-spark" id="bentoMoverSpark"></div>
                     </div>
 
                     <div class="bento-tile" onclick="Dash.go('pairs')">
@@ -625,6 +626,8 @@
                         </div>
                         <div class="xray-nudge" id="xrayNudge">6 pts from Shark</div>
 
+                        <p class="xray-note" id="xrayDataNote" style="display:none"></p>
+
                         <div class="xray-subs" id="xraySubs"></div>
 
                         <div class="xray-breakdowns" id="xrayBreakdowns"></div>
@@ -632,6 +635,17 @@
                         <div class="xray-nft-wrap" id="xrayNftWrap">
                           <div class="xray-section-head"><span>NFT holdings</span><span id="xrayNftCount">0 collections</span></div>
                           <div class="xray-nft-grid" id="xrayNftGrid"></div>
+                        </div>
+
+                        <div class="card-actions">
+                          <button class="cardbtn download" onclick="XRay.download()">
+                            <svg viewBox="0 0 24 24"><path d="M12 3v13m0 0-4.5-4.5M12 16l4.5-4.5"/><path d="M4 19.5h16"/></svg>
+                            <span>Download</span>
+                          </button>
+                          <button class="cardbtn share-x" onclick="XRay.shareX()">
+                            <svg viewBox="0 0 24 24"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+                            <span>Share to X</span>
+                          </button>
                         </div>
                       </div>
                     </div>

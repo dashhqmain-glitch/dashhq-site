@@ -12,6 +12,26 @@
 
 #portalModal{position:fixed;inset:0;z-index:320;display:none;overflow-y:auto;background:radial-gradient(ellipse 70% 45% at 50% -5%,rgba(27,66,255,.28),transparent 65%),#05080F}
 #portalModal.open{display:block;animation:rmIn .4s ease}
+/* .rm-scroll's 92px/100px padding (styles.css) is sized for the article
+   research modal's floating close button + long scrollable text - .portal
+   already handles its own centered, height:100dvh layout and padding, so
+   that generic padding just adds a fixed ~192px of unwanted extra height
+   here, forcing a scroll on every viewport size regardless of content. */
+#portalModal .rm-scroll{padding:0;min-height:0}
+/* The prelogin/verifying/notmember screens are a single centered card, not
+   a scrolling page - it should always fit the viewport exactly like a
+   static app screen. Only the member dashboard (which manages its own
+   internal scroll areas via .dcontent/.dsb-nav) needs the modal itself to
+   allow overflow. */
+#portalModal:not(.dash-active){overflow:hidden}
+/* Landscape phones (and similarly short windows) are the one case compact
+   spacing genuinely can't fit without shrinking text past readable size -
+   scroll is a safer fallback there than silently clipping the sign-in
+   button off the bottom of the screen. */
+@media(max-height:520px){
+  #portalModal:not(.dash-active){overflow-y:auto}
+  .portal{height:auto;min-height:100vh;min-height:100dvh}
+}
 #portalParticles{position:fixed;inset:0;z-index:0;pointer-events:none}
 
 #portalModal .btn{display:inline-flex;align-items:center;gap:9px;font-weight:600;font-size:15px;padding:14px 26px;border-radius:40px;cursor:pointer;border:1px solid transparent;transition:transform .15s,box-shadow .3s,background .3s}
@@ -20,24 +40,24 @@
 #portalModal .btn:active{transform:scale(.98)}
 
 
-.portal{position:relative;z-index:5;height:100vh;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:clamp(70px,12vh,130px) 24px clamp(20px,6vh,80px);text-align:center}
+.portal{position:relative;z-index:5;height:100vh;height:100dvh;box-sizing:border-box;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:clamp(24px,10vh,130px) 24px clamp(16px,5vh,80px);text-align:center}
 .p-h{font-family:var(--display);font-weight:700;font-size:clamp(28px,4.6vw,62px);line-height:1.04;margin:clamp(10px,2vh,18px) 0 0;letter-spacing:-.02em}
 .p-sub{color:var(--muted2);max-width:46ch;margin:clamp(10px,2vh,18px) auto 0;font-size:clamp(14px,1.6vw,16px)}
 
-.auth{position:relative;width:min(440px,100%);margin:clamp(20px,5vh,46px) auto 0;border-radius:24px;border:1px solid var(--border2);background:linear-gradient(180deg,rgba(13,19,38,.86),rgba(8,12,24,.86));backdrop-filter:blur(22px);padding:36px 32px;box-shadow:0 40px 100px -40px rgba(27,66,255,.5);overflow:hidden}
+.auth{position:relative;width:min(440px,100%);margin:clamp(14px,4vh,46px) auto 0;border-radius:24px;border:1px solid var(--border2);background:linear-gradient(180deg,rgba(13,19,38,.86),rgba(8,12,24,.86));backdrop-filter:blur(22px);padding:clamp(22px,4.5vh,36px) clamp(20px,4vw,32px);box-shadow:0 40px 100px -40px rgba(27,66,255,.5);overflow:hidden}
 .auth::before{content:"";position:absolute;inset:0;border-radius:24px;padding:1px;background:linear-gradient(150deg,rgba(77,114,255,.6),transparent 45%);-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude;pointer-events:none}
 .state{display:none}
 .state.on{display:block;animation:fade .5s cubic-bezier(.16,1,.3,1)}
 @keyframes fade{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
-.auth h3{font-family:var(--display);font-weight:700;font-size:26px;letter-spacing:.01em}
-.auth p.note{color:var(--muted);font-size:13.5px;margin-top:10px;line-height:1.6}
-.conn{display:flex;flex-direction:column;gap:12px;margin-top:24px}
-.cbtn{display:flex;align-items:center;justify-content:center;gap:11px;width:100%;padding:15px;border-radius:13px;font-weight:600;font-size:15px;cursor:pointer;border:1px solid var(--border2);transition:transform .15s,background .25s,box-shadow .3s}
+.auth h3{font-family:var(--display);font-weight:700;font-size:clamp(20px,3.2vh,26px);letter-spacing:.01em}
+.auth p.note{color:var(--muted);font-size:13.5px;margin-top:clamp(6px,1.2vh,10px);line-height:1.5}
+.conn{display:flex;flex-direction:column;gap:12px;margin-top:clamp(14px,3vh,24px)}
+.cbtn{display:flex;align-items:center;justify-content:center;gap:11px;width:100%;padding:clamp(11px,2.2vh,15px);border-radius:13px;font-weight:600;font-size:15px;cursor:pointer;border:1px solid var(--border2);transition:transform .15s,background .25s,box-shadow .3s}
 .cbtn svg{width:19px;height:19px;fill:currentColor}
 .cbtn.discord{background:#5865F2;color:#fff;border-color:transparent}
 .cbtn.discord:hover{box-shadow:0 12px 30px -10px rgba(88,101,242,.7)}
 .cbtn:active{transform:scale(.98)}
-.divider{display:flex;align-items:center;gap:12px;margin:22px 0 6px;color:var(--muted);font-size:11px;font-family:var(--mono);letter-spacing:.1em}
+.divider{display:flex;align-items:center;gap:12px;margin:clamp(12px,3vh,22px) 0 clamp(4px,1vh,6px);color:var(--muted);font-size:11px;font-family:var(--mono);letter-spacing:.1em}
 .divider::before,.divider::after{content:"";flex:1;height:1px;background:var(--border)}
 .spinner{width:46px;height:46px;margin:6px auto 18px;border-radius:50%;border:3px solid rgba(255,255,255,.1);border-top-color:var(--electric);animation:spin 1s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
@@ -159,6 +179,8 @@
 .bh-cta{font-family:var(--mono);font-size:11px;color:var(--muted2)}
 .bh-desc{font-size:12.5px;color:var(--muted2);line-height:1.5}
 .bento-stat{font-family:var(--mono);font-weight:700;font-size:clamp(24px,3vw,32px);color:var(--ghost)}
+.bento-spark{margin-top:10px;flex:1;min-height:32px;display:flex;align-items:flex-end}
+.bento-spark svg{width:100%;height:36px;display:block;overflow:visible}
 .b-hero{grid-column:span 2;grid-row:span 2;background:linear-gradient(135deg,rgba(27,66,255,.16),rgba(34,211,238,.06));border-color:rgba(77,114,255,.35);position:relative;overflow:hidden}
 .b-hero::before{content:'';position:absolute;inset:0;background:radial-gradient(circle at 85% 15%,rgba(34,211,238,.16),transparent 55%);pointer-events:none}
 .bh-body{display:flex;align-items:center;gap:18px;flex:1;position:relative}
@@ -201,6 +223,7 @@
 .xray-score{font-family:var(--mono);font-weight:800;font-size:clamp(34px,6vw,46px);background:linear-gradient(120deg,var(--sky),var(--electric) 60%,var(--teal));-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;line-height:1}
 .xray-scorelbl{font-family:var(--mono);font-size:11px;color:var(--muted2)}
 .xray-nudge{text-align:center;font-family:var(--mono);font-size:12px;color:var(--muted2);margin-top:10px}
+.xray-note{font-size:12px;color:var(--gold);background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.28);border-radius:10px;padding:9px 12px;margin-top:14px;line-height:1.5}
 .xray-subs{display:flex;flex-direction:column;gap:10px;margin-top:20px}
 .xray-sub-row{display:grid;grid-template-columns:120px 1fr 40px;gap:10px;align-items:center}
 .xray-sub-label{font-size:12.5px;color:var(--muted2);font-family:var(--mono)}
@@ -214,6 +237,7 @@
 .xray-bd-row:last-child{border-bottom:0}
 .xray-bd-row .k{color:var(--muted2)}
 .xray-bd-row .v{font-family:var(--mono);font-weight:600}
+.xray-bd-note{font-size:11px;color:var(--muted2);margin-top:9px;line-height:1.5}
 .xray-flag{font-size:12px;padding:8px 10px;border-radius:9px;margin-top:6px;line-height:1.5}
 .xray-flag.ok{background:rgba(16,185,129,.08);border:1px solid rgba(16,185,129,.3);color:var(--green)}
 .xray-flag.warn{background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.3);color:var(--gold)}
@@ -384,21 +408,36 @@
 .nft-result-row:hover{border-color:rgba(93,140,255,.45);background:rgba(93,140,255,.05)}
 .nft-result-row.added{opacity:.5;cursor:default}
 .nft-result-info{flex:1;min-width:0}
-.nft-result-name{font-weight:600;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nft-result-name{font-weight:600;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;gap:4px}
 .nft-result-stat{font-family:var(--mono);font-size:11.5px;color:var(--muted2);margin-top:2px}
 .nft-result-add{font-family:var(--mono);font-size:11px;color:var(--sky);flex:none;font-weight:700}
 
-.nft-watch-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
+/* OpenSea's own editorial "verified" checkmark - only shown when the
+   collection actually carries that status, never a self-styled claim. */
+.nft-verified{width:14px;height:14px;flex:none}
+
+.nft-watch-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
 .nft-watch-card{border:1px solid var(--border);border-radius:14px;background:rgba(255,255,255,.02);padding:14px;position:relative}
 .nft-watch-card .rm{position:absolute;top:10px;right:10px;width:22px;height:22px;border-radius:50%;background:rgba(255,255,255,.06);color:var(--muted2);font-size:12px;line-height:22px;text-align:center;cursor:pointer;border:none}
 .nft-watch-card .rm:hover{background:rgba(239,68,68,.18);color:var(--red)}
 .nft-watch-top{display:flex;align-items:center;gap:10px;padding-right:22px}
-.nft-watch-name{font-weight:700;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nft-watch-name{font-weight:700;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;gap:5px;min-width:0}
+.nft-watch-name span{overflow:hidden;text-overflow:ellipsis}
+.nft-watch-tags{display:flex;flex-wrap:wrap;gap:6px;margin-top:9px}
+.nft-watch-tag{font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted2);background:rgba(255,255,255,.05);border:1px solid var(--border);border-radius:20px;padding:3px 9px}
+.nft-watch-desc{font-size:12px;color:var(--muted2);line-height:1.5;margin-top:9px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .nft-watch-stats{display:grid;grid-template-columns:1fr 1fr;gap:9px 12px;margin-top:13px}
 .nft-watch-stat .lbl{font-size:10.5px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
 .nft-watch-stat .val{font-family:var(--mono);font-weight:700;font-size:14px;margin-top:2px}
 .nft-watch-stat .val.zero{color:var(--muted2);font-weight:500}
+.nft-watch-contract{font-family:var(--mono);font-size:11px;color:var(--muted2);margin-top:11px;cursor:pointer;display:flex;align-items:center;gap:5px}
+.nft-watch-contract:hover{color:var(--sky)}
+.nft-watch-contract svg{width:11px;height:11px;stroke:currentColor;fill:none;stroke-width:2}
 .nft-watch-foot{display:flex;justify-content:space-between;align-items:center;margin-top:13px;padding-top:12px;border-top:1px solid var(--border)}
+.nft-watch-socials{display:flex;align-items:center;gap:10px}
+.nft-watch-socials a{color:var(--muted2);display:flex}
+.nft-watch-socials a:hover{color:var(--sky)}
+.nft-watch-socials svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:1.8}
 .nft-watch-link{font-family:var(--mono);font-size:11.5px;color:var(--sky);display:flex;align-items:center;gap:5px}
 .nft-watch-link:hover{color:var(--electric)}
 .nft-watch-link svg{width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2}
@@ -408,7 +447,7 @@
 .nft-discover-list::-webkit-scrollbar{display:none}
 .nft-discover-row{display:flex;align-items:center;gap:11px;padding:9px 11px;border:1px solid var(--border);border-radius:11px;background:rgba(255,255,255,.02)}
 .nft-discover-info{flex:1;min-width:0}
-.nft-discover-name{font-weight:600;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.nft-discover-name{font-weight:600;font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:flex;align-items:center;gap:4px}
 .nft-discover-stat{font-family:var(--mono);font-size:11.5px;color:var(--muted2);margin-top:2px}
 .nft-watch-btn{font-family:var(--body);font-size:12px;font-weight:700;color:var(--sky);background:rgba(77,114,255,.12);border:1px solid rgba(93,140,255,.35);border-radius:20px;padding:6px 13px;cursor:pointer;flex:none}
 .nft-watch-btn:hover{background:rgba(77,114,255,.2)}

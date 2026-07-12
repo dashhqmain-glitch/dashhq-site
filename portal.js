@@ -165,12 +165,14 @@ var Dash = (function () {
 
     var t = (typeof Ticker !== 'undefined') ? Ticker.top() : null;
     var bms = document.getElementById('bentoMoverSym'), bmc = document.getElementById('bentoMoverChg');
+    var bmSpark = document.getElementById('bentoMoverSpark');
     if (t && bms && bmc) {
       bms.textContent = t.sym;
       var up = t.chg >= 0;
       bmc.textContent = (up ? '+' : '') + t.chg.toFixed(2) + '%';
       bmc.style.color = up ? 'var(--green)' : 'var(--red)';
     }
+    if (bmSpark) bmSpark.innerHTML = (typeof Ticker !== 'undefined') ? Ticker.topSparkSvg() : '';
 
     var nc = document.getElementById('bentoNftStack'), nd = document.getElementById('bentoNftDesc');
     if (nc && nd && typeof Watchlist !== 'undefined') {
@@ -275,14 +277,27 @@ var Ticker = (function () {
       return await res.json();
     } catch (e) { return {}; }
   }
-  function sparkPath(hist) {
+  function sparkPath(hist, h) {
+    h = h || 24;
     if (hist.length < 2) return '';
     var min = Math.min.apply(null, hist), max = Math.max.apply(null, hist), range = (max - min) || 1;
-    var w = 100, h = 24;
+    var w = 100;
     return hist.map(function (v, i) {
       var x = (i / (hist.length - 1)) * w, y = h - ((v - min) / range) * h;
       return (i === 0 ? 'M' : 'L') + x.toFixed(1) + ',' + y.toFixed(1);
     }).join(' ');
+  }
+  // A slightly taller sparkline for the dashboard's Top Mover tile, built
+  // from the same live price history the ticker grid already tracks — no
+  // separate fetch needed.
+  function topSparkSvg() {
+    var t = top();
+    if (!t) return '';
+    var s = state[t.sym];
+    if (!s || s.history.length < 2) return '';
+    var up = t.chg >= 0;
+    var path = sparkPath(s.history, 36);
+    return '<svg viewBox="0 0 100 36" preserveAspectRatio="none"><path d="' + path + '" fill="none" stroke="' + (up ? '#10B981' : '#EF4444') + '" stroke-width="2"/></svg>';
   }
   function render() {
     var grid = document.getElementById('tickerGrid');
@@ -355,7 +370,7 @@ var Ticker = (function () {
     seed('ETH'); seed('SOL');
     setInterval(tick, 15000);
   }
-  return { init: init, add: add, remove: remove, retry: retry, top: top };
+  return { init: init, add: add, remove: remove, retry: retry, top: top, topSparkSvg: topSparkSvg };
 })();
 
 // ── 2. GAS TRACKER — real public RPC + CoinGecko, multi-chain ────────────────
@@ -1011,6 +1026,13 @@ var Watchlist = (function () {
     if (c.image) return '<img class="nft-thumb" src="' + c.image + '" alt="" onerror="this.outerHTML=\'<span class=&quot;nft-thumb ph&quot;>' + ((c.name || '?')[0] || '?').toUpperCase() + '</span>\'">';
     return '<span class="nft-thumb ph">' + ((c.name || '?')[0] || '?').toUpperCase() + '</span>';
   }
+  // OpenSea's own editorial verification (safelist_status === "verified"),
+  // not a self-reported badge — only render it when the backend confirms it.
+  function verifiedBadge(c) {
+    if (!c.verified) return '';
+    return '<svg class="nft-verified" viewBox="0 0 24 24" title="OpenSea Verified"><path d="M12 2l2.4 1.3 2.7-.4 1.3 2.4 2.4 1.3-.4 2.7 1.3 2.4-1.3 2.4.4 2.7-2.4 1.3-1.3 2.4-2.7-.4L12 22l-2.4-1.3-2.7.4-1.3-2.4-2.4-1.3.4-2.7L2.3 12l1.3-2.4-.4-2.7 2.4-1.3 1.3-2.4 2.7.4z" fill="#5B9BF8"/><path d="M8.5 12.3l2.4 2.4 4.8-4.8" stroke="#fff" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  }
+  function shortAddr(a) { return a && a.length > 14 ? a.slice(0, 6) + '…' + a.slice(-4) : (a || ''); }
 
   function updateCount() {
     var el = document.getElementById('nftWatchCount');
@@ -1052,7 +1074,7 @@ var Watchlist = (function () {
           var added = watchSlugs.indexOf(c.slug) !== -1;
           return '<div class="nft-result-row' + (added ? ' added' : '') + '" onclick="' + (added ? '' : "Watchlist.add('" + c.slug + "')") + '">'
             + thumbHtml(c)
-            + '<div class="nft-result-info"><div class="nft-result-name">' + c.name + '</div><div class="nft-result-stat">Floor ' + (c.floor != null ? fmtCompact(c.floor) + ' ETH' : '—') + '</div></div>'
+            + '<div class="nft-result-info"><div class="nft-result-name"><span>' + c.name + '</span>' + verifiedBadge(c) + '</div><div class="nft-result-stat">Floor ' + (c.floor != null ? fmtCompact(c.floor) + ' ' + (c.symbol || 'ETH') : '—') + '</div></div>'
             + '<div class="nft-result-add">' + (added ? 'Watching ✓' : '+ Watch') + '</div>'
             + '</div>';
         }).join('');
@@ -1080,23 +1102,57 @@ var Watchlist = (function () {
   }
 
   function watchCardHtml(c) {
+    var tags = '';
+    if (c.category || c.chain) {
+      tags = '<div class="nft-watch-tags">'
+        + (c.category ? '<span class="nft-watch-tag">' + c.category + '</span>' : '')
+        + (c.chain ? '<span class="nft-watch-tag">' + c.chain + '</span>' : '')
+        + '</div>';
+    }
+    var desc = c.description ? '<div class="nft-watch-desc">' + c.description + '</div>' : '';
+    var contract = c.contractAddress
+      ? '<div class="nft-watch-contract" onclick="Watchlist.copyContract(event,\'' + c.contractAddress + '\')" title="Copy contract address">'
+        + '<svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M4 16V5a1 1 0 0 1 1-1h11"/></svg>' + shortAddr(c.contractAddress) + '</div>'
+      : '';
+    var socials = [];
+    if (c.website) socials.push('<a href="' + c.website + '" target="_blank" rel="noopener" title="Website" onclick="event.stopPropagation()"><svg viewBox="0 0 24 24" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a15 15 0 0 1 0 18 15 15 0 0 1 0-18"/></svg></a>');
+    if (c.twitter) socials.push('<a href="https://x.com/' + c.twitter + '" target="_blank" rel="noopener" title="X / Twitter" onclick="event.stopPropagation()"><svg viewBox="0 0 24 24"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg></a>');
+    if (c.discord) socials.push('<a href="' + c.discord + '" target="_blank" rel="noopener" title="Discord" onclick="event.stopPropagation()"><svg viewBox="0 0 24 24"><path d="M20.317 4.369a19.79 19.79 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.865-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.74 19.74 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.058a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.1 13.1 0 0 1-1.872-.892.077.077 0 0 1-.008-.128c.126-.094.252-.192.372-.291a.074.074 0 0 1 .078-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .079.009c.12.099.245.198.372.292a.077.077 0 0 1-.006.127c-.598.35-1.22.645-1.873.891a.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.84 19.84 0 0 0 6.002-3.03.077.077 0 0 0 .032-.056c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.028zM8.02 15.331c-1.183 0-2.157-1.086-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.332-.955 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.086-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.332-.946 2.418-2.157 2.418z"/></svg></a>');
     return '<div class="nft-watch-card">'
       + '<button class="rm" onclick="Watchlist.remove(\'' + c.slug + '\')" aria-label="Remove">×</button>'
-      + '<div class="nft-watch-top">' + thumbHtml(c) + '<div class="nft-watch-name">' + c.name + '</div></div>'
+      + '<div class="nft-watch-top">' + thumbHtml(c) + '<div class="nft-watch-name"><span>' + c.name + '</span>' + verifiedBadge(c) + '</div></div>'
+      + tags + desc
       + '<div class="nft-watch-stats">'
-      + '<div class="nft-watch-stat"><div class="lbl">Floor</div><div class="val' + (c.floor == null ? ' zero' : '') + '">' + (c.floor != null ? fmtCompact(c.floor) + ' ETH' : '—') + '</div></div>'
-      + '<div class="nft-watch-stat"><div class="lbl">24h Vol</div><div class="val' + (c.vol1d == null ? ' zero' : '') + '">' + (c.vol1d != null ? fmtCompact(c.vol1d) + ' ETH' : '—') + '</div></div>'
+      + '<div class="nft-watch-stat"><div class="lbl">Floor</div><div class="val' + (c.floor == null ? ' zero' : '') + '">' + (c.floor != null ? fmtCompact(c.floor) + ' ' + (c.symbol || 'ETH') : '—') + '</div></div>'
+      + '<div class="nft-watch-stat"><div class="lbl">24h Vol</div><div class="val' + (c.vol1d == null ? ' zero' : '') + '">' + (c.vol1d != null ? fmtCompact(c.vol1d) + ' ' + (c.symbol || 'ETH') : '—') + '</div></div>'
       + '<div class="nft-watch-stat"><div class="lbl">24h Sales</div><div class="val' + (c.sales24h == null ? ' zero' : '') + '">' + (c.sales24h != null ? c.sales24h : '—') + '</div></div>'
       + '<div class="nft-watch-stat"><div class="lbl">Owners</div><div class="val' + (c.owners == null ? ' zero' : '') + '">' + (c.owners != null ? c.owners.toLocaleString('en-US') : '—') + '</div></div>'
       + '</div>'
-      + '<div class="nft-watch-foot"><a class="nft-watch-link" href="' + (c.openseaUrl || ('https://opensea.io/collection/' + c.slug)) + '" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" stroke-linecap="round"><path d="M7 17L17 7M7 7h10v10"/></svg>OpenSea</a></div>'
+      + contract
+      + '<div class="nft-watch-foot">'
+      + (socials.length ? '<div class="nft-watch-socials">' + socials.join('') + '</div>' : '<span></span>')
+      + '<a class="nft-watch-link" href="' + (c.openseaUrl || ('https://opensea.io/collection/' + c.slug)) + '" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" stroke-linecap="round"><path d="M7 17L17 7M7 7h10v10"/></svg>OpenSea</a>'
+      + '</div>'
       + '</div>';
+  }
+  function copyContract(ev, addr) {
+    ev.stopPropagation();
+    navigator.clipboard.writeText(addr).then(function () {
+      var el = ev.currentTarget;
+      var orig = el.innerHTML;
+      el.innerHTML = 'Copied ✓';
+      setTimeout(function () { el.innerHTML = orig; }, 1400);
+    });
   }
 
   async function renderWatchlist() {
     var grid = document.getElementById('nftWatchGrid');
     if (!watchSlugs.length) { grid.innerHTML = '<div class="pin-empty">No collections watched yet — search or discover one to add it here.</div>'; return; }
-    var missing = watchSlugs.filter(function (s) { return !cache[s]; });
+    // Entries cached from a search/discover result carry a leaner shape
+    // (no verified/category/description/etc.) - re-fetch the full detail
+    // endpoint for anything that hasn't already been upgraded to the rich
+    // shape, not just entries missing from the cache entirely.
+    var missing = watchSlugs.filter(function (s) { return !cache[s] || !('category' in cache[s]); });
     if (missing.length) {
       grid.innerHTML = '<div class="nft-empty-msg">Loading watchlist…</div>';
       await Promise.all(missing.map(async function (slug) {
@@ -1134,11 +1190,11 @@ var Watchlist = (function () {
     listEl.innerHTML = results.map(function (c) {
       var added = watchSlugs.indexOf(c.slug) !== -1;
       var statTxt = tabName === 'trending'
-        ? '7d Vol ' + (c.vol7d != null ? fmtCompact(c.vol7d) + ' ETH' : '—')
-        : (c.floor != null ? 'Floor ' + fmtCompact(c.floor) + ' ETH' : 'Newly listed');
+        ? '7d Vol ' + (c.vol7d != null ? fmtCompact(c.vol7d) + ' ' + (c.symbol || 'ETH') : '—')
+        : (c.floor != null ? 'Floor ' + fmtCompact(c.floor) + ' ' + (c.symbol || 'ETH') : 'Newly listed');
       return '<div class="nft-discover-row">'
         + thumbHtml(c)
-        + '<div class="nft-discover-info"><div class="nft-discover-name">' + c.name + '</div><div class="nft-discover-stat">' + statTxt + '</div></div>'
+        + '<div class="nft-discover-info"><div class="nft-discover-name"><span>' + c.name + '</span>' + verifiedBadge(c) + '</div><div class="nft-discover-stat">' + statTxt + '</div></div>'
         + '<button class="nft-watch-btn" ' + (added ? 'disabled' : ('onclick="Watchlist.add(\'' + c.slug + '\')"')) + '>' + (added ? 'Watching' : 'Watch') + '</button>'
         + '</div>';
     }).join('');
@@ -1172,7 +1228,7 @@ var Watchlist = (function () {
     }
   }
 
-  return { init: init, tab: tab, subTab: subTab, search: search, add: add, remove: remove, summary: summary, bentoStackHtml: bentoStackHtml };
+  return { init: init, tab: tab, subTab: subTab, search: search, add: add, remove: remove, copyContract: copyContract, summary: summary, bentoStackHtml: bentoStackHtml };
 })();
 
 // ── 11. WALLET X-RAY — real Blockscout + OpenSea composite score ─────────────
@@ -1220,20 +1276,43 @@ var XRay = (function () {
       ? (next.min - data.composite) + ' pts from ' + next.name
       : 'Top tier reached — apex on-chain presence';
 
+    // A sub-score of null means the underlying data source failed to load
+    // (e.g. the chain explorer's activity counters), not that the wallet
+    // genuinely scored zero there — those two cases must look different,
+    // otherwise a temporary fetch failure reads as a confidently wrong score.
     document.getElementById('xraySubs').innerHTML = (data.subs || []).map(function (s) {
+      if (s.v == null) {
+        return '<div class="xray-sub-row"><div class="xray-sub-label">' + s.k + '</div><div class="xray-sub-track" style="opacity:.35"></div><div class="xray-sub-val" title="Temporarily unavailable">—</div></div>';
+      }
       return '<div class="xray-sub-row"><div class="xray-sub-label">' + s.k + '</div><div class="xray-sub-track"><div class="xray-sub-fill" style="width:' + s.v + '%"></div></div><div class="xray-sub-val">' + s.v + '</div></div>';
     }).join('');
 
+    var noteEl = document.getElementById('xrayDataNote');
+    if (noteEl) {
+      noteEl.style.display = data.countersOk === false ? 'block' : 'none';
+      noteEl.textContent = 'Activity data (transactions, token transfers) was temporarily unavailable from the chain explorer — those sub-scores are excluded rather than shown as zero. Try scanning again for a complete picture.';
+    }
+
     var crypto = data.crypto || {}, nft = data.nft || {}, defi = data.defi || {}, behavior = data.behavior || {};
+    var fmtOrDash = function (v) { return v == null ? '—' : v.toLocaleString('en-US'); };
+    // Net worth/balance here are Ethereum-mainnet-only - if the wallet also
+    // holds a native balance on other chains (checked via a cheap RPC
+    // presence probe, not a full accounting), say so plainly rather than
+    // let the ETH-only figure above read as the wallet's whole picture.
+    var otherChains = (crypto.otherChains || []);
+    var otherChainsNote = otherChains.length
+      ? '<div class="xray-bd-note">Also active on ' + otherChains.join(', ') + ' — not included above.</div>'
+      : '';
     document.getElementById('xrayBreakdowns').innerHTML =
       '<div class="xray-bd"><h4>💰 Crypto Holdings</h4>'
       + '<div class="xray-bd-row"><span class="k">Net Worth (est.)</span><span class="v">$' + (crypto.netWorthUsd || 0).toLocaleString('en-US') + '</span></div>'
       + '<div class="xray-bd-row"><span class="k">ETH Balance</span><span class="v">' + (crypto.ethBalance || 0) + ' ETH</span></div>'
       + '<div class="xray-bd-row"><span class="k">Distinct Tokens</span><span class="v">' + (crypto.distinctTokens || 0) + '</span></div>'
+      + otherChainsNote
       + '</div>'
       + '<div class="xray-bd"><h4>📊 On-Chain Activity</h4>'
-      + '<div class="xray-bd-row"><span class="k">Transactions</span><span class="v">' + (behavior.txCount || 0).toLocaleString('en-US') + '</span></div>'
-      + '<div class="xray-bd-row"><span class="k">Token Transfers</span><span class="v">' + (defi.tokenTransfers || 0).toLocaleString('en-US') + '</span></div>'
+      + '<div class="xray-bd-row"><span class="k">Transactions</span><span class="v">' + fmtOrDash(behavior.txCount) + '</span></div>'
+      + '<div class="xray-bd-row"><span class="k">Token Transfers</span><span class="v">' + fmtOrDash(defi.tokenTransfers) + '</span></div>'
       + '<div class="xray-bd-row"><span class="k">NFT Collections</span><span class="v">' + (nft.collections || 0) + '</span></div>'
       + '</div>';
 
@@ -1248,6 +1327,7 @@ var XRay = (function () {
 
     document.getElementById('xrayOut').style.display = 'block';
 
+    lastResult = data;
     try {
       localStorage.setItem('dashXrayLast', JSON.stringify({
         emoji: tier.emoji, name: tier.name, color: tier.color, score: data.composite, flavor: tier.flavor
@@ -1256,7 +1336,73 @@ var XRay = (function () {
     if (typeof Dash !== 'undefined') Dash.renderBento();
   }
 
-  return { scan: scan, scanExample: scanExample };
+  var lastResult = null;
+
+  // Result card export — same canvas-drawing approach as the membership
+  // card (CardActions.download), just laid out for a score reveal instead
+  // of an ID card.
+  function download() {
+    if (!lastResult) return;
+    var data = lastResult, tier = data.tier;
+    var W = 640, H = 800;
+    var cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+    var x = cv.getContext('2d');
+    function rr(px, py, w, h, r) { x.beginPath(); x.moveTo(px + r, py); x.arcTo(px + w, py, px + w, py + h, r); x.arcTo(px + w, py + h, px, py + h, r); x.arcTo(px, py + h, px, py, r); x.arcTo(px, py, px + w, py, r); x.closePath(); }
+    rr(0, 0, W, H, 28); x.save(); x.clip();
+    var g = x.createLinearGradient(0, 0, W, H); g.addColorStop(0, '#10204f'); g.addColorStop(0.55, '#0a1330'); g.addColorStop(1, '#0a1a3e');
+    x.fillStyle = g; x.fillRect(0, 0, W, H);
+    var sh = x.createLinearGradient(0, 0, W, H); sh.addColorStop(0.30, 'rgba(255,255,255,0)'); sh.addColorStop(0.45, 'rgba(145,190,255,0.18)'); sh.addColorStop(0.52, 'rgba(145,190,255,0.10)'); sh.addColorStop(0.62, 'rgba(255,255,255,0)');
+    x.fillStyle = sh; x.fillRect(0, 0, W, H);
+    x.textAlign = 'center';
+    x.fillStyle = '#5B9BF8'; x.font = '700 13px "JetBrains Mono",monospace'; x.letterSpacing = '2px';
+    x.fillText('DASH HQ · WALLET X-RAY', W / 2, 64); x.letterSpacing = '0px';
+    x.font = '64px sans-serif';
+    x.fillText(tier.emoji, W / 2, 168);
+    x.fillStyle = '#fff'; x.font = '800 34px Sora,sans-serif';
+    x.fillText(tier.name, W / 2, 214);
+    x.fillStyle = '#8A9BBF'; x.font = '400 14px "JetBrains Mono",monospace';
+    x.fillText(data.ensName || short(data.address), W / 2, 242);
+    var scoreTxt = String(data.composite);
+    x.fillStyle = '#5B9BF8'; x.font = '800 86px "JetBrains Mono",monospace';
+    x.fillText(scoreTxt, W / 2, 350);
+    x.fillStyle = '#8A9BBF'; x.font = '600 15px "JetBrains Mono",monospace';
+    x.fillText('/ 100', W / 2, 378);
+    var badgeTxt = data.archetype;
+    x.font = '700 15px "JetBrains Mono",monospace';
+    var bw = x.measureText(badgeTxt).width + 36, bh = 38;
+    rr((W - bw) / 2, 410, bw, bh, bh / 2); x.fillStyle = 'rgba(91,155,248,.16)'; x.fill();
+    x.strokeStyle = 'rgba(91,155,248,.4)'; x.lineWidth = 1.5; x.stroke();
+    x.fillStyle = '#5B9BF8'; x.fillText(badgeTxt, W / 2, 410 + bh / 2 + 5);
+    x.fillStyle = '#C8D4EE'; x.font = '400 14px "JetBrains Mono",monospace';
+    var flavorLines = wrapText(x, tier.flavor, W - 120);
+    flavorLines.forEach(function (line, i) { x.fillText(line, W / 2, 490 + i * 22); });
+    x.fillStyle = '#8A9BBF'; x.font = '400 11px "JetBrains Mono",monospace'; x.letterSpacing = '1px';
+    x.fillText('HEURISTIC ON-CHAIN SCORE · DASHHQ.SITE', W / 2, H - 40);
+    x.restore();
+    rr(1, 1, W - 2, H - 2, 28); x.strokeStyle = 'rgba(255,255,255,0.16)'; x.lineWidth = 2; x.stroke();
+    var a = document.createElement('a'); a.href = cv.toDataURL('image/png'); a.download = 'dash-hq-wallet-xray.png';
+    document.body.appendChild(a); a.click(); a.remove();
+  }
+  function wrapText(ctx, text, maxWidth) {
+    var words = text.split(' '), lines = [], line = '';
+    words.forEach(function (w) {
+      var test = line ? line + ' ' + w : w;
+      if (ctx.measureText(test).width > maxWidth && line) { lines.push(line); line = w; }
+      else line = test;
+    });
+    if (line) lines.push(line);
+    return lines;
+  }
+  function shareX() {
+    if (!lastResult) return;
+    var data = lastResult;
+    var text = 'Scanned my wallet on Dash HQ\'s Wallet X-Ray: ' + data.composite + '/100 — ' + data.tier.name + ' (' + data.archetype + '). Check yours →';
+    var url = 'https://www.dashhq.site';
+    var intent = 'https://twitter.com/intent/tweet?text=' + encodeURIComponent(text) + '&url=' + encodeURIComponent(url);
+    window.open(intent, '_blank', 'noopener,width=600,height=520');
+  }
+
+  return { scan: scan, scanExample: scanExample, download: download, shareX: shareX };
 })();
 
 // ── PROFILE ────────────────────────────────────────────────────────────────

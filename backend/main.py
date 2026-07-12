@@ -939,17 +939,37 @@ async def _opensea_get(client: httpx.AsyncClient, path: str, params: dict | None
 def _nft_collection_shape(c: dict, stats: dict | None) -> dict:
     total = (stats or {}).get("total") or {}
     intervals = {i.get("interval"): i for i in (stats or {}).get("intervals") or []}
+    contracts = c.get("contracts") or []
+    contract = contracts[0] if contracts else {}
+    description = (c.get("description") or "").strip()
     return {
         "slug": c.get("collection") or c.get("slug"),
         "name": c.get("name") or "Unnamed collection",
         "image": c.get("image_url"),
         "floor": total.get("floor_price"),
+        # Not every collection prices in ETH (WETH/USDC/a custom token all
+        # show up here) - OpenSea reports which currency the collection's
+        # figures are actually denominated in (floor and volume share it),
+        # so display that instead of assuming ETH and mislabeling the number.
+        "symbol": total.get("floor_price_symbol") or "ETH",
         "vol1d": (intervals.get("one_day") or {}).get("volume"),
         "vol7d": (intervals.get("seven_day") or {}).get("volume"),
         "vol30d": (intervals.get("thirty_day") or {}).get("volume"),
         "sales24h": (intervals.get("one_day") or {}).get("sales"),
         "owners": total.get("num_owners"),
         "openseaUrl": "https://opensea.io/collection/" + (c.get("collection") or c.get("slug") or ""),
+        # OpenSea's own safelist tiers: not_requested < requested < approved
+        # < verified. Only "verified" gets the checkmark - that's OpenSea's
+        # actual editorial verification, not a self-reported claim.
+        "verified": c.get("safelist_status") == "verified",
+        "category": c.get("category"),
+        "description": description[:280] or None,
+        "twitter": c.get("twitter_username"),
+        "discord": c.get("discord_url"),
+        "website": c.get("project_url"),
+        "chain": contract.get("chain"),
+        "contractAddress": contract.get("address"),
+        "createdDate": c.get("created_date"),
     }
 
 
@@ -1073,22 +1093,32 @@ async def wallet_xray(request: Request, address: str = Query(..., min_length=3, 
         if not re.match(r"^0x[a-fA-F0-9]{40}$", addr):
             raise HTTPException(status_code=400, detail="Could not resolve that address or ENS name")
 
-        try:
-            info_res = await client.get(f"https://eth.blockscout.com/api/v2/addresses/{addr}")
-            info_res.raise_for_status()
-            info = info_res.json()
-        except (httpx.HTTPError, ValueError):
+        # Blockscout's free public API occasionally times out or hiccups on a
+        # single request under load — retrying once before giving up avoids
+        # silently reporting "0" (which reads as a confirmed empty wallet)
+        # when the real cause was just a dropped request.
+        async def _get_with_retry(url: str, timeout: float = 15):
+            last_exc: Exception | None = None
+            for attempt in range(2):
+                try:
+                    res = await client.get(url, timeout=timeout)
+                    res.raise_for_status()
+                    return res.json()
+                except (httpx.HTTPError, ValueError) as exc:
+                    last_exc = exc
+            logger.exception("Blockscout request failed after retry: %s", url, exc_info=last_exc)
+            return None
+
+        info = await _get_with_retry(f"https://eth.blockscout.com/api/v2/addresses/{addr}")
+        if info is None:
             raise HTTPException(status_code=502, detail="Could not reach the chain explorer right now")
 
         if not ens_name and info.get("ens_domain_name"):
             ens_name = info["ens_domain_name"]
 
-        try:
-            counters_res = await client.get(f"https://eth.blockscout.com/api/v2/addresses/{addr}/counters")
-            counters_res.raise_for_status()
-            counters = counters_res.json()
-        except (httpx.HTTPError, ValueError):
-            counters = {}
+        counters = await _get_with_retry(f"https://eth.blockscout.com/api/v2/addresses/{addr}/counters")
+        counters_ok = counters is not None
+        counters = counters or {}
 
         try:
             # A handful of real wallets (exchange hot wallets, very old/active
@@ -1126,6 +1156,35 @@ async def wallet_xray(request: Request, address: str = Query(..., min_length=3, 
         except (httpx.HTTPError, ValueError):
             pass
 
+        # X-Ray's scoring is Ethereum-mainnet-only (Blockscout's per-chain
+        # split means aggregating full history everywhere isn't free/cheap
+        # to do well) - but silently showing an Ethereum-only net worth with
+        # no hint that the wallet may hold real value elsewhere reads as
+        # simply wrong for anyone whose activity is mostly on an L2. A cheap
+        # native-balance presence check across the same public RPCs the Gas
+        # Tracker already uses is enough to flag "also active elsewhere"
+        # without pretending to give a full multi-chain accounting.
+        async def _chain_has_balance(chain_key: str, cfg: dict) -> str | None:
+            try:
+                res = await client.post(
+                    cfg["rpc"],
+                    json={"jsonrpc": "2.0", "method": "eth_getBalance", "params": [addr, "latest"], "id": 1},
+                    timeout=6,
+                )
+                res.raise_for_status()
+                result = res.json().get("result")
+                if result and int(result, 16) > 0:
+                    return chain_key
+            except (httpx.HTTPError, ValueError, TypeError):
+                pass
+            return None
+
+        other_chain_results = await asyncio.gather(
+            *[_chain_has_balance(k, cfg) for k, cfg in GAS_CHAINS.items() if k != "ethereum"]
+        )
+        _CHAIN_LABELS = {"bsc": "BNB Chain", "polygon": "Polygon", "arbitrum": "Arbitrum", "optimism": "Optimism", "base": "Base", "avalanche": "Avalanche"}
+        other_chains = [_CHAIN_LABELS.get(k, k) for k in other_chain_results if k]
+
     eth_balance = int(info.get("coin_balance") or 0) / 1e18
     eth_price = float(info.get("exchange_rate") or 0)
     eth_usd = eth_balance * eth_price
@@ -1155,33 +1214,47 @@ async def wallet_xray(request: Request, address: str = Query(..., min_length=3, 
     nft_item_count = sum(c["count"] for c in nft_collections)
 
     net_worth_score = _log_score(net_worth_usd, 10, 2_000_000)
-    experience_score = _log_score(tx_count, 1, 20000)
     diversity_score = min(100.0, fungible_tokens * 6)
     nft_score = min(100.0, nft_collection_count * 10)
-    defi_score = _log_score(transfer_count, 1, 50000)
-    conviction_score = min(100.0, (fungible_tokens + nft_collection_count) * 100 / max(tx_count, 1) * 20)
+    if counters_ok:
+        experience_score = _log_score(tx_count, 1, 20000)
+        defi_score = _log_score(transfer_count, 1, 50000)
+        conviction_score = min(100.0, (fungible_tokens + nft_collection_count) * 100 / max(tx_count, 1) * 20)
+    else:
+        # The counters endpoint failed even after a retry — tx_count and
+        # transfer_count are both 0 here, but that's "unknown", not a
+        # confirmed empty wallet. Scoring them as literal zeros would both
+        # understate the composite and, worse, spike conviction_score to a
+        # false 100 (it divides by tx_count). Drop these three sub-scores
+        # out of the average entirely rather than report a wrong number.
+        experience_score = None
+        defi_score = None
+        conviction_score = None
 
-    composite = round(
-        net_worth_score * 0.40
-        + experience_score * 0.25
-        + diversity_score * 0.15
-        + nft_score * 0.10
-        + defi_score * 0.10
-    )
+    # Weighted average over whichever sub-scores actually have real data —
+    # if counters failed, experience/defi are excluded and the remaining
+    # weights (net worth/diversity/NFT) are rescaled to still sum to 1,
+    # instead of treating the missing scores as zeros.
+    weighted = [(net_worth_score, 0.40), (diversity_score, 0.15), (nft_score, 0.10)]
+    if counters_ok:
+        weighted += [(experience_score, 0.25), (defi_score, 0.10)]
+    weight_total = sum(w for _, w in weighted)
+    composite = round(sum(s * w for s, w in weighted) / weight_total)
     composite = max(1, min(99, composite))
 
     tier = _xray_tier_for(composite)
     next_tier = _xray_next_tier(composite)
 
+    defi_for_archetype = defi_score or 0
     if composite >= 90:
         archetype = "The Apex Operator"
-    elif nft_score + defi_score >= 100 and net_worth_score > 40:
+    elif nft_score + defi_for_archetype >= 100 and net_worth_score > 40:
         archetype = "The Blue-Chip Accumulator"
-    elif tx_count < 200 and net_worth_usd > 5000:
+    elif counters_ok and tx_count < 200 and net_worth_usd > 5000:
         archetype = "The Diamond-Handed Holder"
-    elif nft_score + defi_score >= 110:
+    elif nft_score + defi_for_archetype >= 110:
         archetype = "The Degen Explorer"
-    elif tx_count > 2500:
+    elif counters_ok and tx_count > 2500:
         archetype = "The Serial Flipper"
     else:
         archetype = "The Fresh Signal"
@@ -1193,18 +1266,20 @@ async def wallet_xray(request: Request, address: str = Query(..., min_length=3, 
         "tier": tier,
         "nextTier": next_tier,
         "archetype": archetype,
+        "countersOk": counters_ok,
         "subs": [
             {"k": "Net Worth", "v": round(net_worth_score)},
-            {"k": "Experience", "v": round(experience_score)},
+            {"k": "Experience", "v": round(experience_score) if experience_score is not None else None},
             {"k": "Diversity", "v": round(diversity_score)},
             {"k": "NFT Footprint", "v": round(nft_score)},
-            {"k": "DeFi Footprint", "v": round(defi_score)},
-            {"k": "Conviction", "v": round(conviction_score)},
+            {"k": "DeFi Footprint", "v": round(defi_score) if defi_score is not None else None},
+            {"k": "Conviction", "v": round(conviction_score) if conviction_score is not None else None},
         ],
         "crypto": {
             "netWorthUsd": round(net_worth_usd),
             "distinctTokens": fungible_tokens,
             "ethBalance": round(eth_balance, 4),
+            "otherChains": other_chains,
         },
         "nft": {
             "collections": nft_collection_count,
@@ -1212,10 +1287,10 @@ async def wallet_xray(request: Request, address: str = Query(..., min_length=3, 
             "top": sorted(nft_collections, key=lambda c: -c["count"])[:4],
         },
         "defi": {
-            "tokenTransfers": transfer_count,
+            "tokenTransfers": transfer_count if counters_ok else None,
         },
         "behavior": {
-            "txCount": tx_count,
+            "txCount": tx_count if counters_ok else None,
         },
     }
 
