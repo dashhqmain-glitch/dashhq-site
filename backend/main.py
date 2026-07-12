@@ -882,6 +882,344 @@ async def rug_check(request: Request, payload: RugCheckIn):
         return await _rug_check_evm(client, payload.address, payload.chain_id)
 
 
+# ── OpenSea key management ────────────────────────────────────────────────
+# OpenSea's "instant" API key (POST /api/v2/auth/keys, no signup) is free
+# and keyless to obtain, but expires after 30 days. Rather than needing a
+# human to manually renew a key forever, the backend fetches and caches one
+# itself and transparently refreshes it before it expires — zero ongoing
+# maintenance, matching the rest of this project's zero-budget constraint.
+_opensea_key: str | None = None
+_opensea_key_expiry: float = 0
+
+
+async def _get_opensea_key(client: httpx.AsyncClient) -> str | None:
+    global _opensea_key, _opensea_key_expiry
+    if _opensea_key and time.time() < _opensea_key_expiry - 3600:
+        return _opensea_key
+    try:
+        res = await client.post("https://api.opensea.io/api/v2/auth/keys")
+        res.raise_for_status()
+        data = res.json()
+        _opensea_key = data["api_key"]
+        _opensea_key_expiry = time.time() + 29 * 24 * 3600
+        return _opensea_key
+    except (httpx.HTTPError, KeyError, ValueError):
+        logger.exception("Failed to obtain an OpenSea API key")
+        return None
+
+
+async def _opensea_get(client: httpx.AsyncClient, path: str, params: dict | None = None) -> dict | None:
+    key = await _get_opensea_key(client)
+    if not key:
+        return None
+    try:
+        res = await client.get(
+            "https://api.opensea.io/api/v2" + path,
+            params=params or {},
+            headers={"X-API-KEY": key},
+        )
+        if res.status_code == 401:
+            # Key was revoked/expired early — force a fresh one and retry once.
+            global _opensea_key
+            _opensea_key = None
+            key = await _get_opensea_key(client)
+            if not key:
+                return None
+            res = await client.get(
+                "https://api.opensea.io/api/v2" + path,
+                params=params or {},
+                headers={"X-API-KEY": key},
+            )
+        res.raise_for_status()
+        return res.json()
+    except (httpx.HTTPError, ValueError):
+        return None
+
+
+def _nft_collection_shape(c: dict, stats: dict | None) -> dict:
+    total = (stats or {}).get("total") or {}
+    intervals = {i.get("interval"): i for i in (stats or {}).get("intervals") or []}
+    return {
+        "slug": c.get("collection") or c.get("slug"),
+        "name": c.get("name") or "Unnamed collection",
+        "image": c.get("image_url"),
+        "floor": total.get("floor_price"),
+        "vol1d": (intervals.get("one_day") or {}).get("volume"),
+        "vol7d": (intervals.get("seven_day") or {}).get("volume"),
+        "vol30d": (intervals.get("thirty_day") or {}).get("volume"),
+        "sales24h": (intervals.get("one_day") or {}).get("sales"),
+        "owners": total.get("num_owners"),
+        "openseaUrl": "https://opensea.io/collection/" + (c.get("collection") or c.get("slug") or ""),
+    }
+
+
+@app.get("/toolkit/nft-search")
+@limiter.limit("40/minute")
+async def nft_search(request: Request, q: str = Query(..., min_length=1, max_length=80)):
+    async with httpx.AsyncClient(timeout=10) as client:
+        data = await _opensea_get(client, "/search", {"query": q})
+        if data is None:
+            raise HTTPException(status_code=502, detail="Could not reach OpenSea right now")
+        results = [
+            r["collection"] for r in (data.get("results") or [])
+            if r.get("type") == "collection" and r.get("collection")
+        ][:12]
+        # Search results don't include stats — fetch floor price for each in
+        # parallel so the list is still useful at a glance, not just names.
+        stats_tasks = [
+            _opensea_get(client, f"/collections/{c.get('collection')}/stats")
+            for c in results
+        ]
+        stats_list = await asyncio.gather(*stats_tasks, return_exceptions=True)
+        out = []
+        for c, stats in zip(results, stats_list):
+            if isinstance(stats, Exception):
+                stats = None
+            out.append(_nft_collection_shape(c, stats))
+        return {"results": out}
+
+
+@app.get("/toolkit/nft-collection")
+@limiter.limit("60/minute")
+async def nft_collection(request: Request, slug: str = Query(..., min_length=1, max_length=120)):
+    async with httpx.AsyncClient(timeout=10) as client:
+        info = await _opensea_get(client, f"/collections/{slug}")
+        stats = await _opensea_get(client, f"/collections/{slug}/stats")
+        if info is None:
+            raise HTTPException(status_code=404, detail="Collection not found")
+        return _nft_collection_shape(info, stats)
+
+
+@app.get("/toolkit/nft-discover")
+@limiter.limit("40/minute")
+async def nft_discover(request: Request, tab: str = Query("trending")):
+    order_by = "seven_day_volume" if tab == "trending" else "created_date"
+    async with httpx.AsyncClient(timeout=10) as client:
+        data = await _opensea_get(client, "/collections", {"order_by": order_by, "limit": 20, "chain": "ethereum"})
+        if data is None:
+            raise HTTPException(status_code=502, detail="Could not reach OpenSea right now")
+        collections = data.get("collections") or []
+        # The listing endpoint doesn't include stats either — same parallel
+        # stats fetch as search, capped to keep this snappy.
+        subset = collections[:15]
+        stats_tasks = [_opensea_get(client, f"/collections/{c.get('collection')}/stats") for c in subset]
+        stats_list = await asyncio.gather(*stats_tasks, return_exceptions=True)
+        out = []
+        for c, stats in zip(subset, stats_list):
+            if isinstance(stats, Exception):
+                stats = None
+            out.append(_nft_collection_shape(c, stats))
+        return {"results": out}
+
+
+# ── Wallet X-Ray ─────────────────────────────────────────────────────────
+# Real, keyless on-chain data from Blockscout's public API (balance, token
+# holdings with live USD pricing, transaction/transfer counts) plus real NFT
+# holdings from OpenSea. The composite "score" is an explicitly-labeled
+# heuristic (the UI calls it that) built entirely from these real numbers —
+# no fabricated/random values, unlike a hash-based mock.
+_XRAY_TIERS = [
+    {"min": 0, "emoji": "🦐", "name": "Shrimp", "color": "#8A9BBF", "flavor": "Just getting started on-chain — every whale began here."},
+    {"min": 14, "emoji": "🦀", "name": "Crab", "color": "#5A6A8A", "flavor": "Building a position, one transaction at a time."},
+    {"min": 28, "emoji": "🐙", "name": "Octopus", "color": "#22D3EE", "flavor": "Dabbling across a few chains and protocols."},
+    {"min": 42, "emoji": "🐟", "name": "Fish", "color": "#5B9BF8", "flavor": "An established, well-diversified retail wallet."},
+    {"min": 58, "emoji": "🐬", "name": "Dolphin", "color": "#4D72FF", "flavor": "A serious, well-rounded on-chain presence."},
+    {"min": 72, "emoji": "🦈", "name": "Shark", "color": "#1B42FF", "flavor": "A high-roller with real depth across the board."},
+    {"min": 85, "emoji": "🐋", "name": "Whale", "color": "#F59E0B", "flavor": "Moves markets. Deep holdings, deep history."},
+    {"min": 94, "emoji": "🐳", "name": "Humpback", "color": "#F59E0B", "flavor": "Apex on-chain presence — the top of the curve."},
+]
+
+
+def _xray_tier_for(score: float) -> dict:
+    tier = _XRAY_TIERS[0]
+    for t in _XRAY_TIERS:
+        if score >= t["min"]:
+            tier = t
+    return tier
+
+
+def _xray_next_tier(score: float) -> dict | None:
+    for t in _XRAY_TIERS:
+        if t["min"] > score:
+            return t
+    return None
+
+
+def _log_score(value: float, floor: float, ceiling: float) -> float:
+    import math
+    if value <= floor:
+        return 0.0
+    if value >= ceiling:
+        return 100.0
+    return max(0.0, min(100.0, (math.log10(value) - math.log10(max(floor, 1e-9))) / (math.log10(ceiling) - math.log10(max(floor, 1e-9))) * 100))
+
+
+@app.get("/toolkit/wallet-xray")
+@limiter.limit("20/minute")
+async def wallet_xray(request: Request, address: str = Query(..., min_length=3, max_length=100)):
+    raw = address.strip()
+    async with httpx.AsyncClient(timeout=12) as client:
+        addr = raw
+        ens_name = None
+        if raw.lower().endswith(".eth"):
+            try:
+                r = await client.get("https://api.ensideas.com/ens/resolve/" + raw)
+                d = r.json()
+                if d and d.get("address"):
+                    addr = d["address"]
+                    ens_name = raw
+            except (httpx.HTTPError, ValueError):
+                pass
+        if not re.match(r"^0x[a-fA-F0-9]{40}$", addr):
+            raise HTTPException(status_code=400, detail="Could not resolve that address or ENS name")
+
+        try:
+            info_res = await client.get(f"https://eth.blockscout.com/api/v2/addresses/{addr}")
+            info_res.raise_for_status()
+            info = info_res.json()
+        except (httpx.HTTPError, ValueError):
+            raise HTTPException(status_code=502, detail="Could not reach the chain explorer right now")
+
+        if not ens_name and info.get("ens_domain_name"):
+            ens_name = info["ens_domain_name"]
+
+        try:
+            counters_res = await client.get(f"https://eth.blockscout.com/api/v2/addresses/{addr}/counters")
+            counters_res.raise_for_status()
+            counters = counters_res.json()
+        except (httpx.HTTPError, ValueError):
+            counters = {}
+
+        try:
+            # A handful of real wallets (exchange hot wallets, very old/active
+            # EOAs) hold thousands of tokens - mostly spam airdrops, but the
+            # response itself can be large enough to need more than the
+            # shared client timeout to fully download.
+            tok_res = await client.get(
+                f"https://eth.blockscout.com/api/v2/addresses/{addr}/token-balances",
+                timeout=25,
+            )
+            tok_res.raise_for_status()
+            tok_json = tok_res.json()
+            token_balances = tok_json if isinstance(tok_json, list) else []
+        except (httpx.HTTPError, ValueError):
+            logger.exception("Failed to fetch token balances for %s", addr)
+            token_balances = []
+
+        nft_collections: list[dict] = []
+        try:
+            key = await _get_opensea_key(client)
+            if key:
+                nft_res = await client.get(
+                    f"https://api.opensea.io/api/v2/chain/ethereum/account/{addr}/nfts",
+                    params={"limit": 50},
+                    headers={"X-API-KEY": key},
+                )
+                if nft_res.status_code == 200:
+                    nfts = nft_res.json().get("nfts") or []
+                    seen: dict[str, dict] = {}
+                    for n in nfts:
+                        slug = n.get("collection") or "unknown"
+                        seen.setdefault(slug, {"name": slug, "count": 0, "image": n.get("image_url")})
+                        seen[slug]["count"] += 1
+                    nft_collections = list(seen.values())
+        except (httpx.HTTPError, ValueError):
+            pass
+
+    eth_balance = int(info.get("coin_balance") or 0) / 1e18
+    eth_price = float(info.get("exchange_rate") or 0)
+    eth_usd = eth_balance * eth_price
+
+    token_usd_total = 0.0
+    fungible_tokens = 0
+    for tb in token_balances:
+        tok = tb.get("token") or {}
+        if tok.get("type") != "ERC-20":
+            continue
+        try:
+            decimals = int(tok.get("decimals") or 0)
+            raw_value = int(tb.get("value") or 0)
+            rate = float(tok.get("exchange_rate") or 0)
+            if rate <= 0:
+                continue
+            qty = raw_value / (10 ** decimals)
+            token_usd_total += qty * rate
+            fungible_tokens += 1
+        except (TypeError, ValueError):
+            continue
+
+    net_worth_usd = eth_usd + token_usd_total
+    tx_count = int(counters.get("transactions_count") or 0)
+    transfer_count = int(counters.get("token_transfers_count") or 0)
+    nft_collection_count = len(nft_collections)
+    nft_item_count = sum(c["count"] for c in nft_collections)
+
+    net_worth_score = _log_score(net_worth_usd, 10, 2_000_000)
+    experience_score = _log_score(tx_count, 1, 20000)
+    diversity_score = min(100.0, fungible_tokens * 6)
+    nft_score = min(100.0, nft_collection_count * 10)
+    defi_score = _log_score(transfer_count, 1, 50000)
+    conviction_score = min(100.0, (fungible_tokens + nft_collection_count) * 100 / max(tx_count, 1) * 20)
+
+    composite = round(
+        net_worth_score * 0.40
+        + experience_score * 0.25
+        + diversity_score * 0.15
+        + nft_score * 0.10
+        + defi_score * 0.10
+    )
+    composite = max(1, min(99, composite))
+
+    tier = _xray_tier_for(composite)
+    next_tier = _xray_next_tier(composite)
+
+    if composite >= 90:
+        archetype = "The Apex Operator"
+    elif nft_score + defi_score >= 100 and net_worth_score > 40:
+        archetype = "The Blue-Chip Accumulator"
+    elif tx_count < 200 and net_worth_usd > 5000:
+        archetype = "The Diamond-Handed Holder"
+    elif nft_score + defi_score >= 110:
+        archetype = "The Degen Explorer"
+    elif tx_count > 2500:
+        archetype = "The Serial Flipper"
+    else:
+        archetype = "The Fresh Signal"
+
+    return {
+        "address": addr,
+        "ensName": ens_name,
+        "composite": composite,
+        "tier": tier,
+        "nextTier": next_tier,
+        "archetype": archetype,
+        "subs": [
+            {"k": "Net Worth", "v": round(net_worth_score)},
+            {"k": "Experience", "v": round(experience_score)},
+            {"k": "Diversity", "v": round(diversity_score)},
+            {"k": "NFT Footprint", "v": round(nft_score)},
+            {"k": "DeFi Footprint", "v": round(defi_score)},
+            {"k": "Conviction", "v": round(conviction_score)},
+        ],
+        "crypto": {
+            "netWorthUsd": round(net_worth_usd),
+            "distinctTokens": fungible_tokens,
+            "ethBalance": round(eth_balance, 4),
+        },
+        "nft": {
+            "collections": nft_collection_count,
+            "items": nft_item_count,
+            "top": sorted(nft_collections, key=lambda c: -c["count"])[:4],
+        },
+        "defi": {
+            "tokenTransfers": transfer_count,
+        },
+        "behavior": {
+            "txCount": tx_count,
+        },
+    }
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok"}

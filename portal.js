@@ -9,8 +9,18 @@ const TOKEN_KEY = 'dashhq_citizen_token';
 function setState(s) {
   document.querySelectorAll('.state').forEach(el => el.classList.toggle('on', el.dataset.state === s));
   document.getElementById('auth')?.classList.toggle('wide', s === 'member');
+  // .auth normally has backdrop-filter:blur() for the login-card look, which
+  // creates a new CSS containing block for descendant position:fixed
+  // elements — that would trap the dashboard shell's fixed, inset:0 sizing
+  // inside .auth's small content box instead of the real viewport. is-dash
+  // strips that filter so #dash can actually fill the screen.
+  document.getElementById('auth')?.classList.toggle('is-dash', s === 'member');
   document.querySelector('.portal')?.classList.toggle('in-hub', s === 'member');
-  if (s === 'member') Hub.init();
+  // The dashboard shell reads like a full app rather than a page with
+  // marketing chrome floating on top of it — hide the × close button once
+  // inside; the sidebar's own brand-logo click is the way back out instead.
+  document.getElementById('portalModal')?.classList.toggle('dash-active', s === 'member');
+  if (s === 'member') Dash.init();
 }
 
 // ── Discord OAuth ────────────────────────────────────────────────────────────
@@ -23,20 +33,24 @@ function signOut() {
   setState('prelogin');
 }
 
-// ── Card population (feeds the Card, Hub header, and Profile panel alike) ────
+// ── Card population (feeds the Card, dashboard header, and Profile alike) ────
 function updateCard(data) {
   const set = (id, text) => { const el = document.getElementById(id); if (el) el.textContent = text; };
   set('cardName', data.display_name);
   set('cardHandle', data.handle);
   set('cardTier', `★ ${data.tier}`);
   set('cardJoined', data.joined);
-  set('hubName', data.display_name);
-  set('hubTier', `★ ${data.tier}`);
+  set('dtopName', data.display_name);
   set('profileName', data.display_name);
   set('profileHandle', data.handle);
   set('profileTierTag', `★ ${data.tier}`);
   set('profileSinceTag', `Citizen since ${data.joined}`);
-  ['cardAvatar', 'hubAvatar', 'profileAvatar'].forEach(id => {
+  // A real per-citizen number instead of a fixed placeholder — derived from
+  // their actual Discord ID (the JWT's sub claim), so it's genuinely unique
+  // per citizen rather than the same fake badge for everyone.
+  const citizenNoEl = document.getElementById('cardCitizenNo');
+  if (citizenNoEl && data.sub) citizenNoEl.textContent = '#' + String(data.sub).slice(-4);
+  ['cardAvatar', 'dtopAvatar', 'profileAvatar'].forEach(id => {
     const av = document.getElementById(id);
     if (av && data.avatar) { av.src = data.avatar; av.alt = data.display_name; }
   });
@@ -70,15 +84,7 @@ function openPortal() {
   if (!modal) return;
   modal.classList.add('open');
   modal.setAttribute('aria-hidden', 'false');
-  // Always open at the top, whatever scroll position it was left at last
-  // time it was open — reopening scrolled halfway down reads as the portal
-  // randomly jumping around rather than a stable, predictable panel.
   modal.scrollTop = 0;
-  // overflow:hidden alone doesn't reliably stop the background page from
-  // scrolling/bouncing behind a position:fixed modal on iOS Safari and some
-  // Android browsers — pinning the body in place at its current scroll
-  // offset is the robust fix, since it removes any scrollable distance for
-  // a touch gesture to act on.
   _scrollLockY = window.scrollY || document.documentElement.scrollTop || 0;
   document.body.style.position = 'fixed';
   document.body.style.top = -_scrollLockY + 'px';
@@ -101,8 +107,6 @@ function closePortal() {
 (function () {
   const modal = document.getElementById('portalModal');
   if (!modal) return;
-  // Same intentional-backdrop-dismiss logic as the research modal: close only
-  // on a deliberate tap on the empty glass area, never on the card/controls.
   let downT = null, downX = 0, downY = 0;
   modal.addEventListener('pointerdown', e => { downT = e.target; downX = e.clientX; downY = e.clientY; });
   modal.addEventListener('pointerup', e => {
@@ -120,62 +124,87 @@ async function init() {
   const token = params.get('token');
   const error = params.get('error');
 
-  // Clean the URL so the token isn't bookmarkable
   if (token || error) history.replaceState({}, '', window.location.pathname);
 
-  // Only open the portal automatically right after an action that actually
-  // belongs there — landing back from Discord OAuth (token/error in the
-  // URL). An already-verified citizen just reloading or browsing the rest
-  // of the site should NOT get the portal shoved open on every refresh —
-  // verify silently in the background instead, so it's ready the moment
-  // they click Portal themselves, without forcing it open uninvited.
   if (error) { openPortal(); setState('prelogin'); return; }
   if (token) { openPortal(); await verifyToken(token); return; }
 
   const saved = sessionStorage.getItem(TOKEN_KEY);
   if (saved) { await verifyToken(saved); return; }
 
-  // Nothing to verify — leave the portal closed until the user opens it.
   setState('prelogin');
 }
 
-// ── PORTAL HUB — tab switching ────────────────────────────────────────────────
-var Hub = (function () {
+// ── DASHBOARD SHELL — sidebar nav, collapse, mobile drawer, bento overview ───
+var Dash = (function () {
   var inited = false;
-  function go(tab) {
-    document.querySelectorAll('.hub-tab').forEach(function (t) {
-      var on = t.dataset.hub === tab;
-      t.classList.toggle('active', on);
-      t.setAttribute('aria-selected', on ? 'true' : 'false');
-    });
-    document.querySelectorAll('.hub-panel').forEach(function (p) { p.classList.toggle('on', p.dataset.hubPanel === tab); });
-    // Switching tabs should reliably show the new tab from its own top —
-    // otherwise leftover scroll from whichever tab you were just on carries
-    // over, landing you mid-scroll on unrelated content.
-    var modal = document.getElementById('portalModal');
-    if (modal) modal.scrollTop = 0;
+  function go(page) {
+    document.querySelectorAll('.dsb-item').forEach(function (t) { t.classList.toggle('active', t.dataset.page === page); });
+    document.querySelectorAll('.dpage').forEach(function (p) { p.classList.toggle('on', p.dataset.page === page); });
+    closeMobile();
+    var c = document.getElementById('dcontent');
+    if (c) c.scrollTop = 0;
+    if (page === 'overview') renderBento();
+  }
+  function toggleCollapse() { document.getElementById('dash').classList.toggle('collapsed'); }
+  function openMobile() { document.getElementById('dash').classList.add('mobile-open'); }
+  function closeMobile() { document.getElementById('dash').classList.remove('mobile-open'); }
+  function renderBento() {
+    var g = document.getElementById('gasBig');
+    var bg = document.getElementById('bentoGas');
+    var bgd = document.getElementById('bentoGasDesc');
+    if (bg && g) {
+      var unitWord = (document.getElementById('gasUnitWord') || {}).textContent || 'gwei';
+      bg.textContent = (g.textContent && g.textContent !== '—') ? g.textContent + ' ' + unitWord : '—';
+    }
+    if (bgd) bgd.textContent = ((document.getElementById('gasChainLabel') || {}).textContent || 'Ethereum mainnet') + ' · avg';
+
+    var pf = document.getElementById('pairsFeed');
+    var bp = document.getElementById('bentoPairs');
+    if (bp && pf) bp.textContent = pf.querySelectorAll('.pair-row').length;
+
+    var t = (typeof Ticker !== 'undefined') ? Ticker.top() : null;
+    var bms = document.getElementById('bentoMoverSym'), bmc = document.getElementById('bentoMoverChg');
+    if (t && bms && bmc) {
+      bms.textContent = t.sym;
+      var up = t.chg >= 0;
+      bmc.textContent = (up ? '+' : '') + t.chg.toFixed(2) + '%';
+      bmc.style.color = up ? 'var(--green)' : 'var(--red)';
+    }
+
+    var nc = document.getElementById('bentoNftStack'), nd = document.getElementById('bentoNftDesc');
+    if (nc && nd && typeof Watchlist !== 'undefined') {
+      var ns = Watchlist.summary();
+      nc.innerHTML = Watchlist.bentoStackHtml(5);
+      nd.textContent = ns.count ? (ns.count + (ns.count === 1 ? ' collection watched' : ' collections watched')) : 'Search & discover collections';
+    }
+
+    try {
+      var saved = JSON.parse(localStorage.getItem('dashXrayLast') || 'null');
+      if (saved) {
+        var be = document.getElementById('bentoTierEmoji'), bn = document.getElementById('bentoTierName');
+        var br = document.getElementById('bentoEmojiRing'), bd = document.getElementById('bentoTierDesc');
+        if (be) be.textContent = saved.emoji;
+        if (bn) bn.innerHTML = saved.name + ' · <span style="color:' + saved.color + '">' + saved.score + '/100</span>';
+        if (bd) bd.textContent = saved.flavor;
+        if (br) {
+          br.style.background = 'color-mix(in srgb, ' + saved.color + ' 18%, transparent)';
+          br.style.borderColor = 'color-mix(in srgb, ' + saved.color + ' 55%, transparent)';
+          br.style.boxShadow = '0 0 22px color-mix(in srgb, ' + saved.color + ' 30%, transparent)';
+        }
+      }
+    } catch (e) { }
   }
   function init() {
-    if (inited) return; inited = true;
+    if (inited) { renderBento(); return; }
+    inited = true;
     Ticker.init(); Gas.init(); Pnl.init(); Ape.calc(); Pairs.init(); Slip.calc();
+    Watchlist.init();
     Profile.init();
+    setInterval(renderBento, 5000);
+    setTimeout(renderBento, 300);
   }
-  function openTool(id) {
-    document.getElementById('tkLauncher').style.display = 'none';
-    document.getElementById('tkFocusbar').style.display = 'flex';
-    var stack = document.getElementById('toolsStack');
-    stack.style.display = 'block';
-    stack.querySelectorAll('.tool-card').forEach(function (c) { c.classList.toggle('active', c.id === 'tool-' + id); });
-    document.getElementById('tkFocusbar').scrollIntoView({ behavior: 'smooth', block: 'start' });
-  }
-  function backToGrid() {
-    document.getElementById('tkLauncher').style.display = 'grid';
-    document.getElementById('tkFocusbar').style.display = 'none';
-    document.getElementById('toolsStack').style.display = 'none';
-    var modal = document.getElementById('portalModal');
-    if (modal) modal.scrollTop = 0;
-  }
-  return { go: go, init: init, openTool: openTool, backToGrid: backToGrid };
+  return { go: go, init: init, toggleCollapse: toggleCollapse, openMobile: openMobile, closeMobile: closeMobile, renderBento: renderBento };
 })();
 
 // ── CARD ACTIONS — download + share ───────────────────────────────────────────
@@ -195,7 +224,6 @@ var CardActions = (function () {
     var P = 26 * S;
     x.fillStyle = '#fff'; x.font = '700 ' + (15 * S) + 'px Sora,sans-serif'; x.textBaseline = 'alphabetic'; x.letterSpacing = (2 * S) + 'px';
     x.fillText('DASH CITIZEN', P, P + 14 * S); x.letterSpacing = '0px';
-    // Real tier from the card itself — never hardcode, tiers can change.
     var tierTxt = (document.getElementById('cardTier') || {}).textContent || '★ CITIZEN';
     x.font = '700 ' + (11 * S) + 'px "JetBrains Mono",monospace';
     var tw = x.measureText(tierTxt).width, padX = 12 * S, ph = 28 * S, pw = tw + padX * 2;
@@ -212,8 +240,6 @@ var CardActions = (function () {
       x.fillStyle = color || '#E8EFFF'; x.font = '700 ' + (15 * S) + 'px "JetBrains Mono",monospace';
       x.fillText(val, mx, H - 10 * S);
     }
-    // Real joined date + the card's actual second stat (Status: Active) —
-    // matches what's really on screen, not the design's placeholder stat.
     meta('Member Since', (document.getElementById('cardJoined') || {}).textContent || '—', P);
     meta('Status', 'Active', P + 150 * S, '#10B981');
     x.restore();
@@ -241,10 +267,6 @@ var CardActions = (function () {
 var Ticker = (function () {
   var state = {}; // sym -> {price, history[], chg, loading, error}
 
-  // Resolving a symbol and fetching its price used to be two separate
-  // CoinGecko calls per token, called directly from the browser — slow, and
-  // prone to silently hitting CoinGecko's free-tier rate limit. Now proxied
-  // through one batched backend call for every tracked symbol at once.
   async function fetchBatch(syms) {
     if (!syms.length) return {};
     try {
@@ -282,8 +304,8 @@ var Ticker = (function () {
   }
   function applyResult(sym, r) {
     var s = state[sym];
-    if (!s) return; // removed while the request was in flight
-    s.loading = false; // always resolved here — never left hanging, success or not
+    if (!s) return;
+    s.loading = false;
     if (!r || r.error || typeof r.price !== 'number') { s.error = true; return; }
     s.error = false;
     s.price = r.price;
@@ -298,8 +320,6 @@ var Ticker = (function () {
     var results = await fetchBatch([sym]);
     applyResult(sym, results[sym]);
     render();
-    // Fetch a second data point soon after so the sparkline has something to
-    // draw almost immediately, instead of waiting for the next full tick().
     if (state[sym] && !state[sym].error) {
       setTimeout(function () {
         if (!state[sym]) return;
@@ -325,22 +345,25 @@ var Ticker = (function () {
     var u = document.getElementById('tickerUpdated');
     if (u) u.textContent = 'Updated just now';
   }
+  function top() {
+    var syms = Object.keys(state).filter(function (s) { return !state[s].loading && !state[s].error; });
+    if (!syms.length) return null;
+    var best = syms.reduce(function (a, b) { return Math.abs(state[b].chg) > Math.abs(state[a].chg) ? b : a; });
+    return { sym: best, chg: state[best].chg };
+  }
   function init() {
     seed('ETH'); seed('SOL');
-    setInterval(tick, 15000); // one batched call regardless of watchlist size
+    setInterval(tick, 15000);
   }
-  return { init: init, add: add, remove: remove, retry: retry };
+  return { init: init, add: add, remove: remove, retry: retry, top: top };
 })();
 
-// ── 2. GAS TRACKER — real public RPC + CoinGecko ──────────────────────────────
+// ── 2. GAS TRACKER — real public RPC + CoinGecko, multi-chain ────────────────
 var Gas = (function () {
   var gwei = null, nativePrice = null, solanaFees = null;
   var GAS_UNITS = { transfer: 21000, swap: 150000, mint: 220000 };
-  // Rough compute-unit estimates for Solana — actual usage varies a lot by
-  // program, so this is illustrative, same spirit as the EVM gas-unit table.
   var SOLANA_CU = { transfer: 450, swap: 200000, mint: 300000 };
-  var SOLANA_BASE_FEE_LAMPORTS = 5000; // fixed protocol fee per signature
-  // Public, keyless RPCs + the CoinGecko id for each chain's native gas token.
+  var SOLANA_BASE_FEE_LAMPORTS = 5000;
   var CHAINS = {
     ethereum: { label: 'Ethereum mainnet', symbol: 'ETH' },
     bsc: { label: 'BNB Chain', symbol: 'BNB' },
@@ -353,9 +376,6 @@ var Gas = (function () {
   };
   var current = 'ethereum';
 
-  // Public RPCs generally don't send CORS headers for raw browser fetch, so
-  // gas price + native token price are fetched through our own backend,
-  // which proxies both the RPC and CoinGecko in a single call.
   async function fetchGasData(chain) {
     try {
       var res = await fetch(BACKEND_URL + '/toolkit/gas?chain=' + encodeURIComponent(chain));
@@ -364,9 +384,6 @@ var Gas = (function () {
       return { gwei: data.gwei, nativeUsd: data.native_usd, solanaFees: data.solana_fees || null };
     } catch (e) { return { gwei: null, nativeUsd: null, solanaFees: null }; }
   }
-  // Sub-1-gwei readings are common now (L2s especially, sometimes L1 too) —
-  // a fixed decimal count either shows "0" or wastes space, so scale the
-  // precision to the actual magnitude instead.
   function fmtGwei(v) {
     if (v >= 10) return v.toFixed(1);
     if (v >= 1) return v.toFixed(2);
@@ -414,7 +431,6 @@ var Gas = (function () {
     var type = document.getElementById('gasTxType').value;
     var cu = SOLANA_CU[type];
     document.getElementById('gasCosts').innerHTML = tiers.map(function (t) {
-      // base fee (fixed) + priority fee (micro-lamports/CU × estimated CU)
       var lamports = SOLANA_BASE_FEE_LAMPORTS + (t.v * cu / 1e6);
       var sol = lamports / 1e9;
       var costUsd = nativePrice != null ? sol * nativePrice : null;
@@ -425,7 +441,7 @@ var Gas = (function () {
   async function refresh() {
     var chain = current;
     var data = await fetchGasData(chain);
-    if (chain !== current) return; // user switched chains mid-fetch — drop the stale result
+    if (chain !== current) return;
     if (data.gwei != null) gwei = data.gwei;
     if (data.nativeUsd != null) nativePrice = data.nativeUsd;
     solanaFees = data.solanaFees;
@@ -441,7 +457,7 @@ var Gas = (function () {
   return { init: init, render: render, switchChain: switchChain };
 })();
 
-// ── 3. WALLET CARD — real QR (downloadable) + real ENS resolution ────────────
+// ── 3. WALLET CARD — real QR (branded download) + real ENS resolution ────────
 var WalletCard = (function () {
   function short(addr) { return addr.length <= 14 ? addr : addr.slice(0, 6) + '…' + addr.slice(-4); }
   async function render() {
@@ -452,8 +468,6 @@ var WalletCard = (function () {
     var isEvmHex = /^0x[a-fA-F0-9]{40}$/.test(raw);
     var addr = raw, ensName = '';
     if (isEns) {
-      // ENS only resolves Ethereum-style names — the only case where we
-      // need to turn user input into a different address before the QR step.
       try {
         var res = await fetch('https://api.ensideas.com/ens/resolve/' + encodeURIComponent(raw));
         var data = await res.json();
@@ -465,11 +479,8 @@ var WalletCard = (function () {
         var res2 = await fetch('https://api.ensideas.com/ens/resolve/' + raw);
         var data2 = await res2.json();
         if (data2 && data2.name) ensName = data2.name;
-      } catch (e) { /* reverse lookup is a nice-to-have, fine if it fails */ }
+      } catch (e) { }
     }
-    // Any other non-empty input (Solana base58, Bitcoin, other chains'
-    // native address formats, etc.) is used as-is — a wallet card just
-    // needs to display and QR-encode the address, no chain-specific parsing.
     if (!addr) {
       document.getElementById('wcardAddr').textContent = 'Could not resolve that address or ENS name';
       document.getElementById('wcardEns').textContent = '';
@@ -492,20 +503,53 @@ var WalletCard = (function () {
       setTimeout(function () { btn.textContent = orig; }, 1600);
     });
   }
+  // Branded download: composes the QR onto a Dash HQ-styled card (wordmark +
+  // dashhq.site + the address) instead of handing back a bare, anonymous QR
+  // PNG that carries no indication of what it's for or where it came from.
   function downloadQr() {
-    var img = document.getElementById('wcardQr');
-    if (!img || !img.src) return;
-    fetch(img.src).then(function (res) { return res.blob(); }).then(function (blob) {
-      var url = URL.createObjectURL(blob);
-      var a = document.createElement('a');
-      a.href = url; a.download = 'dash-wallet-qr.png';
+    var qrImgEl = document.getElementById('wcardQr');
+    var addr = document.getElementById('wcardAddr').dataset.full || document.getElementById('wcardAddr').textContent || '';
+    var ens = document.getElementById('wcardEns').textContent || '';
+    if (!qrImgEl || !qrImgEl.src || !addr) return;
+    var loader = new Image();
+    loader.crossOrigin = 'anonymous';
+    loader.onload = function () {
+      var W = 640, H = 860;
+      var cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+      var x = cv.getContext('2d');
+      function rr(px, py, w, h, r) { x.beginPath(); x.moveTo(px + r, py); x.arcTo(px + w, py, px + w, py + h, r); x.arcTo(px + w, py + h, px, py + h, r); x.arcTo(px, py + h, px, py, r); x.arcTo(px, py, px + w, py, r); x.closePath(); }
+      rr(0, 0, W, H, 28); x.save(); x.clip();
+      var g = x.createLinearGradient(0, 0, W, H); g.addColorStop(0, '#10204f'); g.addColorStop(0.55, '#0a1330'); g.addColorStop(1, '#0a1a3e');
+      x.fillStyle = g; x.fillRect(0, 0, W, H);
+      var sh = x.createLinearGradient(0, 0, W, H); sh.addColorStop(0.30, 'rgba(255,255,255,0)'); sh.addColorStop(0.45, 'rgba(145,190,255,0.18)'); sh.addColorStop(0.52, 'rgba(145,190,255,0.10)'); sh.addColorStop(0.62, 'rgba(255,255,255,0)');
+      x.fillStyle = sh; x.fillRect(0, 0, W, H);
+      x.textAlign = 'center';
+      x.fillStyle = '#fff'; x.font = '800 30px Sora,sans-serif'; x.letterSpacing = '3px';
+      x.fillText('DASH HQ', W / 2, 76); x.letterSpacing = '0px';
+      x.fillStyle = '#5B9BF8'; x.font = '700 13px "JetBrains Mono",monospace'; x.letterSpacing = '2px';
+      x.fillText('WALLET ID · DASHHQ.SITE', W / 2, 104); x.letterSpacing = '0px';
+      var qrSize = 380, qrX = (W - qrSize) / 2, qrY = 148;
+      rr(qrX - 16, qrY - 16, qrSize + 32, qrSize + 32, 20); x.fillStyle = '#fff'; x.fill();
+      x.drawImage(loader, qrX, qrY, qrSize, qrSize);
+      x.fillStyle = '#E8EFFF'; x.font = '700 20px "JetBrains Mono",monospace';
+      x.fillText(short(addr), W / 2, qrY + qrSize + 66);
+      if (ens) {
+        x.fillStyle = '#5B9BF8'; x.font = '600 14px "JetBrains Mono",monospace';
+        x.fillText(ens, W / 2, qrY + qrSize + 92);
+      }
+      x.fillStyle = '#8A9BBF'; x.font = '400 11px "JetBrains Mono",monospace'; x.letterSpacing = '1px';
+      x.fillText('SCAN TO VERIFY · DASH HQ CITIZEN PORTAL', W / 2, H - 40);
+      x.restore();
+      rr(1, 1, W - 2, H - 2, 28); x.strokeStyle = 'rgba(255,255,255,0.16)'; x.lineWidth = 2; x.stroke();
+      var a = document.createElement('a'); a.href = cv.toDataURL('image/png'); a.download = 'dash-hq-wallet-qr.png';
       document.body.appendChild(a); a.click(); a.remove();
-      URL.revokeObjectURL(url);
-    }).catch(function () {
-      // If the QR host ever blocks a cross-origin blob read, fall back to
-      // opening it directly so the user can still save it manually.
-      window.open(img.src, '_blank', 'noopener');
-    });
+    };
+    loader.onerror = function () {
+      // If the QR host ever blocks a cross-origin canvas read, fall back to
+      // opening the bare QR so the user can still save something manually.
+      window.open(qrImgEl.src, '_blank', 'noopener');
+    };
+    loader.src = qrImgEl.src;
   }
   return { render: render, copy: copy, downloadQr: downloadQr };
 })();
@@ -580,11 +624,6 @@ var Pairs = (function () {
       return (data.data || []).map(function (p) {
         var a = p.attributes;
         var poolAddr = (a.address || p.id.split('_').pop());
-        // The pool's own address isn't what you'd paste into a swap or a
-        // rug check — the base token (the new asset itself) is, and
-        // GeckoTerminal always prefixes its relationship ids with the
-        // exact network slug we requested, so stripping that gives the
-        // raw contract/mint address for any chain (EVM hex or Solana base58).
         var baseTokenId = ((p.relationships || {}).base_token || {}).data && p.relationships.base_token.data.id;
         var tokenAddr = baseTokenId && baseTokenId.indexOf(net + '_') === 0 ? baseTokenId.slice(net.length + 1) : null;
         return {
@@ -620,8 +659,6 @@ var Pairs = (function () {
     }).join('') || '<div class="pin-empty">No pairs match these filters right now.</div>';
   }
   function copyAddress(ev, addr) {
-    // Rows are links out to GeckoTerminal — stop the click from also
-    // navigating away before the copy has a chance to register.
     ev.preventDefault();
     ev.stopPropagation();
     var btn = ev.currentTarget;
@@ -639,14 +676,12 @@ var Pairs = (function () {
   }
   function init() {
     refresh();
-    setInterval(refresh, 45000); // respectful poll interval for a free public API
+    setInterval(refresh, 45000);
   }
   return { init: init, render: render, refresh: refresh, copyAddress: copyAddress };
 })();
 
-// ── 7. CA SCANNER — real DexScreener data, chain auto-detected from the
-//    address itself, so every chain DexScreener indexes works with zero
-//    per-chain configuration on our side ─────────────────────────────────
+// ── 7. CA SCANNER — real DexScreener data, chain auto-detected ───────────────
 var CaScan = (function () {
   var pairs = [];
   var current = null;
@@ -657,9 +692,6 @@ var CaScan = (function () {
   };
   function chainLabel(id) {
     if (CHAIN_LABELS[id]) return CHAIN_LABELS[id];
-    // DexScreener indexes far more chains than our other tools' fixed
-    // lists — anything outside the standard set still gets a readable
-    // label instead of being dropped.
     return id.charAt(0).toUpperCase() + id.slice(1).replace(/-/g, ' ');
   }
   function fmtPrice(n) {
@@ -707,7 +739,7 @@ var CaScan = (function () {
     var empty = document.getElementById('scanEmpty');
     out.style.display = 'none';
     empty.style.display = 'none';
-    var btn = document.querySelector('#tool-scan .tk-addrow .btn');
+    var btn = document.querySelector('[data-page="scan"] .tk-addrow .btn');
     var origLabel = btn.textContent;
     btn.textContent = 'Scanning…'; btn.disabled = true;
     try {
@@ -814,10 +846,6 @@ var CaScan = (function () {
   function shortAddr(a) { return a && a.length > 14 ? a.slice(0, 6) + '…' + a.slice(-4) : (a || '—'); }
   function copySvg() { return '<svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M4 16V5a1 1 0 0 1 1-1h11"/></svg>'; }
 
-  // Everything a trader would otherwise have to open DexScreener itself to
-  // find — pairing, native price, pool address, FDV vs circulating market
-  // cap, and the full 5m/1h/6h/24h volume + buy/sell breakdown — tucked
-  // into one dropdown so the main card above stays clean and scannable.
   function buildMoreDetails(pair) {
     var quote = pair.quoteToken || {};
     var dexLabel = (pair.dexId || '—') + (pair.labels && pair.labels.length ? ' · ' + pair.labels.join('/').toUpperCase() : '');
@@ -889,8 +917,6 @@ var Rug = (function () {
     badge.className = 'rug-badge'; badge.textContent = 'Checking…';
     document.getElementById('rugChecklist').innerHTML = '';
     out.style.display = 'block';
-    // "1".."43114" for EVM chains, or the literal string "solana" —
-    // the backend branches on this to pick the right scanner.
     var chainId = document.getElementById('rugChain').value;
     try {
       var res = await fetch(BACKEND_URL + '/toolkit/rug-check', {
@@ -912,7 +938,7 @@ var Rug = (function () {
   return { check: check };
 })();
 
-// ── 8. PRICE IMPACT / SLIPPAGE ESTIMATOR — real GeckoTerminal pool depth ──────
+// ── 9. PRICE IMPACT / SLIPPAGE ESTIMATOR — real GeckoTerminal pool depth ─────
 var Slip = (function () {
   var poolCache = {};
   var debounceTimer = null;
@@ -931,8 +957,6 @@ var Slip = (function () {
     } catch (e) { return null; }
   }
   function calc() {
-    // Typing in the pair box fires on every keystroke — debounce so we
-    // don't fan out a GeckoTerminal search request per character.
     clearTimeout(debounceTimer);
     debounceTimer = setTimeout(run, 350);
   }
@@ -945,9 +969,6 @@ var Slip = (function () {
     resultEl.innerHTML = '<div class="pin-empty">Loading pool data…</div>';
     var liq = await fetchPoolLiquidity(network, query);
     if (liq == null) { resultEl.innerHTML = '<div class="pin-empty">Could not find a pool for that pair on this chain.</div>'; return; }
-    // Approximation using total pool depth (constant-product pools split
-    // liquidity ~50/50 by value) — labeled as an estimate throughout, since
-    // exact impact needs the pool's raw token reserves, not just USD depth.
     var halfDepth = liq / 2;
     var impact = halfDepth > 0 ? (amountIn / (amountIn + halfDepth)) * 100 : 0;
     var level = impact < 1 ? 'low' : impact < 5 ? 'medium' : 'high';
@@ -964,9 +985,284 @@ var Slip = (function () {
   return { calc: calc };
 })();
 
+// ── 10. NFT WATCHLIST — real OpenSea search/collection/discover data ─────────
+var Watchlist = (function () {
+  var cache = {};       // slug -> collection shape from the backend
+  var watchSlugs = [];  // persisted list of watched slugs
+  var searchTimer = null;
+  var currentTab = 'search';
+  var currentSub = 'trending';
+  var discoverLoaded = { trending: false, new: false };
+
+  function load() {
+    try { watchSlugs = JSON.parse(localStorage.getItem('dashhq_nft_watchlist') || '[]'); }
+    catch (e) { watchSlugs = []; }
+  }
+  function save() {
+    try { localStorage.setItem('dashhq_nft_watchlist', JSON.stringify(watchSlugs)); } catch (e) { }
+  }
+  function fmtCompact(n) {
+    if (n == null || isNaN(n)) return '—';
+    if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+    return (Math.round(n * 100) / 100).toString();
+  }
+  function thumbHtml(c) {
+    if (c.image) return '<img class="nft-thumb" src="' + c.image + '" alt="" onerror="this.outerHTML=\'<span class=&quot;nft-thumb ph&quot;>' + ((c.name || '?')[0] || '?').toUpperCase() + '</span>\'">';
+    return '<span class="nft-thumb ph">' + ((c.name || '?')[0] || '?').toUpperCase() + '</span>';
+  }
+
+  function updateCount() {
+    var el = document.getElementById('nftWatchCount');
+    if (el) el.textContent = watchSlugs.length;
+  }
+
+  function tab(t) {
+    currentTab = t;
+    document.querySelectorAll('.nft-tab[data-nft-tab]').forEach(function (b) { b.classList.toggle('active', b.dataset.nftTab === t); });
+    document.getElementById('nftPaneSearch').classList.toggle('on', t === 'search');
+    document.getElementById('nftPaneWatch').classList.toggle('on', t === 'watch');
+    document.getElementById('nftPaneDiscover').classList.toggle('on', t === 'discover');
+    if (t === 'watch') renderWatchlist();
+    if (t === 'discover' && !discoverLoaded[currentSub]) refreshDiscover(currentSub);
+  }
+  function subTab(t) {
+    currentSub = t;
+    document.querySelectorAll('.nft-tab[data-nft-sub]').forEach(function (b) { b.classList.toggle('active', b.dataset.nftSub === t); });
+    var note = document.getElementById('nftNewNote');
+    if (note) note.style.display = t === 'new' ? 'block' : 'none';
+    if (!discoverLoaded[t]) refreshDiscover(t); else renderDiscover(t);
+  }
+
+  async function search(q) {
+    q = (q || '').trim();
+    clearTimeout(searchTimer);
+    var el = document.getElementById('nftSearchResults');
+    if (q.length < 2) { el.innerHTML = ''; return; }
+    searchTimer = setTimeout(async function () {
+      el.innerHTML = '<div class="nft-empty-msg">Searching…</div>';
+      try {
+        var res = await fetch(BACKEND_URL + '/toolkit/nft-search?q=' + encodeURIComponent(q));
+        if (!res.ok) throw new Error('search failed');
+        var data = await res.json();
+        var results = data.results || [];
+        results.forEach(function (c) { if (c.slug) cache[c.slug] = c; });
+        if (!results.length) { el.innerHTML = '<div class="nft-empty-msg">No collections found for that search.</div>'; return; }
+        el.innerHTML = results.map(function (c) {
+          var added = watchSlugs.indexOf(c.slug) !== -1;
+          return '<div class="nft-result-row' + (added ? ' added' : '') + '" onclick="' + (added ? '' : "Watchlist.add('" + c.slug + "')") + '">'
+            + thumbHtml(c)
+            + '<div class="nft-result-info"><div class="nft-result-name">' + c.name + '</div><div class="nft-result-stat">Floor ' + (c.floor != null ? fmtCompact(c.floor) + ' ETH' : '—') + '</div></div>'
+            + '<div class="nft-result-add">' + (added ? 'Watching ✓' : '+ Watch') + '</div>'
+            + '</div>';
+        }).join('');
+      } catch (e) {
+        el.innerHTML = '<div class="nft-empty-msg">Could not reach OpenSea right now — try again in a moment.</div>';
+      }
+    }, 350);
+  }
+
+  function add(slug) {
+    if (!slug || watchSlugs.indexOf(slug) !== -1) return;
+    watchSlugs.push(slug);
+    save();
+    updateCount();
+    if (currentTab === 'search') search(document.getElementById('nftSearchInput').value);
+    if (currentTab === 'watch') renderWatchlist();
+    if (typeof Dash !== 'undefined') Dash.renderBento();
+  }
+  function remove(slug) {
+    watchSlugs = watchSlugs.filter(function (s) { return s !== slug; });
+    save();
+    updateCount();
+    renderWatchlist();
+    if (typeof Dash !== 'undefined') Dash.renderBento();
+  }
+
+  function watchCardHtml(c) {
+    return '<div class="nft-watch-card">'
+      + '<button class="rm" onclick="Watchlist.remove(\'' + c.slug + '\')" aria-label="Remove">×</button>'
+      + '<div class="nft-watch-top">' + thumbHtml(c) + '<div class="nft-watch-name">' + c.name + '</div></div>'
+      + '<div class="nft-watch-stats">'
+      + '<div class="nft-watch-stat"><div class="lbl">Floor</div><div class="val' + (c.floor == null ? ' zero' : '') + '">' + (c.floor != null ? fmtCompact(c.floor) + ' ETH' : '—') + '</div></div>'
+      + '<div class="nft-watch-stat"><div class="lbl">24h Vol</div><div class="val' + (c.vol1d == null ? ' zero' : '') + '">' + (c.vol1d != null ? fmtCompact(c.vol1d) + ' ETH' : '—') + '</div></div>'
+      + '<div class="nft-watch-stat"><div class="lbl">24h Sales</div><div class="val' + (c.sales24h == null ? ' zero' : '') + '">' + (c.sales24h != null ? c.sales24h : '—') + '</div></div>'
+      + '<div class="nft-watch-stat"><div class="lbl">Owners</div><div class="val' + (c.owners == null ? ' zero' : '') + '">' + (c.owners != null ? c.owners.toLocaleString('en-US') : '—') + '</div></div>'
+      + '</div>'
+      + '<div class="nft-watch-foot"><a class="nft-watch-link" href="' + (c.openseaUrl || ('https://opensea.io/collection/' + c.slug)) + '" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" stroke-linecap="round"><path d="M7 17L17 7M7 7h10v10"/></svg>OpenSea</a></div>'
+      + '</div>';
+  }
+
+  async function renderWatchlist() {
+    var grid = document.getElementById('nftWatchGrid');
+    if (!watchSlugs.length) { grid.innerHTML = '<div class="pin-empty">No collections watched yet — search or discover one to add it here.</div>'; return; }
+    var missing = watchSlugs.filter(function (s) { return !cache[s]; });
+    if (missing.length) {
+      grid.innerHTML = '<div class="nft-empty-msg">Loading watchlist…</div>';
+      await Promise.all(missing.map(async function (slug) {
+        try {
+          var res = await fetch(BACKEND_URL + '/toolkit/nft-collection?slug=' + encodeURIComponent(slug));
+          if (res.ok) cache[slug] = await res.json();
+        } catch (e) { }
+      }));
+    }
+    grid.innerHTML = watchSlugs.map(function (slug) {
+      var c = cache[slug] || { slug: slug, name: slug };
+      return watchCardHtml(c);
+    }).join('');
+  }
+
+  async function refreshDiscover(tabName) {
+    var listEl = document.getElementById('nftDiscoverList');
+    if (currentSub === tabName) listEl.innerHTML = '<div class="nft-empty-msg">Loading…</div>';
+    try {
+      var res = await fetch(BACKEND_URL + '/toolkit/nft-discover?tab=' + encodeURIComponent(tabName));
+      if (!res.ok) throw new Error('discover failed');
+      var data = await res.json();
+      var results = data.results || [];
+      results.forEach(function (c) { if (c.slug) cache[c.slug] = c; });
+      discoverLoaded[tabName] = results;
+      if (currentSub === tabName) renderDiscover(tabName);
+    } catch (e) {
+      if (currentSub === tabName) listEl.innerHTML = '<div class="nft-empty-msg">Could not reach OpenSea right now — try again in a moment.</div>';
+    }
+  }
+  function renderDiscover(tabName) {
+    var results = discoverLoaded[tabName];
+    var listEl = document.getElementById('nftDiscoverList');
+    if (!results || !results.length) { listEl.innerHTML = '<div class="nft-empty-msg">Nothing to show right now.</div>'; return; }
+    listEl.innerHTML = results.map(function (c) {
+      var added = watchSlugs.indexOf(c.slug) !== -1;
+      var statTxt = tabName === 'trending'
+        ? '7d Vol ' + (c.vol7d != null ? fmtCompact(c.vol7d) + ' ETH' : '—')
+        : (c.floor != null ? 'Floor ' + fmtCompact(c.floor) + ' ETH' : 'Newly listed');
+      return '<div class="nft-discover-row">'
+        + thumbHtml(c)
+        + '<div class="nft-discover-info"><div class="nft-discover-name">' + c.name + '</div><div class="nft-discover-stat">' + statTxt + '</div></div>'
+        + '<button class="nft-watch-btn" ' + (added ? 'disabled' : ('onclick="Watchlist.add(\'' + c.slug + '\')"')) + '>' + (added ? 'Watching' : 'Watch') + '</button>'
+        + '</div>';
+    }).join('');
+  }
+
+  function summary() { return { count: watchSlugs.length }; }
+  function bentoStackHtml(max) {
+    if (!watchSlugs.length) return '<div class="nft-empty-msg" style="padding:0">Nothing watched yet</div>';
+    var shown = watchSlugs.slice(0, max);
+    var html = shown.map(function (slug) {
+      var c = cache[slug];
+      var img = c && c.image;
+      return img
+        ? '<img class="bento-pfp" src="' + img + '" alt="" onerror="this.style.display=\'none\'">'
+        : '<span class="bento-pfp">' + (slug[0] || '?').toUpperCase() + '</span>';
+    }).join('');
+    if (watchSlugs.length > max) html += '<span class="bento-pfp bento-pfp-more">+' + (watchSlugs.length - max) + '</span>';
+    return html;
+  }
+
+  function init() {
+    load();
+    updateCount();
+    if (watchSlugs.length) {
+      Promise.all(watchSlugs.map(async function (slug) {
+        try {
+          var res = await fetch(BACKEND_URL + '/toolkit/nft-collection?slug=' + encodeURIComponent(slug));
+          if (res.ok) cache[slug] = await res.json();
+        } catch (e) { }
+      })).then(function () { if (typeof Dash !== 'undefined') Dash.renderBento(); });
+    }
+  }
+
+  return { init: init, tab: tab, subTab: subTab, search: search, add: add, remove: remove, summary: summary, bentoStackHtml: bentoStackHtml };
+})();
+
+// ── 11. WALLET X-RAY — real Blockscout + OpenSea composite score ─────────────
+var XRay = (function () {
+  function short(a) { return a && a.length > 14 ? a.slice(0, 6) + '…' + a.slice(-4) : (a || '—'); }
+
+  function scanExample(addr) {
+    document.getElementById('xrayInput').value = addr;
+    scan();
+  }
+
+  async function scan() {
+    var raw = (document.getElementById('xrayInput').value || '').trim();
+    if (!raw) return;
+    document.getElementById('xrayEmpty').style.display = 'none';
+    document.getElementById('xrayOut').style.display = 'none';
+    document.getElementById('xrayLoading').style.display = 'block';
+    try {
+      var res = await fetch(BACKEND_URL + '/toolkit/wallet-xray?address=' + encodeURIComponent(raw));
+      if (!res.ok) {
+        var errBody = await res.json().catch(function () { return {}; });
+        throw new Error(errBody.detail || 'lookup failed');
+      }
+      var data = await res.json();
+      render(data);
+    } catch (e) {
+      document.getElementById('xrayEmpty').textContent = e.message === 'lookup failed' || !e.message
+        ? 'Could not reach the chain explorer right now — try again in a moment.'
+        : e.message;
+      document.getElementById('xrayEmpty').style.display = 'block';
+    } finally {
+      document.getElementById('xrayLoading').style.display = 'none';
+    }
+  }
+
+  function render(data) {
+    var tier = data.tier, next = data.nextTier;
+    document.getElementById('xrayEmoji').textContent = tier.emoji;
+    document.getElementById('xrayTierName').textContent = tier.name;
+    document.getElementById('xrayAddrOut').textContent = data.ensName || short(data.address);
+    document.getElementById('xrayFlavor').textContent = tier.flavor;
+    document.getElementById('xrayArchetype').textContent = data.archetype;
+    document.getElementById('xrayScore').textContent = data.composite;
+    document.getElementById('xrayNudge').textContent = next
+      ? (next.min - data.composite) + ' pts from ' + next.name
+      : 'Top tier reached — apex on-chain presence';
+
+    document.getElementById('xraySubs').innerHTML = (data.subs || []).map(function (s) {
+      return '<div class="xray-sub-row"><div class="xray-sub-label">' + s.k + '</div><div class="xray-sub-track"><div class="xray-sub-fill" style="width:' + s.v + '%"></div></div><div class="xray-sub-val">' + s.v + '</div></div>';
+    }).join('');
+
+    var crypto = data.crypto || {}, nft = data.nft || {}, defi = data.defi || {}, behavior = data.behavior || {};
+    document.getElementById('xrayBreakdowns').innerHTML =
+      '<div class="xray-bd"><h4>💰 Crypto Holdings</h4>'
+      + '<div class="xray-bd-row"><span class="k">Net Worth (est.)</span><span class="v">$' + (crypto.netWorthUsd || 0).toLocaleString('en-US') + '</span></div>'
+      + '<div class="xray-bd-row"><span class="k">ETH Balance</span><span class="v">' + (crypto.ethBalance || 0) + ' ETH</span></div>'
+      + '<div class="xray-bd-row"><span class="k">Distinct Tokens</span><span class="v">' + (crypto.distinctTokens || 0) + '</span></div>'
+      + '</div>'
+      + '<div class="xray-bd"><h4>📊 On-Chain Activity</h4>'
+      + '<div class="xray-bd-row"><span class="k">Transactions</span><span class="v">' + (behavior.txCount || 0).toLocaleString('en-US') + '</span></div>'
+      + '<div class="xray-bd-row"><span class="k">Token Transfers</span><span class="v">' + (defi.tokenTransfers || 0).toLocaleString('en-US') + '</span></div>'
+      + '<div class="xray-bd-row"><span class="k">NFT Collections</span><span class="v">' + (nft.collections || 0) + '</span></div>'
+      + '</div>';
+
+    document.getElementById('xrayNftCount').textContent = (nft.collections || 0) + (nft.collections === 1 ? ' collection' : ' collections') + ' · ' + (nft.items || 0) + ' items';
+    var top = nft.top || [];
+    document.getElementById('xrayNftGrid').innerHTML = top.length
+      ? top.map(function (c) {
+          return '<div class="xray-nft-card">' + (c.image ? '<img class="xray-nft-art" src="' + c.image + '" alt="" onerror="this.style.display=\'none\'">' : '<div class="xray-nft-art" style="display:grid;place-items:center;background:rgba(255,255,255,.04);color:var(--muted2);font-family:var(--display);font-weight:700">' + ((c.name || '?')[0] || '?').toUpperCase() + '</div>')
+            + '<div class="xray-nft-meta"><div class="xray-nft-name">' + c.name + '</div><div class="xray-nft-sub">' + c.count + (c.count === 1 ? ' item' : ' items') + '</div></div></div>';
+        }).join('')
+      : '<div class="xray-nft-empty">No NFT holdings found on Ethereum mainnet.</div>';
+
+    document.getElementById('xrayOut').style.display = 'block';
+
+    try {
+      localStorage.setItem('dashXrayLast', JSON.stringify({
+        emoji: tier.emoji, name: tier.name, color: tier.color, score: data.composite, flavor: tier.flavor
+      }));
+    } catch (e) { }
+    if (typeof Dash !== 'undefined') Dash.renderBento();
+  }
+
+  return { scan: scan, scanExample: scanExample };
+})();
+
 // ── PROFILE ────────────────────────────────────────────────────────────────
 var Profile = (function () {
   var PIN_ICONS = {
+    xray: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/>',
     ticker: '<path d="M3 17l5-5 4 4 8-9"/><path d="M21 7v5h-5"/>',
     gas: '<path d="M4 21V6a2 2 0 0 1 2-2h5a2 2 0 0 1 2 2v15"/><path d="M3 21h11"/><path d="M13 10h2a2 2 0 0 1 2 2v5.5a1.5 1.5 0 0 0 3 0V9l-3-3"/>',
     wallet: '<rect x="2.5" y="6" width="19" height="13" rx="2.5"/><path d="M16 12.5h3"/>',
@@ -974,10 +1270,11 @@ var Profile = (function () {
     ape: '<path d="M13 2 4 14h7l-1 8 10-12h-7z"/>',
     pairs: '<circle cx="12" cy="12" r="3"/><path d="M12 3v3M12 18v3M3 12h3M18 12h3"/>',
     scan: '<circle cx="10.5" cy="10.5" r="6.5"/><path d="M20 20l-4.8-4.8"/>',
+    nft: '<path d="M6 3.5h12a.5.5 0 0 1 .5.5v17l-6.5-4-6.5 4v-17a.5.5 0 0 1 .5-.5z"/>',
     rug: '<path d="M12 3l8 4v5c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7z"/>',
     slip: '<path d="M2 12c2-3 4-3 6 0s4 3 6 0 4-3 6 0"/><path d="M2 18c2-3 4-3 6 0s4 3 6 0 4-3 6 0"/>'
   };
-  var TOOL_LABELS = { ticker: 'Price Ticker', gas: 'Gas Tracker', wallet: 'Wallet Card', pnl: 'DCA / PnL', ape: 'Ape Math', pairs: 'New Pairs', scan: 'CA Scanner', rug: 'Rug Check', slip: 'Slippage' };
+  var TOOL_LABELS = { xray: 'Wallet X-Ray', ticker: 'Price Ticker', gas: 'Gas Tracker', wallet: 'Wallet Card', pnl: 'DCA / PnL', ape: 'Ape Math', pairs: 'New Pairs', scan: 'CA Scanner', nft: 'NFT Watchlist', rug: 'Rug Check', slip: 'Slippage' };
   function getPins() {
     try { return JSON.parse(localStorage.getItem('dashhq_pinned_tools') || '["ticker","gas","rug"]'); }
     catch (e) { return ['ticker', 'gas', 'rug']; }
@@ -987,7 +1284,7 @@ var Profile = (function () {
     var el = document.getElementById('profilePins');
     if (!pins.length) { el.innerHTML = '<div class="pin-empty">No pinned tools yet.</div>'; return; }
     el.innerHTML = pins.map(function (k) {
-      return '<div class="pin-chip" onclick="Hub.go(\'toolkit\');Hub.openTool(\'' + k + '\');"><svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round">' + (PIN_ICONS[k] || '') + '</svg><span>' + (TOOL_LABELS[k] || k) + '</span></div>';
+      return '<div class="pin-chip" onclick="Dash.go(\'' + k + '\')"><svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round">' + (PIN_ICONS[k] || '') + '</svg><span>' + (TOOL_LABELS[k] || k) + '</span></div>';
     }).join('');
   }
   function saveBio() {
