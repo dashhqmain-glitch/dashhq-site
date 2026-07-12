@@ -178,7 +178,8 @@
 .bh-eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--sky)}
 .bh-cta{font-family:var(--mono);font-size:11px;color:var(--muted2)}
 .bh-desc{font-size:12.5px;color:var(--muted2);line-height:1.5}
-.bento-stat{font-family:var(--mono);font-weight:700;font-size:clamp(24px,3vw,32px);color:var(--ghost)}
+.bento-stat{font-family:var(--mono);font-weight:700;font-size:clamp(24px,3vw,32px);color:var(--ghost);white-space:nowrap}
+.bento-unit{font-family:var(--mono);font-size:14px;font-weight:600;color:var(--muted2)}
 .bento-spark{margin-top:10px;flex:1;min-height:32px;display:flex;align-items:flex-end}
 .bento-spark svg{width:100%;height:36px;display:block;overflow:visible}
 .b-hero{grid-column:span 2;grid-row:span 2;background:linear-gradient(135deg,rgba(27,66,255,.16),rgba(34,211,238,.06));border-color:rgba(77,114,255,.35);position:relative;overflow:hidden}
@@ -191,7 +192,7 @@
 .bh-tier .score{font-family:var(--mono);font-weight:700}
 .b-card{background:linear-gradient(135deg,#10204f,#0a1330 65%,#0a1a3e);border-color:var(--border2)}
 .bento-mini-card{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:8px 0}
-.bento-mini-card .brand{font-family:var(--display);font-weight:700;font-size:12px;letter-spacing:.08em}
+.bento-mini-card .brand{font-family:var(--display);font-weight:700;font-size:16px;letter-spacing:.08em}
 .bento-mini-card .tier{font-family:var(--mono);font-size:9.5px;padding:4px 8px;border-radius:20px;background:rgba(245,158,11,.16);border:1px solid rgba(245,158,11,.5);color:var(--gold)}
 .b-wide{grid-column:span 2}
 

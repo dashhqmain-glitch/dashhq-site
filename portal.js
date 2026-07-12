@@ -155,7 +155,13 @@ var Dash = (function () {
     var bgd = document.getElementById('bentoGasDesc');
     if (bg && g) {
       var unitWord = (document.getElementById('gasUnitWord') || {}).textContent || 'gwei';
-      bg.textContent = (g.textContent && g.textContent !== '—') ? g.textContent + ' ' + unitWord : '—';
+      // The unit needs its own (much smaller) size — concatenating it into
+      // one plain-text stat string let "gwei" wrap onto its own line at
+      // the same huge font size as the number when the combined text was
+      // too wide for the tile.
+      bg.innerHTML = (g.textContent && g.textContent !== '—')
+        ? g.textContent + ' <span class="bento-unit">' + unitWord + '</span>'
+        : '—';
     }
     if (bgd) bgd.textContent = ((document.getElementById('gasChainLabel') || {}).textContent || 'Ethereum mainnet') + ' · avg';
 
@@ -335,10 +341,15 @@ var Ticker = (function () {
     var results = await fetchBatch([sym]);
     applyResult(sym, results[sym]);
     render();
+    if (typeof Dash !== 'undefined') Dash.renderBento();
     if (state[sym] && !state[sym].error) {
       setTimeout(function () {
         if (!state[sym]) return;
-        fetchBatch([sym]).then(function (r) { applyResult(sym, r[sym]); render(); });
+        fetchBatch([sym]).then(function (r) {
+          applyResult(sym, r[sym]);
+          render();
+          if (typeof Dash !== 'undefined') Dash.renderBento();
+        });
       }, 6000);
     }
   }
@@ -359,6 +370,10 @@ var Ticker = (function () {
     render();
     var u = document.getElementById('tickerUpdated');
     if (u) u.textContent = 'Updated just now';
+    // The dashboard's Top Mover tile reads this same state — refresh it
+    // the moment new prices actually land, instead of leaving it to catch
+    // up whenever Dash's separate polling interval next happens to fire.
+    if (typeof Dash !== 'undefined') Dash.renderBento();
   }
   function top() {
     var syms = Object.keys(state).filter(function (s) { return !state[s].loading && !state[s].error; });
@@ -1068,7 +1083,11 @@ var Watchlist = (function () {
         if (!res.ok) throw new Error('search failed');
         var data = await res.json();
         var results = data.results || [];
-        results.forEach(function (c) { if (c.slug) cache[c.slug] = c; });
+        // Marked partial: search results are OpenSea's lighter list shape,
+        // missing verified/category/description/socials - only the
+        // single-collection endpoint has those (see Watchlist.add). Don't
+        // let a repeat search downgrade an entry already upgraded to full.
+        results.forEach(function (c) { if (c.slug && (!cache[c.slug] || cache[c.slug]._partial)) { c._partial = true; cache[c.slug] = c; } });
         if (!results.length) { el.innerHTML = '<div class="nft-empty-msg">No collections found for that search.</div>'; return; }
         el.innerHTML = results.map(function (c) {
           var added = watchSlugs.indexOf(c.slug) !== -1;
@@ -1084,7 +1103,7 @@ var Watchlist = (function () {
     }, 350);
   }
 
-  function add(slug) {
+  async function add(slug) {
     if (!slug || watchSlugs.indexOf(slug) !== -1) return;
     watchSlugs.push(slug);
     save();
@@ -1092,6 +1111,20 @@ var Watchlist = (function () {
     if (currentTab === 'search') search(document.getElementById('nftSearchInput').value);
     if (currentTab === 'watch') renderWatchlist();
     if (typeof Dash !== 'undefined') Dash.renderBento();
+    // Search/Discover results come from OpenSea's lighter list endpoints,
+    // which don't include verified status, category, description, or
+    // socials — only the single-collection endpoint does. Fetch and
+    // upgrade the cache entry to the full shape right away, so a card
+    // never sits in the watchlist half-populated until some later,
+    // unrelated re-render happens to refresh it.
+    try {
+      var res = await fetch(BACKEND_URL + '/toolkit/nft-collection?slug=' + encodeURIComponent(slug));
+      if (res.ok) {
+        cache[slug] = await res.json();
+        if (currentTab === 'watch') renderWatchlist();
+        if (typeof Dash !== 'undefined') Dash.renderBento();
+      }
+    } catch (e) { }
   }
   function remove(slug) {
     watchSlugs = watchSlugs.filter(function (s) { return s !== slug; });
@@ -1149,10 +1182,11 @@ var Watchlist = (function () {
     var grid = document.getElementById('nftWatchGrid');
     if (!watchSlugs.length) { grid.innerHTML = '<div class="pin-empty">No collections watched yet — search or discover one to add it here.</div>'; return; }
     // Entries cached from a search/discover result carry a leaner shape
-    // (no verified/category/description/etc.) - re-fetch the full detail
-    // endpoint for anything that hasn't already been upgraded to the rich
-    // shape, not just entries missing from the cache entirely.
-    var missing = watchSlugs.filter(function (s) { return !cache[s] || !('category' in cache[s]); });
+    // (no verified/category/description/etc., flagged _partial when
+    // cached) - re-fetch the full detail endpoint for anything that
+    // hasn't already been upgraded to the rich shape, not just entries
+    // missing from the cache entirely.
+    var missing = watchSlugs.filter(function (s) { return !cache[s] || cache[s]._partial; });
     if (missing.length) {
       grid.innerHTML = '<div class="nft-empty-msg">Loading watchlist…</div>';
       await Promise.all(missing.map(async function (slug) {
@@ -1176,7 +1210,7 @@ var Watchlist = (function () {
       if (!res.ok) throw new Error('discover failed');
       var data = await res.json();
       var results = data.results || [];
-      results.forEach(function (c) { if (c.slug) cache[c.slug] = c; });
+      results.forEach(function (c) { if (c.slug && (!cache[c.slug] || cache[c.slug]._partial)) { c._partial = true; cache[c.slug] = c; } });
       discoverLoaded[tabName] = results;
       if (currentSub === tabName) renderDiscover(tabName);
     } catch (e) {

@@ -936,14 +936,33 @@ async def _opensea_get(client: httpx.AsyncClient, path: str, params: dict | None
         return None
 
 
+# Search results come from OpenSea's lean /search endpoint, which doesn't
+# include safelist_status/category/contracts/etc. - only the single-
+# collection and listing endpoints do. Rather than run a scheduled job just
+# to pre-fetch verification status (a real cron costs one of the very few
+# free-tier slots for a cosmetic feature), this cache fills itself for free
+# from traffic that already happens: every Discover tab load and every
+# Watchlist add fetches the full shape for real collections. Once a
+# collection has been seen that way, search results for it show accurate
+# verified/category/etc. immediately, from any citizen's search, without
+# a second API call - it just gets more complete the more the tool is used.
+_collection_meta_cache: dict[str, tuple[float, dict]] = {}
+_collection_meta_TTL = 6 * 3600
+
+
 def _nft_collection_shape(c: dict, stats: dict | None) -> dict:
     total = (stats or {}).get("total") or {}
     intervals = {i.get("interval"): i for i in (stats or {}).get("intervals") or []}
     contracts = c.get("contracts") or []
     contract = contracts[0] if contracts else {}
     description = (c.get("description") or "").strip()
-    return {
-        "slug": c.get("collection") or c.get("slug"),
+    slug = c.get("collection") or c.get("slug")
+    # Present only in the full single-collection/listing shape, never in
+    # the lean search shape - require all three so a partially-lean object
+    # can't be mistaken for a full one.
+    is_full_source = "safelist_status" in c and "category" in c and "contracts" in c
+    shaped = {
+        "slug": slug,
         "name": c.get("name") or "Unnamed collection",
         "image": c.get("image_url"),
         "floor": total.get("floor_price"),
@@ -957,7 +976,7 @@ def _nft_collection_shape(c: dict, stats: dict | None) -> dict:
         "vol30d": (intervals.get("thirty_day") or {}).get("volume"),
         "sales24h": (intervals.get("one_day") or {}).get("sales"),
         "owners": total.get("num_owners"),
-        "openseaUrl": "https://opensea.io/collection/" + (c.get("collection") or c.get("slug") or ""),
+        "openseaUrl": "https://opensea.io/collection/" + (slug or ""),
         # OpenSea's own safelist tiers: not_requested < requested < approved
         # < verified. Only "verified" gets the checkmark - that's OpenSea's
         # actual editorial verification, not a self-reported claim.
@@ -971,6 +990,23 @@ def _nft_collection_shape(c: dict, stats: dict | None) -> dict:
         "contractAddress": contract.get("address"),
         "createdDate": c.get("created_date"),
     }
+    if is_full_source and slug:
+        _collection_meta_cache[slug] = (time.time(), shaped)
+        _cap_cache(_collection_meta_cache)
+    return shaped
+
+
+def _enrich_with_cached_meta(shaped: dict) -> dict:
+    slug = shaped.get("slug")
+    if not slug or slug not in _collection_meta_cache:
+        return shaped
+    fetched_at, cached = _collection_meta_cache[slug]
+    if time.time() - fetched_at > _collection_meta_TTL:
+        del _collection_meta_cache[slug]
+        return shaped
+    for k in ("verified", "category", "description", "twitter", "discord", "website", "chain", "contractAddress", "createdDate"):
+        shaped[k] = cached[k]
+    return shaped
 
 
 @app.get("/toolkit/nft-search")
@@ -995,7 +1031,7 @@ async def nft_search(request: Request, q: str = Query(..., min_length=1, max_len
         for c, stats in zip(results, stats_list):
             if isinstance(stats, Exception):
                 stats = None
-            out.append(_nft_collection_shape(c, stats))
+            out.append(_enrich_with_cached_meta(_nft_collection_shape(c, stats)))
         return {"results": out}
 
 
@@ -1284,7 +1320,7 @@ async def wallet_xray(request: Request, address: str = Query(..., min_length=3, 
         "nft": {
             "collections": nft_collection_count,
             "items": nft_item_count,
-            "top": sorted(nft_collections, key=lambda c: -c["count"])[:4],
+            "top": sorted(nft_collections, key=lambda c: -c["count"])[:6],
         },
         "defi": {
             "tokenTransfers": transfer_count if counters_ok else None,
