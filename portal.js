@@ -123,11 +123,17 @@ async function init() {
   // Clean the URL so the token isn't bookmarkable
   if (token || error) history.replaceState({}, '', window.location.pathname);
 
+  // Only open the portal automatically right after an action that actually
+  // belongs there — landing back from Discord OAuth (token/error in the
+  // URL). An already-verified citizen just reloading or browsing the rest
+  // of the site should NOT get the portal shoved open on every refresh —
+  // verify silently in the background instead, so it's ready the moment
+  // they click Portal themselves, without forcing it open uninvited.
   if (error) { openPortal(); setState('prelogin'); return; }
   if (token) { openPortal(); await verifyToken(token); return; }
 
   const saved = sessionStorage.getItem(TOKEN_KEY);
-  if (saved) { openPortal(); await verifyToken(saved); return; }
+  if (saved) { await verifyToken(saved); return; }
 
   // Nothing to verify — leave the portal closed until the user opens it.
   setState('prelogin');
