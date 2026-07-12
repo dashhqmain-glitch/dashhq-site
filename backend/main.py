@@ -884,27 +884,91 @@ async def rug_check(request: Request, payload: RugCheckIn):
 
 # ── OpenSea key management ────────────────────────────────────────────────
 # OpenSea's "instant" API key (POST /api/v2/auth/keys, no signup) is free
-# and keyless to obtain, but expires after 30 days. Rather than needing a
-# human to manually renew a key forever, the backend fetches and caches one
-# itself and transparently refreshes it before it expires — zero ongoing
-# maintenance, matching the rest of this project's zero-budget constraint.
+# and keyless to obtain, but expires after 30 days *and OpenSea only allows
+# minting one per hour, total, from this site's traffic*. An in-memory-only
+# cache works fine for one warm serverless instance, but under a real
+# traffic spike Vercel spins up several instances in parallel, each with
+# its own empty cache — if each independently tries to mint a key on its
+# first request, every one after the first gets hard-locked-out (429) for
+# an hour, killing every NFT feature site-wide. Supabase is the shared
+# backstop: check it before minting, and write to it after minting, so at
+# most one instance across the whole fleet ever actually calls OpenSea.
 _opensea_key: str | None = None
 _opensea_key_expiry: float = 0
+_OPENSEA_KEY_TABLE = "opensea_key_cache"
+
+
+async def _supabase_read_opensea_key(client: httpx.AsyncClient) -> tuple[str, float] | None:
+    if not (settings.supabase_url and settings.supabase_service_role_key):
+        return None
+    try:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/{_OPENSEA_KEY_TABLE}",
+            headers={
+                "apikey": settings.supabase_service_role_key,
+                "Authorization": f"Bearer {settings.supabase_service_role_key}",
+            },
+            params={"id": "eq.1", "select": "api_key,expires_at"},
+        )
+        res.raise_for_status()
+        rows = res.json()
+        if not rows:
+            return None
+        expiry_ts = datetime.fromisoformat(rows[0]["expires_at"].replace("Z", "+00:00")).timestamp()
+        if time.time() >= expiry_ts - 3600:
+            return None
+        return rows[0]["api_key"], expiry_ts
+    except (httpx.HTTPError, ValueError, KeyError, IndexError):
+        return None
+
+
+async def _supabase_write_opensea_key(client: httpx.AsyncClient, api_key: str, expiry_ts: float) -> None:
+    if not (settings.supabase_url and settings.supabase_service_role_key):
+        return
+    try:
+        res = await client.post(
+            f"{settings.supabase_url}/rest/v1/{_OPENSEA_KEY_TABLE}",
+            headers={
+                "apikey": settings.supabase_service_role_key,
+                "Authorization": f"Bearer {settings.supabase_service_role_key}",
+                "Content-Type": "application/json",
+                "Prefer": "resolution=merge-duplicates,return=minimal",
+            },
+            json=[{"id": 1, "api_key": api_key, "expires_at": datetime.fromtimestamp(expiry_ts, tz=timezone.utc).isoformat()}],
+        )
+        res.raise_for_status()
+    except httpx.HTTPError:
+        logger.exception("Failed to persist OpenSea key to Supabase")
 
 
 async def _get_opensea_key(client: httpx.AsyncClient) -> str | None:
     global _opensea_key, _opensea_key_expiry
     if _opensea_key and time.time() < _opensea_key_expiry - 3600:
         return _opensea_key
+
+    shared = await _supabase_read_opensea_key(client)
+    if shared:
+        _opensea_key, _opensea_key_expiry = shared
+        return _opensea_key
+
     try:
         res = await client.post("https://api.opensea.io/api/v2/auth/keys")
         res.raise_for_status()
         data = res.json()
         _opensea_key = data["api_key"]
         _opensea_key_expiry = time.time() + 29 * 24 * 3600
+        await _supabase_write_opensea_key(client, _opensea_key, _opensea_key_expiry)
         return _opensea_key
     except (httpx.HTTPError, KeyError, ValueError):
         logger.exception("Failed to obtain an OpenSea API key")
+        # A concurrent instance may have just won this exact race and
+        # already written a fresh key - one more shared-cache check before
+        # giving up, so a burst of simultaneous cold starts doesn't turn
+        # into every instance but one failing outright.
+        shared = await _supabase_read_opensea_key(client)
+        if shared:
+            _opensea_key, _opensea_key_expiry = shared
+            return _opensea_key
         return None
 
 

@@ -60,3 +60,25 @@ create trigger applications_set_updated_at
   for each row execute function set_updated_at();
 
 alter table applications enable row level security;
+
+-- Shared cache for OpenSea's free "instant" API key (main.py's
+-- _get_opensea_key). OpenSea allows minting only one such key per hour,
+-- total, from this site's traffic - an in-memory-only cache works for a
+-- single warm serverless instance, but a real traffic spike spins up
+-- several instances in parallel, each starting with an empty cache. This
+-- single-row table lets every instance check for (and share) a key
+-- another instance already minted, instead of each independently racing
+-- to mint their own and getting locked out after the first one succeeds.
+create table if not exists opensea_key_cache (
+  id          int primary key default 1,
+  api_key     text not null,
+  expires_at  timestamptz not null,
+  updated_at  timestamptz not null default now()
+);
+
+drop trigger if exists opensea_key_cache_set_updated_at on opensea_key_cache;
+create trigger opensea_key_cache_set_updated_at
+  before update on opensea_key_cache
+  for each row execute function set_updated_at();
+
+alter table opensea_key_cache enable row level security;
