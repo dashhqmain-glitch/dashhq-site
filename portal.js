@@ -5,6 +5,24 @@ const BACKEND_URL = ['localhost', '127.0.0.1'].includes(window.location.hostname
   : 'https://www.dashhq.site';
 const TOKEN_KEY = 'dashhq_citizen_token';
 
+// ── Crash isolation ───────────────────────────────────────────────────────────
+// A bug in any one tool's init/render logic must never be able to silently
+// block every tool listed after it in a shared sequence (Dash.init() calls
+// several tools' init() back to back — an uncaught throw in one stops the
+// rest from ever running) or leave a citizen stuck on a broken screen with
+// zero feedback. safeCall wraps a single step so a failure there is
+// contained and visible, not a chain reaction.
+function safeCall(label, fn) {
+  try { return fn(); }
+  catch (e) { console.error('[' + label + '] failed, continuing:', e); }
+}
+window.addEventListener('error', function (e) {
+  console.error('[uncaught]', e.message, e.error);
+});
+window.addEventListener('unhandledrejection', function (e) {
+  console.error('[unhandled promise rejection]', e.reason);
+});
+
 // ── State machine ────────────────────────────────────────────────────────────
 function setState(s) {
   document.querySelectorAll('.state').forEach(el => el.classList.toggle('on', el.dataset.state === s));
@@ -45,11 +63,6 @@ function updateCard(data) {
   set('profileHandle', data.handle);
   set('profileTierTag', `★ ${data.tier}`);
   set('profileSinceTag', `Citizen since ${data.joined}`);
-  // A real per-citizen number instead of a fixed placeholder — derived from
-  // their actual Discord ID (the JWT's sub claim), so it's genuinely unique
-  // per citizen rather than the same fake badge for everyone.
-  const citizenNoEl = document.getElementById('cardCitizenNo');
-  if (citizenNoEl && data.sub) citizenNoEl.textContent = '#' + String(data.sub).slice(-4);
   ['cardAvatar', 'dtopAvatar', 'profileAvatar'].forEach(id => {
     const av = document.getElementById(id);
     if (av && data.avatar) { av.src = data.avatar; av.alt = data.display_name; }
@@ -206,11 +219,19 @@ var Dash = (function () {
   function init() {
     if (inited) { renderBento(); return; }
     inited = true;
-    Ticker.init(); Gas.init(); Pnl.init(); Ape.calc(); Pairs.init(); Slip.calc();
-    Watchlist.init();
-    Profile.init();
-    setInterval(renderBento, 5000);
-    setTimeout(renderBento, 300);
+    // Each tool's init runs independently — a bug in any one (say, a
+    // malformed backend response) must not prevent every tool listed
+    // after it from ever initializing.
+    safeCall('Ticker.init', function () { Ticker.init(); });
+    safeCall('Gas.init', function () { Gas.init(); });
+    safeCall('Pnl.init', function () { Pnl.init(); });
+    safeCall('Ape.calc', function () { Ape.calc(); });
+    safeCall('Pairs.init', function () { Pairs.init(); });
+    safeCall('Slip.calc', function () { Slip.calc(); });
+    safeCall('Watchlist.init', function () { Watchlist.init(); });
+    safeCall('Profile.init', function () { Profile.init(); });
+    setInterval(function () { safeCall('renderBento', renderBento); }, 5000);
+    setTimeout(function () { safeCall('renderBento', renderBento); }, 300);
   }
   return { go: go, init: init, toggleCollapse: toggleCollapse, openMobile: openMobile, closeMobile: closeMobile, renderBento: renderBento };
 })();
@@ -402,6 +423,7 @@ var Gas = (function () {
     optimism: { label: 'Optimism', symbol: 'ETH' },
     base: { label: 'Base', symbol: 'ETH' },
     avalanche: { label: 'Avalanche C-Chain', symbol: 'AVAX' },
+    robinhood: { label: 'Robinhood Chain', symbol: 'ETH' },
     solana: { label: 'Solana', symbol: 'SOL', isSolana: true }
   };
   var current = 'ethereum';
@@ -718,7 +740,7 @@ var CaScan = (function () {
 
   var CHAIN_LABELS = {
     ethereum: 'Ethereum', bsc: 'BNB Chain', polygon: 'Polygon', arbitrum: 'Arbitrum',
-    optimism: 'Optimism', base: 'Base', avalanche: 'Avalanche', solana: 'Solana'
+    optimism: 'Optimism', base: 'Base', avalanche: 'Avalanche', solana: 'Solana', robinhood: 'Robinhood Chain'
   };
   function chainLabel(id) {
     if (CHAIN_LABELS[id]) return CHAIN_LABELS[id];

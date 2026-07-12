@@ -603,6 +603,7 @@ GAS_CHAINS = {
     "optimism": {"rpc": "https://optimism-rpc.publicnode.com", "coingecko_id": "ethereum"},
     "base": {"rpc": "https://base-rpc.publicnode.com", "coingecko_id": "ethereum"},
     "avalanche": {"rpc": "https://avalanche-c-chain-rpc.publicnode.com", "coingecko_id": "avalanche-2"},
+    "robinhood": {"rpc": "https://rpc.mainnet.chain.robinhood.com", "coingecko_id": "ethereum"},
 }
 
 
@@ -1282,7 +1283,7 @@ async def wallet_xray(request: Request, address: str = Query(..., min_length=3, 
         other_chain_results = await asyncio.gather(
             *[_chain_has_balance(k, cfg) for k, cfg in GAS_CHAINS.items() if k != "ethereum"]
         )
-        _CHAIN_LABELS = {"bsc": "BNB Chain", "polygon": "Polygon", "arbitrum": "Arbitrum", "optimism": "Optimism", "base": "Base", "avalanche": "Avalanche"}
+        _CHAIN_LABELS = {"bsc": "BNB Chain", "polygon": "Polygon", "arbitrum": "Arbitrum", "optimism": "Optimism", "base": "Base", "avalanche": "Avalanche", "robinhood": "Robinhood Chain"}
         other_chains = [_CHAIN_LABELS.get(k, k) for k in other_chain_results if k]
 
     eth_balance = int(info.get("coin_balance") or 0) / 1e18
