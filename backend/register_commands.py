@@ -47,6 +47,10 @@ PAIRS_CHAIN_CHOICES = [
 
 COMMANDS = [
     {
+        "name": "dashboard",
+        "description": "Browse every toolkit command and how to use it",
+    },
+    {
         "name": "xray",
         "description": "Heuristic on-chain score for any wallet address",
         "options": [{"name": "address", "description": "Wallet address or ENS name", "type": 3, "required": True}],

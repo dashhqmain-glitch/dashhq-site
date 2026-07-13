@@ -563,6 +563,9 @@ async def discord_interactions(request: Request):
     if itype != 3:  # not a message-component (button) interaction
         return {"type": 4, "data": {"content": "Unsupported interaction.", "flags": 64}}
 
+    if payload.get("data", {}).get("custom_id") == "toolkit_select":
+        return await _handle_toolkit_select(payload)
+
     custom_id = payload.get("data", {}).get("custom_id", "")
     action, _, app_id = custom_id.partition(":")
     if action not in ("accept", "decline") or not app_id:
@@ -1853,6 +1856,109 @@ def _clean_embed(embed: dict) -> dict:
     return {k: v for k, v in embed.items() if v is not None}
 
 
+# ── /dashboard — single entry point, browse-and-pick tool discovery ───────
+TOOLKIT_TOOLS = {
+    "xray": {
+        "emoji": "🐋", "label": "Wallet X-Ray",
+        "short": "Heuristic on-chain score for any wallet",
+        "usage": "/xray address:<wallet address or ENS>",
+        "example": "/xray address:vitalik.eth",
+    },
+    "gas": {
+        "emoji": "⛽", "label": "Gas Tracker",
+        "short": "Current gas price on any supported chain",
+        "usage": "/gas chain:<optional, defaults to Ethereum>",
+        "example": "/gas chain:Robinhood Chain",
+    },
+    "scan": {
+        "emoji": "🔍", "label": "CA Scanner",
+        "short": "Look up a token contract — price, liquidity, volume",
+        "usage": "/scan address:<token contract address>",
+        "example": "/scan address:0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+    },
+    "rug": {
+        "emoji": "🛡️", "label": "Rug Checker",
+        "short": "Quick red-flag check on a token contract",
+        "usage": "/rug address:<token contract address> chain:<optional>",
+        "example": "/rug address:0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2 chain:Ethereum",
+    },
+    "nft": {
+        "emoji": "🖼️", "label": "NFT Lookup",
+        "short": "Floor price, volume & verified status for any collection",
+        "usage": "/nft collection:<collection name>",
+        "example": "/nft collection:Pudgy Penguins",
+    },
+    "wallet": {
+        "emoji": "💳", "label": "Wallet Card",
+        "short": "Shareable wallet card with a scannable QR code",
+        "usage": "/wallet address:<wallet address or ENS>",
+        "example": "/wallet address:vitalik.eth",
+    },
+    "pairs": {
+        "emoji": "🔥", "label": "New Pair Scanner",
+        "short": "Freshly created trading pairs on a chain",
+        "usage": "/pairs chain:<optional, defaults to Ethereum>",
+        "example": "/pairs chain:Base",
+    },
+    "watchlist": {
+        "emoji": "📌", "label": "NFT Watchlist",
+        "short": "Track your own personal list of NFT collections",
+        "usage": "/watchlist add|remove|list collection:<name>",
+        "example": "/watchlist add collection:Pudgy Penguins",
+    },
+}
+
+
+def _dashboard_select_component() -> dict:
+    return {
+        "type": 1,
+        "components": [{
+            "type": 3,
+            "custom_id": "toolkit_select",
+            "placeholder": "Choose a tool for instructions…",
+            "options": [
+                {"label": t["label"], "value": key, "description": t["short"][:100], "emoji": {"name": t["emoji"]}}
+                for key, t in TOOLKIT_TOOLS.items()
+            ],
+        }],
+    }
+
+
+def _dashboard_response() -> dict:
+    lines = [f"{t['emoji']} **{t['label']}** — {t['short']}" for t in TOOLKIT_TOOLS.values()]
+    embed = {
+        "title": "🧰 Dash HQ Toolkit",
+        "description": "Pick a tool below to see exactly how to use it.\n\n" + "\n".join(lines),
+        "color": EMBED_COLOR,
+        "footer": TOOLKIT_FOOTER,
+    }
+    return {"embeds": [embed], "components": [_dashboard_select_component()]}
+
+
+def _tool_help_response(tool_key: str) -> dict:
+    t = TOOLKIT_TOOLS.get(tool_key)
+    if not t:
+        embed = {"title": "Unknown tool", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
+    else:
+        embed = {
+            "title": f"{t['emoji']} {t['label']}",
+            "description": f"{t['short']}\n\n**Usage**\n`{t['usage']}`\n\n**Example**\n`{t['example']}`",
+            "color": EMBED_COLOR,
+            "footer": TOOLKIT_FOOTER,
+        }
+    # Keep the select menu attached so people can browse another tool's
+    # instructions without needing to run /dashboard again.
+    return {"embeds": [embed], "components": [_dashboard_select_component()]}
+
+
+async def _handle_toolkit_select(payload: dict) -> dict:
+    if not _is_citizen(payload):
+        return {"type": 4, "data": {"content": "This is reserved for verified Dash HQ citizens.", "flags": 64}}
+    values = (payload.get("data") or {}).get("values") or []
+    tool_key = values[0] if values else ""
+    return {"type": 7, "data": _tool_help_response(tool_key)}  # UPDATE_MESSAGE — edits in place
+
+
 async def _handle_toolkit_command(payload: dict) -> dict:
     if not _is_citizen(payload):
         return {"type": 4, "data": {"content": "This command is reserved for verified Dash HQ citizens — head to the site and verify with Discord to unlock it.", "flags": 64}}
@@ -1861,6 +1967,9 @@ async def _handle_toolkit_command(payload: dict) -> dict:
     opts = _cmd_options(payload)
     member_user = (payload.get("member") or {}).get("user") or {}
     discord_user_id = member_user.get("id", "")
+
+    if name == "dashboard":
+        return {"type": 4, "data": _dashboard_response()}
 
     # /xray is the one command that can genuinely exceed Discord's 3-second
     # ack window (a heavily-active wallet's token-balance fetch alone can
