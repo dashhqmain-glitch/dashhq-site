@@ -1356,15 +1356,29 @@ var XRay = (function () {
     // presence probe, not a full accounting), say so plainly rather than
     // let the ETH-only figure above read as the wallet's whole picture.
     var otherChains = (crypto.otherChains || []);
-    var otherChainsNote = otherChains.length
-      ? '<div class="xray-bd-note">Also active on ' + otherChains.join(', ') + ' — not included above.</div>'
-      : '';
+    var notes = [];
+    if (otherChains.length) notes.push('Also active on ' + otherChains.join(', ') + ' — not included above.');
+    // Net Worth silently dropping tokens Blockscout has no market price
+    // for (rather than treating them as zero) is exactly what makes the
+    // total read as "wrong" for a wallet holding several obscure/illiquid
+    // tokens — say plainly how many were left out and why.
+    if (crypto.unpricedTokens) {
+      notes.push(crypto.unpricedTokens + (crypto.unpricedTokens === 1 ? ' token holds' : ' tokens hold') + ' a real balance but have no market price available, so ' + (crypto.unpricedTokens === 1 ? "it isn't" : "they aren't") + ' included in Net Worth below.');
+    }
+    // token-balances is a separate, heavier fetch than everything else
+    // (some wallets hold thousands of entries) - if it failed even after
+    // a retry, Net Worth/Distinct Tokens reflect ETH only, not "confirmed
+    // zero other tokens." Same honesty principle as the countersOk note.
+    if (crypto.tokenDataOk === false) {
+      notes.push('Token holdings could not be fully loaded this scan — Net Worth and Distinct Tokens may be incomplete. Try scanning again.');
+    }
+    var cryptoNotes = notes.length ? '<div class="xray-bd-note">' + notes.join(' ') + '</div>' : '';
     document.getElementById('xrayBreakdowns').innerHTML =
       '<div class="xray-bd"><h4>💰 Crypto Holdings</h4>'
-      + '<div class="xray-bd-row"><span class="k">Net Worth (est.)</span><span class="v">$' + (crypto.netWorthUsd || 0).toLocaleString('en-US') + '</span></div>'
+      + '<div class="xray-bd-row"><span class="k">Net Worth (est., USD)</span><span class="v">$' + (crypto.netWorthUsd || 0).toLocaleString('en-US') + '</span></div>'
       + '<div class="xray-bd-row"><span class="k">ETH Balance</span><span class="v">' + (crypto.ethBalance || 0) + ' ETH</span></div>'
       + '<div class="xray-bd-row"><span class="k">Distinct Tokens</span><span class="v">' + (crypto.distinctTokens || 0) + '</span></div>'
-      + otherChainsNote
+      + cryptoNotes
       + '</div>'
       + '<div class="xray-bd"><h4>📊 On-Chain Activity</h4>'
       + '<div class="xray-bd-row"><span class="k">Transactions</span><span class="v">' + fmtOrDash(behavior.txCount) + '</span></div>'

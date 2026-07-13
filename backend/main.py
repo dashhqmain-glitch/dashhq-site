@@ -1420,21 +1420,19 @@ async def _wallet_xray_core(address: str) -> dict:
         counters_ok = counters is not None
         counters = counters or {}
 
-        try:
-            # A handful of real wallets (exchange hot wallets, very old/active
-            # EOAs) hold thousands of tokens - mostly spam airdrops, but the
-            # response itself can be large enough to need more than the
-            # shared client timeout to fully download.
-            tok_res = await client.get(
-                f"https://eth.blockscout.com/api/v2/addresses/{addr}/token-balances",
-                timeout=25,
-            )
-            tok_res.raise_for_status()
-            tok_json = tok_res.json()
-            token_balances = tok_json if isinstance(tok_json, list) else []
-        except (httpx.HTTPError, ValueError):
-            logger.exception("Failed to fetch token balances for %s", addr)
-            token_balances = []
+        # A handful of real wallets (exchange hot wallets, very old/active
+        # EOAs) hold thousands of tokens - mostly spam airdrops, but the
+        # response itself can be large enough to need more than the shared
+        # client timeout to fully download, and to occasionally miss the
+        # first attempt entirely. Losing this silently is exactly what made
+        # Net Worth read as "wrong" for a heavily-active wallet - retry once
+        # like the other Blockscout calls before giving up.
+        tok_json = await _get_with_retry(f"https://eth.blockscout.com/api/v2/addresses/{addr}/token-balances", timeout=25)
+        # None = both attempts failed (genuinely unknown), [] = a real,
+        # successful response saying "no tokens" - these must stay
+        # distinguishable, same reasoning as counters_ok below.
+        token_balances_ok = tok_json is not None
+        token_balances = tok_json if isinstance(tok_json, list) else []
 
         nft_collections: list[dict] = []
         try:
@@ -1491,6 +1489,7 @@ async def _wallet_xray_core(address: str) -> dict:
 
     token_usd_total = 0.0
     fungible_tokens = 0
+    unpriced_tokens = 0
     for tb in token_balances:
         tok = tb.get("token") or {}
         if tok.get("type") != "ERC-20":
@@ -1500,6 +1499,13 @@ async def _wallet_xray_core(address: str) -> dict:
             raw_value = int(tb.get("value") or 0)
             rate = float(tok.get("exchange_rate") or 0)
             if rate <= 0:
+                # Blockscout has no market price for this token - it's
+                # real balance that just can't be priced, not zero value.
+                # Net Worth silently excluding these (with no indication
+                # anything was left out) is exactly what reads as "wrong"
+                # for a wallet holding several unpriced tokens.
+                if raw_value > 0:
+                    unpriced_tokens += 1
                 continue
             qty = raw_value / (10 ** decimals)
             token_usd_total += qty * rate
@@ -1580,6 +1586,8 @@ async def _wallet_xray_core(address: str) -> dict:
             "distinctTokens": fungible_tokens,
             "ethBalance": round(eth_balance, 4),
             "otherChains": other_chains,
+            "unpricedTokens": unpriced_tokens,
+            "tokenDataOk": token_balances_ok,
         },
         "nft": {
             "collections": nft_collection_count,
@@ -1671,13 +1679,23 @@ async def _cmd_xray(address: str) -> dict:
     fields = [
         {"name": "Score", "value": f"{data['composite']} / 100", "inline": True},
         {"name": "Archetype", "value": data["archetype"], "inline": True},
-        {"name": "Net Worth (est.)", "value": f"${crypto['netWorthUsd']:,}", "inline": True},
+        {"name": "Net Worth (est., USD)", "value": f"${crypto['netWorthUsd']:,}", "inline": True},
         {"name": "ETH Balance", "value": f"{crypto['ethBalance']} ETH", "inline": True},
         {"name": "Distinct Tokens", "value": str(crypto["distinctTokens"]), "inline": True},
         {"name": "NFT Collections", "value": str(data["nft"]["collections"]), "inline": True},
     ]
     if crypto.get("otherChains"):
         fields.append({"name": "Also active on", "value": ", ".join(crypto["otherChains"]), "inline": False})
+    # Same reasoning as the website: Net Worth silently drops tokens with
+    # no known market price rather than counting them as zero - say so,
+    # so a low number doesn't just read as "wrong."
+    if crypto.get("unpricedTokens"):
+        n = crypto["unpricedTokens"]
+        noun = "token holds" if n == 1 else "tokens hold"
+        pron = "it isn't" if n == 1 else "they aren't"
+        fields.append({"name": "Note", "value": f"{n} {noun} a real balance but have no market price available, so {pron} included in Net Worth.", "inline": False})
+    if crypto.get("tokenDataOk") is False:
+        fields.append({"name": "Note", "value": "Token holdings could not be fully loaded this scan — Net Worth and Distinct Tokens may be incomplete. Try again.", "inline": False})
     return {
         "title": f"{tier['emoji']} {tier['name']} · {data.get('ensName') or address}",
         "description": tier["flavor"],
