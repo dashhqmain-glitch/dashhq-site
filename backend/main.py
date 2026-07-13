@@ -18,6 +18,7 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
 from config import settings
+from register_commands import COMMANDS as TOOLKIT_BOT_COMMANDS
 
 logger = logging.getLogger("dashhq")
 
@@ -293,6 +294,32 @@ async def sync_members(request: Request):
     return {"synced": len(rows), "run_started_at": run_started_at}
 
 
+@app.get("/cron/register-discord-commands")
+async def register_discord_commands(request: Request):
+    # One-time (and re-run-whenever-the-command-list-changes) setup action,
+    # not a real schedule — reuses the cron auth pattern since it's the
+    # same "server action gated by a shared secret" shape, and needing to
+    # go through Vercel's dashboard to trigger it is exactly the point:
+    # nobody without access to the deployed environment can register or
+    # overwrite the bot's commands.
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not (settings.discord_bot_token and settings.discord_client_id and settings.discord_guild_id):
+        raise HTTPException(status_code=500, detail="Discord bot env vars not fully configured")
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        res = await client.put(
+            f"{DISCORD_API}/applications/{settings.discord_client_id}/guilds/{settings.discord_guild_id}/commands",
+            headers={"Authorization": f"Bot {settings.discord_bot_token}"},
+            json=TOOLKIT_BOT_COMMANDS,
+        )
+        res.raise_for_status()
+        registered = res.json()
+
+    return {"registered": len(registered), "commands": [c["name"] for c in registered]}
+
+
 # ── Citizenship applications ─────────────────────────────────────────────────
 
 X_PROFILE_RE = re.compile(
@@ -530,6 +557,9 @@ async def discord_interactions(request: Request):
     if itype == 1:  # PING — Discord sends this to validate the endpoint URL
         return {"type": 1}
 
+    if itype == 2:  # APPLICATION_COMMAND — a /slash command
+        return await _handle_toolkit_command(payload)
+
     if itype != 3:  # not a message-component (button) interaction
         return {"type": 4, "data": {"content": "Unsupported interaction.", "flags": 64}}
 
@@ -676,9 +706,7 @@ async def _fetch_solana_priority_fees(client: httpx.AsyncClient) -> dict | None:
         return None
 
 
-@app.get("/toolkit/gas")
-@limiter.limit("60/minute")
-async def toolkit_gas(request: Request, chain: str = Query("ethereum")):
+async def _gas_core(chain: str) -> dict:
     if chain == "solana":
         async with httpx.AsyncClient(timeout=10) as client:
             fees = await _fetch_solana_priority_fees(client)
@@ -713,6 +741,12 @@ async def toolkit_gas(request: Request, chain: str = Query("ethereum")):
         native_usd = native_data["usd"] if native_data else None
 
     return {"gwei": gwei, "native_usd": native_usd}
+
+
+@app.get("/toolkit/gas")
+@limiter.limit("60/minute")
+async def toolkit_gas(request: Request, chain: str = Query("ethereum")):
+    return await _gas_core(chain)
 
 
 # Warm-instance cache: symbol -> coingecko id. Resolving a symbol via /search
@@ -871,16 +905,131 @@ async def _rug_check_solana(client: httpx.AsyncClient, mint: str) -> dict:
     return {"level": level, "label": label, "checks": checks}
 
 
+async def _rug_check_core(address: str, chain_id: str) -> dict:
+    async with httpx.AsyncClient(timeout=10) as client:
+        if chain_id == "solana":
+            return await _rug_check_solana(client, address)
+        return await _rug_check_evm(client, address, chain_id)
+
+
 @app.post("/toolkit/rug-check")
 @limiter.limit("20/minute")
 async def rug_check(request: Request, payload: RugCheckIn):
     # Proxied server-side (rather than called from the browser) so these free
     # APIs aren't hit by an uncontrolled client fan-out, and so they share
     # the same slowapi rate limiting as the rest of the API.
+    return await _rug_check_core(payload.address, payload.chain_id)
+
+
+# ── CA Scanner (Discord) ──────────────────────────────────────────────────
+# The web CA Scanner calls DexScreener directly from the browser (its CORS
+# is open, no proxying needed there). The Discord bot has no browser, so
+# this is the same lookup done server-side for /scan.
+_CHAIN_DISPLAY_NAMES = {
+    "ethereum": "Ethereum", "bsc": "BNB Chain", "polygon": "Polygon", "arbitrum": "Arbitrum",
+    "optimism": "Optimism", "base": "Base", "avalanche": "Avalanche", "solana": "Solana",
+    "robinhood": "Robinhood Chain",
+}
+
+
+async def _ca_scan_core(address: str) -> dict:
     async with httpx.AsyncClient(timeout=10) as client:
-        if payload.chain_id == "solana":
-            return await _rug_check_solana(client, payload.address)
-        return await _rug_check_evm(client, payload.address, payload.chain_id)
+        try:
+            res = await client.get(f"https://api.dexscreener.com/latest/dex/tokens/{address}")
+            res.raise_for_status()
+            data = res.json()
+        except (httpx.HTTPError, ValueError):
+            raise HTTPException(status_code=502, detail="Could not reach the scanner right now")
+
+    pairs = data.get("pairs") or []
+    if not pairs:
+        raise HTTPException(status_code=404, detail="No pools found for that address on any indexed chain")
+
+    best = max(pairs, key=lambda p: (p.get("liquidity") or {}).get("usd") or 0)
+    info = best.get("info") or {}
+    pc = best.get("priceChange") or {}
+    chain_id = best.get("chainId", "")
+    return {
+        "name": (best.get("baseToken") or {}).get("name") or "Unknown token",
+        "symbol": (best.get("baseToken") or {}).get("symbol") or "",
+        "chain": _CHAIN_DISPLAY_NAMES.get(chain_id, chain_id.title()),
+        "dex": best.get("dexId") or "",
+        "priceUsd": float(best["priceUsd"]) if best.get("priceUsd") else None,
+        "change24h": pc.get("h24"),
+        "marketCap": best.get("marketCap") or best.get("fdv"),
+        "liquidityUsd": (best.get("liquidity") or {}).get("usd"),
+        "volume24h": (best.get("volume") or {}).get("h24"),
+        "imageUrl": info.get("imageUrl"),
+        "url": best.get("url"),
+    }
+
+
+# ── New Pair Scanner (Discord) ────────────────────────────────────────────
+# Same GeckoTerminal endpoint the web Pairs tool polls client-side every
+# 45s. A slash command is a one-shot snapshot rather than a live feed, so
+# this returns the freshest handful at call time.
+_PAIRS_CHAIN_DISPLAY = {
+    "eth": "Ethereum", "bsc": "BNB Chain", "polygon_pos": "Polygon", "arbitrum": "Arbitrum",
+    "optimism": "Optimism", "base": "Base", "avax": "Avalanche", "solana": "Solana",
+    "robinhood": "Robinhood Chain",
+}
+
+
+async def _pairs_core(chain: str, limit: int = 5) -> list[dict]:
+    async with httpx.AsyncClient(timeout=10) as client:
+        try:
+            res = await client.get(f"https://api.geckoterminal.com/api/v2/networks/{chain}/new_pools?page=1")
+            res.raise_for_status()
+            data = res.json()
+        except (httpx.HTTPError, ValueError):
+            raise HTTPException(status_code=502, detail="Could not reach the pair scanner right now")
+
+    out = []
+    for p in (data.get("data") or [])[:limit]:
+        a = p.get("attributes", {})
+        pool_addr = a.get("address") or p.get("id", "").split("_")[-1]
+        out.append({
+            "name": a.get("name"),
+            "liquidityUsd": float(a["reserve_in_usd"]) if a.get("reserve_in_usd") else None,
+            "createdAt": a.get("pool_created_at"),
+            "url": f"https://www.geckoterminal.com/{chain}/pools/{pool_addr}",
+        })
+    return out
+
+
+# ── Wallet Card (Discord) ─────────────────────────────────────────────────
+# Same ENS resolve/reverse-resolve as the web Wallet Card tool. The QR code
+# itself needs no server-side work — api.qrserver.com generates one from a
+# plain GET URL, which Discord can just embed directly as an image.
+async def _wallet_card_core(raw: str) -> dict:
+    raw = raw.strip()
+    addr = raw
+    ens_name = None
+    async with httpx.AsyncClient(timeout=10) as client:
+        if raw.lower().endswith(".eth"):
+            try:
+                r = await client.get("https://api.ensideas.com/ens/resolve/" + raw)
+                d = r.json()
+                if d and d.get("address"):
+                    addr = d["address"]
+                    ens_name = raw
+            except (httpx.HTTPError, ValueError):
+                addr = ""
+        elif re.match(r"^0x[a-fA-F0-9]{40}$", raw):
+            try:
+                r = await client.get("https://api.ensideas.com/ens/resolve/" + raw)
+                d = r.json()
+                if d and d.get("name"):
+                    ens_name = d["name"]
+            except (httpx.HTTPError, ValueError):
+                pass
+    if not addr:
+        raise HTTPException(status_code=400, detail="Could not resolve that address or ENS name")
+    return {
+        "address": addr,
+        "ensName": ens_name,
+        "qrUrl": "https://api.qrserver.com/v1/create-qr-code/?size=300x300&margin=8&data=" + urllib.parse.quote(addr),
+    }
 
 
 # ── OpenSea key management ────────────────────────────────────────────────
@@ -1074,9 +1223,7 @@ def _enrich_with_cached_meta(shaped: dict) -> dict:
     return shaped
 
 
-@app.get("/toolkit/nft-search")
-@limiter.limit("40/minute")
-async def nft_search(request: Request, q: str = Query(..., min_length=1, max_length=80)):
+async def _nft_search_core(q: str) -> list[dict]:
     async with httpx.AsyncClient(timeout=10) as client:
         data = await _opensea_get(client, "/search", {"query": q})
         if data is None:
@@ -1097,18 +1244,69 @@ async def nft_search(request: Request, q: str = Query(..., min_length=1, max_len
             if isinstance(stats, Exception):
                 stats = None
             out.append(_enrich_with_cached_meta(_nft_collection_shape(c, stats)))
-        return {"results": out}
+        return out
 
 
-@app.get("/toolkit/nft-collection")
-@limiter.limit("60/minute")
-async def nft_collection(request: Request, slug: str = Query(..., min_length=1, max_length=120)):
+@app.get("/toolkit/nft-search")
+@limiter.limit("40/minute")
+async def nft_search(request: Request, q: str = Query(..., min_length=1, max_length=80)):
+    return {"results": await _nft_search_core(q)}
+
+
+async def _nft_collection_core(slug: str) -> dict:
     async with httpx.AsyncClient(timeout=10) as client:
         info = await _opensea_get(client, f"/collections/{slug}")
         stats = await _opensea_get(client, f"/collections/{slug}/stats")
         if info is None:
             raise HTTPException(status_code=404, detail="Collection not found")
         return _nft_collection_shape(info, stats)
+
+
+@app.get("/toolkit/nft-collection")
+@limiter.limit("60/minute")
+async def nft_collection(request: Request, slug: str = Query(..., min_length=1, max_length=120)):
+    return await _nft_collection_core(slug)
+
+
+# ── Discord /watchlist — per-citizen NFT watchlist, persisted in Supabase ──
+async def _discord_watchlist_add(discord_user_id: str, slug: str) -> dict:
+    # Confirm the collection is real before saving a slug nobody can look
+    # up later - matches the web tool only ever adding from real search
+    # results, never an arbitrary typed string.
+    collection = await _nft_collection_core(slug)
+    async with httpx.AsyncClient(timeout=10) as client:
+        res = await client.post(
+            f"{settings.supabase_url}/rest/v1/discord_nft_watchlist",
+            headers=_supabase_headers(prefer="resolution=merge-duplicates,return=minimal"),
+            json=[{"discord_user_id": discord_user_id, "slug": collection["slug"]}],
+        )
+        res.raise_for_status()
+    return collection
+
+
+async def _discord_watchlist_remove(discord_user_id: str, slug: str) -> None:
+    async with httpx.AsyncClient(timeout=10) as client:
+        res = await client.delete(
+            f"{settings.supabase_url}/rest/v1/discord_nft_watchlist",
+            headers=_supabase_headers(prefer="return=minimal"),
+            params={"discord_user_id": f"eq.{discord_user_id}", "slug": f"eq.{slug}"},
+        )
+        res.raise_for_status()
+
+
+async def _discord_watchlist_list(discord_user_id: str) -> list[dict]:
+    async with httpx.AsyncClient(timeout=10) as client:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/discord_nft_watchlist",
+            headers=_supabase_headers(),
+            params={"discord_user_id": f"eq.{discord_user_id}", "select": "slug", "order": "added_at.desc"},
+        )
+        res.raise_for_status()
+        slugs = [row["slug"] for row in res.json()]
+        if not slugs:
+            return []
+        results = await asyncio.gather(*[_nft_collection_core(s) for s in slugs], return_exceptions=True)
+        return [r for r in results if not isinstance(r, Exception)]
 
 
 @app.get("/toolkit/nft-discover")
@@ -1175,9 +1373,7 @@ def _log_score(value: float, floor: float, ceiling: float) -> float:
     return max(0.0, min(100.0, (math.log10(value) - math.log10(max(floor, 1e-9))) / (math.log10(ceiling) - math.log10(max(floor, 1e-9))) * 100))
 
 
-@app.get("/toolkit/wallet-xray")
-@limiter.limit("20/minute")
-async def wallet_xray(request: Request, address: str = Query(..., min_length=3, max_length=100)):
+async def _wallet_xray_core(address: str) -> dict:
     raw = address.strip()
     async with httpx.AsyncClient(timeout=12) as client:
         addr = raw
@@ -1394,6 +1590,316 @@ async def wallet_xray(request: Request, address: str = Query(..., min_length=3, 
             "txCount": tx_count if counters_ok else None,
         },
     }
+
+
+@app.get("/toolkit/wallet-xray")
+@limiter.limit("20/minute")
+async def wallet_xray(request: Request, address: str = Query(..., min_length=3, max_length=100)):
+    return await _wallet_xray_core(address)
+
+
+# ── Discord toolkit bot — slash commands ──────────────────────────────────
+# Every handler below calls the exact same *_core() functions the website's
+# toolkit endpoints use — no separate logic, no separate data source, so a
+# fix or a new chain added to one surface is automatically correct on the
+# other. Results post publicly in-channel per citizen preference, and every
+# command is gated behind the Citizen role: this is a members-only perk, not
+# a general-purpose public bot.
+EMBED_COLOR = 0x1B42FF
+EMBED_COLOR_GOOD = 0x10B981
+EMBED_COLOR_BAD = 0xEF4444
+EMBED_COLOR_WARN = 0xF59E0B
+TOOLKIT_FOOTER = {"text": "Dash HQ Toolkit · dashhq.site"}
+
+_GAS_CHAIN_DISPLAY = {
+    "ethereum": "Ethereum", "bsc": "BNB Chain", "polygon": "Polygon", "arbitrum": "Arbitrum",
+    "optimism": "Optimism", "base": "Base", "avalanche": "Avalanche", "robinhood": "Robinhood Chain",
+    "solana": "Solana",
+}
+_RUG_CHAIN_DISPLAY = {
+    "1": "Ethereum", "56": "BNB Chain", "137": "Polygon", "42161": "Arbitrum",
+    "10": "Optimism", "8453": "Base", "43114": "Avalanche", "solana": "Solana",
+}
+
+
+def _citizen_role_ids(payload: dict) -> list[str]:
+    return (payload.get("member") or {}).get("roles") or []
+
+
+def _is_citizen(payload: dict) -> bool:
+    # No role configured at all means the gate can't be enforced — fail
+    # open rather than silently lock every citizen out of a working bot.
+    if not settings.citizen_role_id:
+        return True
+    return settings.citizen_role_id in _citizen_role_ids(payload)
+
+
+def _cmd_options(payload: dict) -> dict:
+    opts = (payload.get("data") or {}).get("options") or []
+    return {o["name"]: o.get("value") for o in opts if o.get("type") not in (1, 2)}
+
+
+def _fmt_usd(n) -> str:
+    if n is None:
+        return "—"
+    if n >= 1e9:
+        return f"${n / 1e9:.2f}B"
+    if n >= 1e6:
+        return f"${n / 1e6:.2f}M"
+    if n >= 1e3:
+        return f"${n / 1e3:.1f}K"
+    return f"${n:,.2f}"
+
+
+def _fmt_price(n) -> str:
+    if n is None:
+        return "—"
+    if n >= 1:
+        return f"${n:,.2f}"
+    if n >= 0.01:
+        return f"${n:.4f}"
+    return f"${n:.8f}".rstrip("0")
+
+
+async def _cmd_xray(address: str) -> dict:
+    data = await _wallet_xray_core(address)
+    tier = data["tier"]
+    crypto = data["crypto"]
+    fields = [
+        {"name": "Score", "value": f"{data['composite']} / 100", "inline": True},
+        {"name": "Archetype", "value": data["archetype"], "inline": True},
+        {"name": "Net Worth (est.)", "value": f"${crypto['netWorthUsd']:,}", "inline": True},
+        {"name": "ETH Balance", "value": f"{crypto['ethBalance']} ETH", "inline": True},
+        {"name": "Distinct Tokens", "value": str(crypto["distinctTokens"]), "inline": True},
+        {"name": "NFT Collections", "value": str(data["nft"]["collections"]), "inline": True},
+    ]
+    if crypto.get("otherChains"):
+        fields.append({"name": "Also active on", "value": ", ".join(crypto["otherChains"]), "inline": False})
+    return {
+        "title": f"{tier['emoji']} {tier['name']} · {data.get('ensName') or address}",
+        "description": tier["flavor"],
+        "color": int(tier["color"].lstrip("#"), 16),
+        "fields": fields,
+        "footer": TOOLKIT_FOOTER,
+    }
+
+
+async def _cmd_gas(chain: str) -> dict:
+    chain = chain or "ethereum"
+    data = await _gas_core(chain)
+    label = _GAS_CHAIN_DISPLAY.get(chain, chain.title())
+    if chain == "solana":
+        fees = data.get("solana_fees")
+        big = f"{fees['avg']:,} µ◎/CU" if fees else "—"
+    else:
+        gwei = data.get("gwei")
+        big = f"{gwei:.4f} gwei" if gwei is not None else "—"
+    fields = [{"name": "Current", "value": big, "inline": True}]
+    if data.get("native_usd") is not None:
+        fields.append({"name": "Native token price", "value": _fmt_usd(data["native_usd"]), "inline": True})
+    return {"title": f"⛽ Gas — {label}", "color": EMBED_COLOR, "fields": fields, "footer": TOOLKIT_FOOTER}
+
+
+async def _cmd_scan(address: str) -> dict:
+    data = await _ca_scan_core(address)
+    fields = [
+        {"name": "Price", "value": _fmt_price(data["priceUsd"]), "inline": True},
+        {"name": "24h Change", "value": f"{data['change24h']:+.2f}%" if data.get("change24h") is not None else "—", "inline": True},
+        {"name": "Chain / DEX", "value": f"{data['chain']} · {data['dex']}", "inline": True},
+        {"name": "Market Cap", "value": _fmt_usd(data["marketCap"]), "inline": True},
+        {"name": "Liquidity", "value": _fmt_usd(data["liquidityUsd"]), "inline": True},
+        {"name": "24h Volume", "value": _fmt_usd(data["volume24h"]), "inline": True},
+    ]
+    return {
+        "title": f"🔍 {data['name']} ({data['symbol']})",
+        "url": data.get("url"),
+        "color": EMBED_COLOR,
+        "fields": fields,
+        "thumbnail": {"url": data["imageUrl"]} if data.get("imageUrl") else None,
+        "footer": TOOLKIT_FOOTER,
+    }
+
+
+async def _cmd_rug(address: str, chain_id: str) -> dict:
+    chain_id = chain_id or "1"
+    data = await _rug_check_core(address, chain_id)
+    color = {"low": EMBED_COLOR_GOOD, "medium": EMBED_COLOR_WARN}.get(data["level"], EMBED_COLOR_BAD)
+    checklist = "\n".join(f"{'✅' if c['pass'] else '❌'} {c['label']}" for c in data["checks"])
+    label = _RUG_CHAIN_DISPLAY.get(chain_id, chain_id)
+    return {
+        "title": f"🛡️ {data['label']} — {label}",
+        "description": checklist,
+        "color": color,
+        "footer": TOOLKIT_FOOTER,
+    }
+
+
+async def _cmd_nft(query: str) -> dict:
+    results = await _nft_search_core(query)
+    if not results:
+        return {"title": "No collections found", "description": f'No OpenSea results for "{query}".', "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
+    c = results[0]
+    check = "✅ " if c.get("verified") else ""
+    fields = [
+        {"name": "Floor", "value": f"{c['floor']:.3f} {c['symbol']}" if c.get("floor") is not None else "—", "inline": True},
+        {"name": "24h Volume", "value": f"{c['vol1d']:.2f} {c['symbol']}" if c.get("vol1d") is not None else "—", "inline": True},
+        {"name": "Owners", "value": f"{c['owners']:,}" if c.get("owners") is not None else "—", "inline": True},
+    ]
+    if c.get("category"):
+        fields.append({"name": "Category", "value": c["category"], "inline": True})
+    return {
+        "title": f"{check}{c['name']}",
+        "url": c.get("openseaUrl"),
+        "description": c.get("description"),
+        "color": EMBED_COLOR,
+        "fields": fields,
+        "thumbnail": {"url": c["image"]} if c.get("image") else None,
+        "footer": TOOLKIT_FOOTER,
+    }
+
+
+async def _cmd_wallet(address: str) -> dict:
+    data = await _wallet_card_core(address)
+    title = data.get("ensName") or data["address"]
+    return {
+        "title": f"💳 {title}",
+        "description": f"`{data['address']}`",
+        "color": EMBED_COLOR,
+        "image": {"url": data["qrUrl"]},
+        "footer": TOOLKIT_FOOTER,
+    }
+
+
+async def _cmd_pairs(chain: str) -> dict:
+    chain = chain or "eth"
+    pools = await _pairs_core(chain, limit=5)
+    label = _PAIRS_CHAIN_DISPLAY.get(chain, chain.title())
+    if not pools:
+        return {"title": f"🔥 Fresh Pairs — {label}", "description": "No pairs found right now.", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
+    lines = [f"[{p['name']}]({p['url']}) — {_fmt_usd(p['liquidityUsd'])} liquidity" for p in pools]
+    return {"title": f"🔥 Fresh Pairs — {label}", "description": "\n".join(lines), "color": EMBED_COLOR, "footer": TOOLKIT_FOOTER}
+
+
+async def _cmd_watchlist(payload: dict, discord_user_id: str) -> dict:
+    sub_options = (payload.get("data") or {}).get("options") or []
+    if not sub_options:
+        return {"title": "Missing subcommand", "description": "Use `/watchlist add`, `remove`, or `list`.", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
+    sub = sub_options[0]
+    sub_name = sub.get("name")
+    sub_opts = {o["name"]: o.get("value") for o in (sub.get("options") or [])}
+
+    if sub_name == "list":
+        collections = await _discord_watchlist_list(discord_user_id)
+        if not collections:
+            return {"title": "📌 Your NFT Watchlist", "description": "Nothing watched yet — try `/watchlist add`.", "color": EMBED_COLOR, "footer": TOOLKIT_FOOTER}
+        lines = []
+        for c in collections:
+            check = "✅ " if c.get("verified") else ""
+            floor = f"{c['floor']:.3f} {c['symbol']}" if c.get("floor") is not None else "—"
+            lines.append(f"{check}**[{c['name']}]({c.get('openseaUrl')})** — Floor {floor}")
+        return {"title": "📌 Your NFT Watchlist", "description": "\n".join(lines), "color": EMBED_COLOR, "footer": TOOLKIT_FOOTER}
+
+    query = (sub_opts.get("collection") or "").strip()
+    if not query:
+        return {"title": "Missing collection", "description": "Provide a collection name.", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
+
+    if sub_name == "add":
+        matches = await _nft_search_core(query)
+        if not matches:
+            return {"title": "No collections found", "description": f'No OpenSea results for "{query}".', "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
+        c = await _discord_watchlist_add(discord_user_id, matches[0]["slug"])
+        check = "✅ " if c.get("verified") else ""
+        return {"title": f"Added to watchlist: {check}{c['name']}", "color": EMBED_COLOR_GOOD, "footer": TOOLKIT_FOOTER}
+
+    if sub_name == "remove":
+        matches = await _nft_search_core(query)
+        slug = matches[0]["slug"] if matches else query
+        await _discord_watchlist_remove(discord_user_id, slug)
+        return {"title": f"Removed from watchlist: {query}", "color": EMBED_COLOR, "footer": TOOLKIT_FOOTER}
+
+    return {"title": "Unknown subcommand", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
+
+
+async def _discord_deferred_ack(interaction_id: str, token: str) -> None:
+    async with httpx.AsyncClient(timeout=10) as client:
+        try:
+            await client.post(f"{DISCORD_API}/interactions/{interaction_id}/{token}/callback", json={"type": 5})
+        except httpx.HTTPError:
+            logger.exception("Failed to send deferred ack for interaction %s", interaction_id)
+
+
+async def _discord_edit_original(token: str, embed: dict) -> None:
+    async with httpx.AsyncClient(timeout=10) as client:
+        try:
+            await client.patch(
+                f"{DISCORD_API}/webhooks/{settings.discord_client_id}/{token}/messages/@original",
+                json={"embeds": [embed]},
+            )
+        except httpx.HTTPError:
+            logger.exception("Failed to edit original response for interaction token")
+
+
+def _error_embed(exc: Exception) -> dict:
+    detail = exc.detail if isinstance(exc, HTTPException) else "Something went wrong running that command."
+    return {"title": "⚠️ Command failed", "description": str(detail), "color": EMBED_COLOR_BAD, "footer": TOOLKIT_FOOTER}
+
+
+def _clean_embed(embed: dict) -> dict:
+    # Discord's embed schema treats an explicit null differently from an
+    # absent key for some optional fields (description, thumbnail) - a few
+    # formatters above build one or the other depending on the data (e.g.
+    # a collection with no description, no image), so strip Nones here
+    # once, centrally, rather than every formatter needing to remember to.
+    return {k: v for k, v in embed.items() if v is not None}
+
+
+async def _handle_toolkit_command(payload: dict) -> dict:
+    if not _is_citizen(payload):
+        return {"type": 4, "data": {"content": "This command is reserved for verified Dash HQ citizens — head to the site and verify with Discord to unlock it.", "flags": 64}}
+
+    name = (payload.get("data") or {}).get("name")
+    opts = _cmd_options(payload)
+    member_user = (payload.get("member") or {}).get("user") or {}
+    discord_user_id = member_user.get("id", "")
+
+    # /xray is the one command that can genuinely exceed Discord's 3-second
+    # ack window (a heavily-active wallet's token-balance fetch alone can
+    # take 10-25s) - deferred response, then edit the original message once
+    # the real result is ready, instead of risking "This interaction failed."
+    if name == "xray":
+        interaction_id = payload.get("id")
+        token = payload.get("token")
+        await _discord_deferred_ack(interaction_id, token)
+        try:
+            embed = await _cmd_xray(opts.get("address", ""))
+        except Exception as exc:
+            embed = _error_embed(exc)
+        await _discord_edit_original(token, _clean_embed(embed))
+        return {"type": 5}
+
+    try:
+        if name == "gas":
+            embed = await _cmd_gas(opts.get("chain"))
+        elif name == "scan":
+            embed = await _cmd_scan(opts.get("address", ""))
+        elif name == "rug":
+            embed = await _cmd_rug(opts.get("address", ""), opts.get("chain"))
+        elif name == "nft":
+            embed = await _cmd_nft(opts.get("collection", ""))
+        elif name == "wallet":
+            embed = await _cmd_wallet(opts.get("address", ""))
+        elif name == "pairs":
+            embed = await _cmd_pairs(opts.get("chain"))
+        elif name == "watchlist":
+            embed = await _cmd_watchlist(payload, discord_user_id)
+        else:
+            return {"type": 4, "data": {"content": "Unknown command.", "flags": 64}}
+    except Exception as exc:
+        if not isinstance(exc, HTTPException):
+            logger.exception("Toolkit command /%s failed", name)
+        embed = _error_embed(exc)
+
+    return {"type": 4, "data": {"embeds": [_clean_embed(embed)]}}
 
 
 @app.get("/health")

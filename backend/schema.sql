@@ -82,3 +82,17 @@ create trigger opensea_key_cache_set_updated_at
   for each row execute function set_updated_at();
 
 alter table opensea_key_cache enable row level security;
+
+-- Discord bot's /watchlist command: each citizen's watched NFT collections,
+-- keyed by their Discord user id (the web portal's watchlist stays purely
+-- client-side in localStorage - this is a separate, Discord-only list).
+create table if not exists discord_nft_watchlist (
+  discord_user_id  text not null,
+  slug             text not null,
+  added_at         timestamptz not null default now(),
+  primary key (discord_user_id, slug)
+);
+
+create index if not exists discord_nft_watchlist_user_idx on discord_nft_watchlist (discord_user_id);
+
+alter table discord_nft_watchlist enable row level security;
