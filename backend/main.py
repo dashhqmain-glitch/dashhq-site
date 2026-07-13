@@ -1823,10 +1823,13 @@ async def _cmd_watchlist(payload: dict, discord_user_id: str) -> dict:
     return {"title": "Unknown subcommand", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
 
 
-async def _discord_deferred_ack(interaction_id: str, token: str) -> None:
+async def _discord_deferred_ack(interaction_id: str, token: str, ephemeral: bool = False) -> None:
+    # Ephemeral has to be set on this initial ack — it can't be added later
+    # when the real content is patched in via _discord_edit_original.
+    body = {"type": 5, "data": {"flags": 64}} if ephemeral else {"type": 5}
     async with httpx.AsyncClient(timeout=10) as client:
         try:
-            await client.post(f"{DISCORD_API}/interactions/{interaction_id}/{token}/callback", json={"type": 5})
+            await client.post(f"{DISCORD_API}/interactions/{interaction_id}/{token}/callback", json=body)
         except httpx.HTTPError:
             logger.exception("Failed to send deferred ack for interaction %s", interaction_id)
 
@@ -1968,6 +1971,14 @@ async def _handle_toolkit_command(payload: dict) -> dict:
     member_user = (payload.get("member") or {}).get("user") or {}
     discord_user_id = member_user.get("id", "")
 
+    # Anything that surfaces a specific person's financial standing or
+    # personal tracking list is private — only the command's own invoker
+    # sees it. /dashboard itself stays public (it's just a menu, nothing
+    # sensitive in it) along with the price/market lookups that don't
+    # reveal anything about who's asking.
+    EPHEMERAL_COMMANDS = {"xray", "wallet", "watchlist"}
+    ephemeral = name in EPHEMERAL_COMMANDS
+
     if name == "dashboard":
         return {"type": 4, "data": _dashboard_response()}
 
@@ -1978,7 +1989,7 @@ async def _handle_toolkit_command(payload: dict) -> dict:
     if name == "xray":
         interaction_id = payload.get("id")
         token = payload.get("token")
-        await _discord_deferred_ack(interaction_id, token)
+        await _discord_deferred_ack(interaction_id, token, ephemeral=True)
         try:
             embed = await _cmd_xray(opts.get("address", ""))
         except Exception as exc:
@@ -2008,7 +2019,10 @@ async def _handle_toolkit_command(payload: dict) -> dict:
             logger.exception("Toolkit command /%s failed", name)
         embed = _error_embed(exc)
 
-    return {"type": 4, "data": {"embeds": [_clean_embed(embed)]}}
+    data = {"embeds": [_clean_embed(embed)]}
+    if ephemeral:
+        data["flags"] = 64
+    return {"type": 4, "data": data}
 
 
 @app.get("/health")
