@@ -81,7 +81,7 @@ var Apply = (function(){
       {k:'Intro & Role', v:d.intro, step:3},
       {k:'Communities', v:d.communities, step:4},
       {k:'Adding Value', v:d.value, step:5},
-      {k:'Followed the team', v:'Yes — all three confirmed', step:6}
+      {k:'Followed the team', v:'Yes, all three confirmed', step:6}
     ];
     el('#reviewList').innerHTML = rows.map(function(r){
       return '<div class="review-row" onclick="Apply.jump('+r.step+')"><div class="rl"><div class="k">'+r.k+'</div><div class="v">'+escapeHtml(r.v)+'</div></div><span class="redit">Edit</span></div>';

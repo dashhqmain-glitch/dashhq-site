@@ -168,13 +168,13 @@ var Dash = (function () {
     var bgd = document.getElementById('bentoGasDesc');
     if (bg && g) {
       var unitWord = (document.getElementById('gasUnitWord') || {}).textContent || 'gwei';
-      // The unit needs its own (much smaller) size — concatenating it into
+      // The unit needs its own (much smaller) size, concatenating it into
       // one plain-text stat string let "gwei" wrap onto its own line at
       // the same huge font size as the number when the combined text was
       // too wide for the tile.
-      bg.innerHTML = (g.textContent && g.textContent !== '—')
+      bg.innerHTML = (g.textContent && g.textContent !== '-')
         ? g.textContent + ' <span class="bento-unit">' + unitWord + '</span>'
-        : '—';
+        : '-';
     }
     if (bgd) bgd.textContent = ((document.getElementById('gasChainLabel') || {}).textContent || 'Ethereum mainnet') + ' · avg';
 
@@ -269,7 +269,7 @@ var CardActions = (function () {
       x.fillStyle = color || '#E8EFFF'; x.font = '700 ' + (15 * S) + 'px "JetBrains Mono",monospace';
       x.fillText(val, mx, H - 10 * S);
     }
-    meta('Member Since', (document.getElementById('cardJoined') || {}).textContent || '—', P);
+    meta('Member Since', (document.getElementById('cardJoined') || {}).textContent || '-', P);
     meta('Status', 'Active', P + 150 * S, '#10B981');
     x.restore();
     rr(1 * S, 1 * S, W - 2 * S, H - 2 * S, 20 * S); x.strokeStyle = 'rgba(255,255,255,0.16)'; x.lineWidth = 2 * S; x.stroke();
@@ -281,7 +281,7 @@ var CardActions = (function () {
     var since = (document.getElementById('cardJoined') || {}).textContent || '2024';
     var lines = [
       "I'm officially a Dash Citizen, verified since " + since + ".",
-      "Just verified my Dash Citizen card — HQ since " + since + ".",
+      "Just verified my Dash Citizen card. HQ since " + since + ".",
       "Dash HQ Citizen since " + since + ". One step ahead of the curve."
     ];
     var text = lines[Math.floor(Math.random() * lines.length)];
@@ -333,7 +333,7 @@ var Ticker = (function () {
     grid.innerHTML = syms.map(function (sym) {
       var s = state[sym];
       if (s.loading) return '<div class="tk-item"><button class="rm" onclick="Ticker.remove(\'' + sym + '\')" aria-label="Remove">×</button><div class="sym">' + sym + '</div><div class="px">Loading…</div></div>';
-      if (s.error) return '<div class="tk-item"><button class="rm" onclick="Ticker.remove(\'' + sym + '\')" aria-label="Remove">×</button><div class="sym">' + sym + '</div><div class="px" style="cursor:pointer" onclick="Ticker.retry(\'' + sym + '\')" title="Click to retry">Not found — retry</div></div>';
+      if (s.error) return '<div class="tk-item"><button class="rm" onclick="Ticker.remove(\'' + sym + '\')" aria-label="Remove">×</button><div class="sym">' + sym + '</div><div class="px" style="cursor:pointer" onclick="Ticker.retry(\'' + sym + '\')" title="Click to retry">Not found, retry</div></div>';
       var up = s.chg >= 0;
       var path = sparkPath(s.history);
       return '<div class="tk-item"><button class="rm" onclick="Ticker.remove(\'' + sym + '\')" aria-label="Remove">×</button>'
@@ -449,7 +449,7 @@ var Gas = (function () {
     renderEvm();
   }
   function renderEvm() {
-    if (gwei == null) { document.getElementById('gasBig').textContent = '—'; document.getElementById('gasTiers').innerHTML = ''; document.getElementById('gasCosts').innerHTML = ''; return; }
+    if (gwei == null) { document.getElementById('gasBig').textContent = '-'; document.getElementById('gasTiers').innerHTML = ''; document.getElementById('gasCosts').innerHTML = ''; return; }
     document.getElementById('gasBig').textContent = fmtGwei(gwei);
     var tiers = [
       { k: 'slow', label: 'Slow', mult: 0.85 },
@@ -470,7 +470,7 @@ var Gas = (function () {
     }).join('');
   }
   function renderSolana() {
-    if (!solanaFees) { document.getElementById('gasBig').textContent = '—'; document.getElementById('gasTiers').innerHTML = ''; document.getElementById('gasCosts').innerHTML = ''; return; }
+    if (!solanaFees) { document.getElementById('gasBig').textContent = '-'; document.getElementById('gasTiers').innerHTML = ''; document.getElementById('gasCosts').innerHTML = ''; return; }
     document.getElementById('gasBig').textContent = solanaFees.avg.toLocaleString('en-US');
     var tiers = [
       { k: 'slow', label: 'Slow', v: solanaFees.slow },
@@ -747,14 +747,14 @@ var CaScan = (function () {
     return id.charAt(0).toUpperCase() + id.slice(1).replace(/-/g, ' ');
   }
   function fmtPrice(n) {
-    if (n == null || isNaN(n)) return '—';
+    if (n == null || isNaN(n)) return '-';
     if (n >= 1) return '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     if (n >= 0.01) return '$' + n.toFixed(4);
     if (n >= 0.000001) return '$' + n.toFixed(8).replace(/0+$/, '').replace(/\.$/, '');
     return '$' + n.toExponential(2);
   }
   function fmtCompact(n) {
-    if (n == null || isNaN(n)) return '—';
+    if (n == null || isNaN(n)) return '-';
     if (n >= 1e9) return '$' + (n / 1e9).toFixed(2) + 'B';
     if (n >= 1e6) return '$' + (n / 1e6).toFixed(2) + 'M';
     if (n >= 1e3) return '$' + (n / 1e3).toFixed(1) + 'K';
@@ -810,7 +810,7 @@ var CaScan = (function () {
       });
       render(best, byChain);
     } catch (e) {
-      empty.textContent = 'Could not reach the scanner right now — try again in a moment.';
+      empty.textContent = 'Could not reach the scanner right now. Try again in a moment.';
       empty.style.display = 'block';
     } finally {
       btn.textContent = origLabel; btn.disabled = false;
@@ -890,21 +890,21 @@ var CaScan = (function () {
   }
 
   function fmtNative(n) {
-    if (n == null || isNaN(n)) return '—';
+    if (n == null || isNaN(n)) return '-';
     if (n >= 1) return n.toLocaleString('en-US', { maximumFractionDigits: 6 });
     if (n >= 0.000001) return n.toFixed(10).replace(/0+$/, '').replace(/\.$/, '');
     return n.toExponential(2);
   }
-  function shortAddr(a) { return a && a.length > 14 ? a.slice(0, 6) + '…' + a.slice(-4) : (a || '—'); }
+  function shortAddr(a) { return a && a.length > 14 ? a.slice(0, 6) + '…' + a.slice(-4) : (a || '-'); }
   function copySvg() { return '<svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M4 16V5a1 1 0 0 1 1-1h11"/></svg>'; }
 
   function buildMoreDetails(pair) {
     var quote = pair.quoteToken || {};
-    var dexLabel = (pair.dexId || '—') + (pair.labels && pair.labels.length ? ' · ' + pair.labels.join('/').toUpperCase() : '');
+    var dexLabel = (pair.dexId || '-') + (pair.labels && pair.labels.length ? ' · ' + pair.labels.join('/').toUpperCase() : '');
     var mcap = pair.marketCap, fdv = pair.fdv;
 
     var pairInfo = '<div class="scan-more-section"><div class="msl">Pair Info</div>'
-      + '<div class="scan-detail-row"><span class="dl">Paired with</span><span class="dv">' + (quote.symbol || '—') + '</span></div>'
+      + '<div class="scan-detail-row"><span class="dl">Paired with</span><span class="dv">' + (quote.symbol || '-') + '</span></div>'
       + '<div class="scan-detail-row"><span class="dl">Price (native)</span><span class="dv">' + fmtNative(parseFloat(pair.priceNative)) + ' ' + (quote.symbol || '') + '</span></div>'
       + '<div class="scan-detail-row"><span class="dl">DEX</span><span class="dv">' + dexLabel + '</span></div>'
       + '<div class="scan-detail-row"><span class="dl">Token contract</span><span class="dv copyable" onclick="CaScan.copyAddress()">' + shortAddr(pair.baseToken.address) + copySvg() + '</span></div>'
@@ -924,8 +924,8 @@ var CaScan = (function () {
     var mtf = '<div class="scan-more-section"><div class="msl">Volume &amp; Trades by Timeframe</div>'
       + '<div class="scan-mtf-wrap"><table class="scan-mtf-table"><thead><tr><th></th>' + tfKeys.map(function (t) { return '<th>' + t[1] + '</th>'; }).join('') + '</tr></thead><tbody>'
       + row('Volume', function (k) { return fmtCompact(vol[k]); })
-      + row('Buys', function (k) { return (txns[k] && txns[k].buys != null) ? txns[k].buys : '—'; })
-      + row('Sells', function (k) { return (txns[k] && txns[k].sells != null) ? txns[k].sells : '—'; })
+      + row('Buys', function (k) { return (txns[k] && txns[k].buys != null) ? txns[k].buys : '-'; })
+      + row('Sells', function (k) { return (txns[k] && txns[k].sells != null) ? txns[k].sells : '-'; })
       + '</tbody></table></div></div>';
 
     return pairInfo + valuation + mtf;
@@ -1028,9 +1028,9 @@ var Slip = (function () {
     var html = '<div class="slip-stat"><div class="sl">Est. Price Impact</div><div class="sv" style="color:' + color + '">' + impact.toFixed(2) + '%</div></div>'
       + '<div class="slip-stat"><div class="sl">Pool Liquidity</div><div class="sv">$' + Math.round(liq).toLocaleString('en-US') + '</div></div>';
     if (impact >= 5) {
-      html += '<div class="slip-warn" style="background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.35);color:#EF4444">⚠ High impact — this trade will move the price significantly. Consider splitting it into smaller trades.</div>';
+      html += '<div class="slip-warn" style="background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.35);color:#EF4444">⚠ High impact. This trade will move the price significantly. Consider splitting it into smaller trades.</div>';
     } else if (impact >= 1) {
-      html += '<div class="slip-warn" style="background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.35);color:#F59E0B">Moderate impact — worth keeping an eye on for larger size.</div>';
+      html += '<div class="slip-warn" style="background:rgba(245,158,11,.1);border:1px solid rgba(245,158,11,.35);color:#F59E0B">Moderate impact, worth keeping an eye on for larger size.</div>';
     }
     resultEl.innerHTML = html;
   }
@@ -1054,7 +1054,7 @@ var Watchlist = (function () {
     try { localStorage.setItem('dashhq_nft_watchlist', JSON.stringify(watchSlugs)); } catch (e) { }
   }
   function fmtCompact(n) {
-    if (n == null || isNaN(n)) return '—';
+    if (n == null || isNaN(n)) return '-';
     if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
     if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
     return (Math.round(n * 100) / 100).toString();
@@ -1115,12 +1115,12 @@ var Watchlist = (function () {
           var added = watchSlugs.indexOf(c.slug) !== -1;
           return '<div class="nft-result-row' + (added ? ' added' : '') + '" onclick="' + (added ? '' : "Watchlist.add('" + c.slug + "')") + '">'
             + thumbHtml(c)
-            + '<div class="nft-result-info"><div class="nft-result-name"><span>' + c.name + '</span>' + verifiedBadge(c) + '</div><div class="nft-result-stat">Floor ' + (c.floor != null ? fmtCompact(c.floor) + ' ' + (c.symbol || 'ETH') : '—') + '</div></div>'
+            + '<div class="nft-result-info"><div class="nft-result-name"><span>' + c.name + '</span>' + verifiedBadge(c) + '</div><div class="nft-result-stat">Floor ' + (c.floor != null ? fmtCompact(c.floor) + ' ' + (c.symbol || 'ETH') : '-') + '</div></div>'
             + '<div class="nft-result-add">' + (added ? 'Watching ✓' : '+ Watch') + '</div>'
             + '</div>';
         }).join('');
       } catch (e) {
-        el.innerHTML = '<div class="nft-empty-msg">Could not reach OpenSea right now — try again in a moment.</div>';
+        el.innerHTML = '<div class="nft-empty-msg">Could not reach OpenSea right now. Try again in a moment.</div>';
       }
     }, 350);
   }
@@ -1178,10 +1178,10 @@ var Watchlist = (function () {
       + '<div class="nft-watch-top">' + thumbHtml(c) + '<div class="nft-watch-name"><span>' + c.name + '</span>' + verifiedBadge(c) + '</div></div>'
       + tags + desc
       + '<div class="nft-watch-stats">'
-      + '<div class="nft-watch-stat"><div class="lbl">Floor</div><div class="val' + (c.floor == null ? ' zero' : '') + '">' + (c.floor != null ? fmtCompact(c.floor) + ' ' + (c.symbol || 'ETH') : '—') + '</div></div>'
-      + '<div class="nft-watch-stat"><div class="lbl">24h Vol</div><div class="val' + (c.vol1d == null ? ' zero' : '') + '">' + (c.vol1d != null ? fmtCompact(c.vol1d) + ' ' + (c.symbol || 'ETH') : '—') + '</div></div>'
-      + '<div class="nft-watch-stat"><div class="lbl">24h Sales</div><div class="val' + (c.sales24h == null ? ' zero' : '') + '">' + (c.sales24h != null ? c.sales24h : '—') + '</div></div>'
-      + '<div class="nft-watch-stat"><div class="lbl">Owners</div><div class="val' + (c.owners == null ? ' zero' : '') + '">' + (c.owners != null ? c.owners.toLocaleString('en-US') : '—') + '</div></div>'
+      + '<div class="nft-watch-stat"><div class="lbl">Floor</div><div class="val' + (c.floor == null ? ' zero' : '') + '">' + (c.floor != null ? fmtCompact(c.floor) + ' ' + (c.symbol || 'ETH') : '-') + '</div></div>'
+      + '<div class="nft-watch-stat"><div class="lbl">24h Vol</div><div class="val' + (c.vol1d == null ? ' zero' : '') + '">' + (c.vol1d != null ? fmtCompact(c.vol1d) + ' ' + (c.symbol || 'ETH') : '-') + '</div></div>'
+      + '<div class="nft-watch-stat"><div class="lbl">24h Sales</div><div class="val' + (c.sales24h == null ? ' zero' : '') + '">' + (c.sales24h != null ? c.sales24h : '-') + '</div></div>'
+      + '<div class="nft-watch-stat"><div class="lbl">Owners</div><div class="val' + (c.owners == null ? ' zero' : '') + '">' + (c.owners != null ? c.owners.toLocaleString('en-US') : '-') + '</div></div>'
       + '</div>'
       + contract
       + '<div class="nft-watch-foot">'
@@ -1202,7 +1202,7 @@ var Watchlist = (function () {
 
   async function renderWatchlist() {
     var grid = document.getElementById('nftWatchGrid');
-    if (!watchSlugs.length) { grid.innerHTML = '<div class="pin-empty">No collections watched yet — search or discover one to add it here.</div>'; return; }
+    if (!watchSlugs.length) { grid.innerHTML = '<div class="pin-empty">No collections watched yet. Search or discover one to add it here.</div>'; return; }
     // Entries cached from a search/discover result carry a leaner shape
     // (no verified/category/description/etc., flagged _partial when
     // cached) - re-fetch the full detail endpoint for anything that
@@ -1236,7 +1236,7 @@ var Watchlist = (function () {
       discoverLoaded[tabName] = results;
       if (currentSub === tabName) renderDiscover(tabName);
     } catch (e) {
-      if (currentSub === tabName) listEl.innerHTML = '<div class="nft-empty-msg">Could not reach OpenSea right now — try again in a moment.</div>';
+      if (currentSub === tabName) listEl.innerHTML = '<div class="nft-empty-msg">Could not reach OpenSea right now. Try again in a moment.</div>';
     }
   }
   function renderDiscover(tabName) {
@@ -1246,7 +1246,7 @@ var Watchlist = (function () {
     listEl.innerHTML = results.map(function (c) {
       var added = watchSlugs.indexOf(c.slug) !== -1;
       var statTxt = tabName === 'trending'
-        ? '7d Vol ' + (c.vol7d != null ? fmtCompact(c.vol7d) + ' ' + (c.symbol || 'ETH') : '—')
+        ? '7d Vol ' + (c.vol7d != null ? fmtCompact(c.vol7d) + ' ' + (c.symbol || 'ETH') : '-')
         : (c.floor != null ? 'Floor ' + fmtCompact(c.floor) + ' ' + (c.symbol || 'ETH') : 'Newly listed');
       return '<div class="nft-discover-row">'
         + thumbHtml(c)
@@ -1289,7 +1289,7 @@ var Watchlist = (function () {
 
 // ── 11. WALLET X-RAY — real Blockscout + OpenSea composite score ─────────────
 var XRay = (function () {
-  function short(a) { return a && a.length > 14 ? a.slice(0, 6) + '…' + a.slice(-4) : (a || '—'); }
+  function short(a) { return a && a.length > 14 ? a.slice(0, 6) + '…' + a.slice(-4) : (a || '-'); }
 
   function scanExample(addr) {
     document.getElementById('xrayInput').value = addr;
@@ -1312,7 +1312,7 @@ var XRay = (function () {
       render(data);
     } catch (e) {
       document.getElementById('xrayEmpty').textContent = e.message === 'lookup failed' || !e.message
-        ? 'Could not reach the chain explorer right now — try again in a moment.'
+        ? 'Could not reach the chain explorer right now. Try again in a moment.'
         : e.message;
       document.getElementById('xrayEmpty').style.display = 'block';
     } finally {
@@ -1330,7 +1330,7 @@ var XRay = (function () {
     document.getElementById('xrayScore').textContent = data.composite;
     document.getElementById('xrayNudge').textContent = next
       ? (next.min - data.composite) + ' pts from ' + next.name
-      : 'Top tier reached — apex on-chain presence';
+      : 'Top tier reached: apex on-chain presence';
 
     // A sub-score of null means the underlying data source failed to load
     // (e.g. the chain explorer's activity counters), not that the wallet
@@ -1338,7 +1338,7 @@ var XRay = (function () {
     // otherwise a temporary fetch failure reads as a confidently wrong score.
     document.getElementById('xraySubs').innerHTML = (data.subs || []).map(function (s) {
       if (s.v == null) {
-        return '<div class="xray-sub-row"><div class="xray-sub-label">' + s.k + '</div><div class="xray-sub-track" style="opacity:.35"></div><div class="xray-sub-val" title="Temporarily unavailable">—</div></div>';
+        return '<div class="xray-sub-row"><div class="xray-sub-label">' + s.k + '</div><div class="xray-sub-track" style="opacity:.35"></div><div class="xray-sub-val" title="Temporarily unavailable">-</div></div>';
       }
       return '<div class="xray-sub-row"><div class="xray-sub-label">' + s.k + '</div><div class="xray-sub-track"><div class="xray-sub-fill" style="width:' + s.v + '%"></div></div><div class="xray-sub-val">' + s.v + '</div></div>';
     }).join('');
@@ -1346,18 +1346,18 @@ var XRay = (function () {
     var noteEl = document.getElementById('xrayDataNote');
     if (noteEl) {
       noteEl.style.display = data.countersOk === false ? 'block' : 'none';
-      noteEl.textContent = 'Activity data (transactions, token transfers) was temporarily unavailable from the chain explorer — those sub-scores are excluded rather than shown as zero. Try scanning again for a complete picture.';
+      noteEl.textContent = 'Activity data (transactions, token transfers) was temporarily unavailable from the chain explorer, so those sub-scores are excluded rather than shown as zero. Try scanning again for a complete picture.';
     }
 
     var crypto = data.crypto || {}, nft = data.nft || {}, defi = data.defi || {}, behavior = data.behavior || {};
-    var fmtOrDash = function (v) { return v == null ? '—' : v.toLocaleString('en-US'); };
+    var fmtOrDash = function (v) { return v == null ? '-' : v.toLocaleString('en-US'); };
     // Net worth/balance here are Ethereum-mainnet-only - if the wallet also
     // holds a native balance on other chains (checked via a cheap RPC
     // presence probe, not a full accounting), say so plainly rather than
     // let the ETH-only figure above read as the wallet's whole picture.
     var otherChains = (crypto.otherChains || []);
     var notes = [];
-    if (otherChains.length) notes.push('Also active on ' + otherChains.join(', ') + ' — not included above.');
+    if (otherChains.length) notes.push('Also active on ' + otherChains.join(', ') + ', not included above.');
     // Net Worth silently dropping tokens Blockscout has no market price
     // for (rather than treating them as zero) is exactly what makes the
     // total read as "wrong" for a wallet holding several obscure/illiquid
@@ -1370,7 +1370,7 @@ var XRay = (function () {
     // a retry, Net Worth/Distinct Tokens reflect ETH only, not "confirmed
     // zero other tokens." Same honesty principle as the countersOk note.
     if (crypto.tokenDataOk === false) {
-      notes.push('Token holdings could not be fully loaded this scan — Net Worth and Distinct Tokens may be incomplete. Try scanning again.');
+      notes.push('Token holdings could not be fully loaded this scan. Net Worth and Distinct Tokens may be incomplete. Try scanning again.');
     }
     var cryptoNotes = notes.length ? '<div class="xray-bd-note">' + notes.join(' ') + '</div>' : '';
     document.getElementById('xrayBreakdowns').innerHTML =
@@ -1466,7 +1466,7 @@ var XRay = (function () {
   function shareX() {
     if (!lastResult) return;
     var data = lastResult;
-    var text = 'Scanned my wallet on Dash HQ\'s Wallet X-Ray: ' + data.composite + '/100 — ' + data.tier.name + ' (' + data.archetype + '). Check yours →';
+    var text = 'Scanned my wallet on Dash HQ\'s Wallet X-Ray: ' + data.composite + '/100, ' + data.tier.name + ' (' + data.archetype + '). Check yours →';
     var url = 'https://www.dashhq.site';
     var intent = 'https://twitter.com/intent/tweet?text=' + encodeURIComponent(text) + '&url=' + encodeURIComponent(url);
     window.open(intent, '_blank', 'noopener,width=600,height=520');
