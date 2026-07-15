@@ -56,7 +56,7 @@ function updateCard(data) {
   const set = (id, text) => { const el = document.getElementById(id); if (el) el.textContent = text; };
   set('cardName', data.display_name);
   set('cardHandle', data.handle);
-  set('cardTier', `★ ${data.tier}`);
+  set('cardTier', data.tier);
   set('cardJoined', data.joined);
   set('dtopName', data.display_name);
   set('profileName', data.display_name);
@@ -133,6 +133,7 @@ function closePortal() {
 
 // ── Bootstrap: URL params → sessionStorage → idle ────────────────────────────
 async function init() {
+  safeCall('CardTheme.init', function () { CardTheme.init(); });
   const params = new URLSearchParams(window.location.search);
   const token = params.get('token');
   const error = params.get('error');
@@ -241,52 +242,167 @@ var Dash = (function () {
 })();
 
 // ── CARD ACTIONS — download + share ───────────────────────────────────────────
+// ── Membership card color theme (orb selector) ───────────────────────────────
+var CardTheme = (function () {
+  var THEMES = ['blue', 'gold', 'purple', 'red', 'mono'];
+  var KEY = 'dashhq_card_theme';
+  var current = 'blue';
+  function set(name) {
+    if (THEMES.indexOf(name) === -1) return;
+    current = name;
+    var card = document.getElementById('memberCard');
+    if (card) {
+      THEMES.forEach(function (t) { card.classList.remove('theme-' + t); });
+      card.classList.add('theme-' + name);
+      card.dataset.theme = name;
+    }
+    document.querySelectorAll('.orb-btn').forEach(function (b) {
+      b.classList.toggle('active', b.dataset.theme === name);
+    });
+    try { localStorage.setItem(KEY, name); } catch (e) { }
+  }
+  function get() { return current; }
+  function init() {
+    var saved = null;
+    try { saved = localStorage.getItem(KEY); } catch (e) { }
+    set(THEMES.indexOf(saved) !== -1 ? saved : 'blue');
+  }
+  return { init: init, set: set, get: get };
+})();
+
 var CardActions = (function () {
   function download() {
     var card = document.getElementById('memberCard');
     var rect = card.getBoundingClientRect();
     var S = 3, W = Math.round(rect.width * S), H = Math.round(rect.height * S);
-    var cv = document.createElement('canvas'); cv.width = W; cv.height = H;
-    var x = cv.getContext('2d');
-    function rr(px, py, w, h, r) { x.beginPath(); x.moveTo(px + r, py); x.arcTo(px + w, py, px + w, py + h, r); x.arcTo(px + w, py + h, px, py + h, r); x.arcTo(px, py + h, px, py, r); x.arcTo(px, py, px + w, py, r); x.closePath(); }
-    rr(0, 0, W, H, 20 * S); x.save(); x.clip();
-    var g = x.createLinearGradient(0, 0, W, H); g.addColorStop(0, '#10204f'); g.addColorStop(0.55, '#0a1330'); g.addColorStop(1, '#0a1a3e');
-    x.fillStyle = g; x.fillRect(0, 0, W, H);
-    var sh = x.createLinearGradient(0, 0, W, H); sh.addColorStop(0.30, 'rgba(255,255,255,0)'); sh.addColorStop(0.45, 'rgba(145,190,255,0.18)'); sh.addColorStop(0.52, 'rgba(145,190,255,0.10)'); sh.addColorStop(0.62, 'rgba(255,255,255,0)');
-    x.fillStyle = sh; x.fillRect(0, 0, W, H);
-    var P = 26 * S;
-    x.fillStyle = '#fff'; x.font = '700 ' + (15 * S) + 'px Sora,sans-serif'; x.textBaseline = 'alphabetic'; x.letterSpacing = (2 * S) + 'px';
-    x.fillText('DASH CITIZEN', P, P + 14 * S); x.letterSpacing = '0px';
-    var tierTxt = (document.getElementById('cardTier') || {}).textContent || '★ CITIZEN';
-    x.font = '700 ' + (11 * S) + 'px "JetBrains Mono",monospace';
-    var tw = x.measureText(tierTxt).width, padX = 12 * S, ph = 28 * S, pw = tw + padX * 2;
-    var tg = x.createLinearGradient(W - P - pw, P - 4 * S, W - P, P - 4 * S + ph); tg.addColorStop(0, '#ffe9a8'); tg.addColorStop(1, '#b97d16');
-    rr(W - P - pw, P - 4 * S, pw, ph, ph / 2); x.fillStyle = tg; x.fill();
-    x.fillStyle = '#251a02'; x.textBaseline = 'middle'; x.fillText(tierTxt, W - P - pw + padX, P - 4 * S + ph / 2 + 1 * S); x.textBaseline = 'alphabetic';
-    var nameTxt = (document.getElementById('cardName') || {}).textContent || 'CITIZEN';
-    x.fillStyle = '#fff'; x.font = '700 ' + (30 * S) + 'px Sora,sans-serif'; x.fillText(nameTxt, P, H - 70 * S);
-    var handleTxt = (document.getElementById('cardHandle') || {}).textContent || '';
-    x.fillStyle = '#5B9BF8'; x.font = '400 ' + (13 * S) + 'px "JetBrains Mono",monospace'; x.fillText(handleTxt, P, H - 48 * S);
-    function meta(lab, val, mx, color) {
-      x.fillStyle = '#8A9BBF'; x.font = '400 ' + (9 * S) + 'px "JetBrains Mono",monospace'; x.letterSpacing = (1 * S) + 'px';
-      x.fillText(lab.toUpperCase(), mx, H - 24 * S); x.letterSpacing = '0px';
-      x.fillStyle = color || '#E8EFFF'; x.font = '700 ' + (15 * S) + 'px "JetBrains Mono",monospace';
-      x.fillText(val, mx, H - 10 * S);
+    var cs = getComputedStyle(card);
+    var cv1 = cs.getPropertyValue('--c-1').trim() || '#10204f';
+    var cv2 = cs.getPropertyValue('--c-2').trim() || '#0a1330';
+    var cv3 = cs.getPropertyValue('--c-3').trim() || '#0a1a3e';
+    var accent = cs.getPropertyValue('--c-accent').trim() || '#5B9BF8';
+    var lineColor = cs.getPropertyValue('--c-line').trim() || 'rgba(91,155,248,.5)';
+    var glowColor = cs.getPropertyValue('--c-glow').trim() || 'rgba(91,155,248,.4)';
+    var accentSoft = cs.getPropertyValue('--c-accent-soft').trim() || 'rgba(91,155,248,.16)';
+    var accentBorder = cs.getPropertyValue('--c-accent-border').trim() || 'rgba(91,155,248,.5)';
+
+    var logo = new Image(); logo.crossOrigin = 'anonymous';
+    var logoReady = new Promise(function (res) { logo.onload = res; logo.onerror = res; logo.src = 'assets/logo.png'; });
+    var fontsReady = Promise.all([
+      document.fonts.load('400 40px OCRAStd'),
+      document.fonts.load('700 16px Geist'),
+      document.fonts.load('600 14px Geist')
+    ]).catch(function () { });
+
+    Promise.all([fontsReady, logoReady]).then(draw);
+
+    function chromeGrad(x, yTop, yBottom) {
+      var g = x.createLinearGradient(0, yTop, 0, yBottom);
+      g.addColorStop(0, '#f7f7fa'); g.addColorStop(0.32, '#c7c7d2'); g.addColorStop(0.55, '#f2f3f7'); g.addColorStop(1, '#93939f');
+      return g;
     }
-    meta('Member Since', (document.getElementById('cardJoined') || {}).textContent || '-', P);
-    meta('Status', 'Active', P + 150 * S, '#10B981');
-    x.restore();
-    rr(1 * S, 1 * S, W - 2 * S, H - 2 * S, 20 * S); x.strokeStyle = 'rgba(255,255,255,0.16)'; x.lineWidth = 2 * S; x.stroke();
-    var a = document.createElement('a'); a.href = cv.toDataURL('image/png'); a.download = 'dash-citizen-card.png';
-    document.body.appendChild(a); a.click(); a.remove();
+
+    function draw() {
+      var cvs = document.createElement('canvas'); cvs.width = W; cvs.height = H;
+      var x = cvs.getContext('2d');
+      function rr(px, py, w, h, r) { x.beginPath(); x.moveTo(px + r, py); x.arcTo(px + w, py, px + w, py + h, r); x.arcTo(px + w, py + h, px, py + h, r); x.arcTo(px, py + h, px, py, r); x.arcTo(px, py, px + w, py, r); x.closePath(); }
+      rr(0, 0, W, H, 20 * S); x.save(); x.clip();
+
+      var g = x.createLinearGradient(0, 0, W, H); g.addColorStop(0, cv1); g.addColorStop(0.55, cv2); g.addColorStop(1, cv3);
+      x.fillStyle = g; x.fillRect(0, 0, W, H);
+
+      var rg = x.createRadialGradient(W * 0.88, H * 0.05, 0, W * 0.88, H * 0.05, W * 0.42);
+      rg.addColorStop(0, glowColor); rg.addColorStop(1, 'rgba(0,0,0,0)');
+      x.globalCompositeOperation = 'screen'; x.fillStyle = rg; x.fillRect(0, 0, W, H);
+      x.globalCompositeOperation = 'source-over';
+
+      var vx = W / 1034, vy = H / 652;
+      var segs = [[0, 652, 1034, 0], [30, 70, 150, 190], [150, 190, 150, 280], [150, 280, 260, 280], [260, 280, 260, 380], [700, 60, 820, 180], [820, 180, 820, 80], [60, 450, 180, 570], [380, 500, 500, 620], [600, 440, 720, 560], [850, 380, 970, 500], [900, 240, 1010, 130]];
+      x.strokeStyle = lineColor; x.lineWidth = 1.3 * S; x.globalAlpha = 0.55;
+      segs.forEach(function (l) { x.beginPath(); x.moveTo(l[0] * vx, l[1] * vy); x.lineTo(l[2] * vx, l[3] * vy); x.stroke(); });
+      [46, 80, 114].forEach(function (r) { x.beginPath(); x.arc(890 * vx, 70 * vy, r * Math.min(vx, vy), 0, Math.PI * 2); x.stroke(); });
+      var dots = [[30, 70], [150, 190], [150, 280], [260, 280], [260, 380], [700, 60], [820, 180], [820, 80], [60, 450], [180, 570], [380, 500], [500, 620], [600, 440], [720, 560], [850, 380], [970, 500], [900, 240], [1010, 130]];
+      x.fillStyle = lineColor;
+      dots.forEach(function (d) { x.beginPath(); x.arc(d[0] * vx, d[1] * vy, 4 * Math.min(vx, vy), 0, Math.PI * 2); x.fill(); });
+      x.globalAlpha = 1;
+
+      var P = 26 * S;
+      var ls = 18 * S;
+      if (logo.complete && logo.naturalWidth) x.drawImage(logo, P, P - 3 * S, ls, ls);
+      x.fillStyle = '#fff'; x.font = '700 ' + (14 * S) + 'px Geist,Sora,sans-serif'; x.textBaseline = 'middle'; x.letterSpacing = (1.5 * S) + 'px';
+      x.fillText('DASH CITIZEN', P + ls + 8 * S, P - 3 * S + ls / 2); x.letterSpacing = '0px'; x.textBaseline = 'alphabetic';
+
+      var tierTxt = ((document.getElementById('cardTier') || {}).textContent || 'CITIZEN').toUpperCase();
+      x.font = '600 ' + (11 * S) + 'px Geist,"JetBrains Mono",monospace'; x.letterSpacing = (1 * S) + 'px';
+      var gemW = 15 * S, gap = 6 * S, padL = 10 * S, padR = 13 * S;
+      var tw = x.measureText(tierTxt).width;
+      var pw = gemW + gap + tw + padL + padR, ph = 30 * S;
+      var bx = W - P - pw, by = P - 4 * S;
+      rr(bx, by, pw, ph, ph / 2); x.fillStyle = accentSoft; x.fill();
+      x.strokeStyle = accentBorder; x.lineWidth = 1.5 * S; x.stroke();
+      x.save(); x.translate(bx + padL, by + ph / 2 - gemW / 2); var gs = gemW / 24; x.scale(gs, gs);
+      x.lineJoin = 'round';
+      x.beginPath(); x.moveTo(7, 3); x.lineTo(17, 3); x.lineTo(21, 9); x.lineTo(12, 21); x.lineTo(3, 9); x.closePath();
+      x.fillStyle = accent; x.globalAlpha = 0.28; x.fill(); x.globalAlpha = 1;
+      x.strokeStyle = accent; x.lineWidth = 1.4;
+      x.stroke();
+      x.beginPath(); x.moveTo(3, 9); x.lineTo(21, 9); x.moveTo(7, 3); x.lineTo(12, 9); x.moveTo(17, 3); x.lineTo(12, 9); x.moveTo(12, 9); x.lineTo(12, 21); x.stroke();
+      x.restore();
+      x.fillStyle = accent; x.textBaseline = 'middle';
+      x.fillText(tierTxt, bx + padL + gemW + gap, by + ph / 2 + 1 * S);
+      x.textBaseline = 'alphabetic'; x.letterSpacing = '0px';
+
+      var nameTxt = (document.getElementById('cardName') || {}).textContent || 'CITIZEN';
+      var nameY = H * 0.52;
+      x.font = '400 ' + (30 * S) + 'px OCRAStd,monospace';
+      x.fillStyle = chromeGrad(x, nameY - 26 * S, nameY + 6 * S);
+      x.fillText(nameTxt, P, nameY);
+      var handleTxt = (document.getElementById('cardHandle') || {}).textContent || '';
+      x.fillStyle = accent; x.font = '400 ' + (13 * S) + 'px "JetBrains Mono",monospace';
+      x.shadowColor = accent; x.shadowBlur = 8 * S;
+      x.fillText(handleTxt, P, nameY + 24 * S);
+      x.shadowBlur = 0;
+
+      var orbCy = nameY - 10 * S, orbR = 19 * S, orbCx = W - P - orbR;
+      var triX = orbCx - orbR - 14 * S;
+      x.beginPath(); x.moveTo(triX, orbCy - 7 * S); x.lineTo(triX, orbCy + 7 * S); x.lineTo(triX - 11 * S, orbCy); x.closePath();
+      x.fillStyle = accent; x.globalAlpha = 0.85; x.fill(); x.globalAlpha = 1;
+      x.save(); x.shadowColor = glowColor; x.shadowBlur = 22 * S;
+      var og = x.createRadialGradient(orbCx - orbR * 0.35, orbCy - orbR * 0.4, orbR * 0.05, orbCx, orbCy, orbR);
+      og.addColorStop(0, '#fff'); og.addColorStop(0.38, accent); og.addColorStop(1, cv2);
+      x.beginPath(); x.arc(orbCx, orbCy, orbR, 0, Math.PI * 2); x.fillStyle = og; x.fill(); x.restore();
+
+      var by2 = H - 40 * S, dotY = by2 - 22 * S;
+      x.font = '600 ' + (9.5 * S) + 'px Geist,"JetBrains Mono",monospace'; x.letterSpacing = (1 * S) + 'px';
+      var dotR = 3.5 * S, dotX = P + dotR;
+      x.save(); x.shadowColor = glowColor; x.shadowBlur = 8 * S;
+      x.beginPath(); x.arc(dotX, dotY, dotR, 0, Math.PI * 2); x.fillStyle = accent; x.fill(); x.restore();
+      x.fillStyle = '#8A9BBF'; x.fillText('STATUS', dotX + dotR + 6 * S, dotY + 1 * S);
+      x.letterSpacing = '0px';
+      var footGrad = chromeGrad(x, by2 - 2 * S, by2 + 16 * S);
+      x.font = '400 ' + (15 * S) + 'px OCRAStd,monospace'; x.fillStyle = footGrad;
+      x.fillText('ACTIVE', P, by2 + 14 * S);
+
+      var sinceTxt = (document.getElementById('cardJoined') || {}).textContent || '-';
+      x.textAlign = 'right';
+      x.font = '600 ' + (9.5 * S) + 'px Geist,"JetBrains Mono",monospace'; x.letterSpacing = (1 * S) + 'px'; x.fillStyle = '#8A9BBF';
+      x.fillText('MEMBER SINCE', W - P, dotY + 1 * S); x.letterSpacing = '0px';
+      x.font = '400 ' + (15 * S) + 'px OCRAStd,monospace'; x.fillStyle = footGrad;
+      x.fillText(sinceTxt, W - P, by2 + 14 * S);
+      x.textAlign = 'left';
+
+      x.restore();
+      rr(1 * S, 1 * S, W - 2 * S, H - 2 * S, 20 * S); x.strokeStyle = 'rgba(255,255,255,0.16)'; x.lineWidth = 2 * S; x.stroke();
+      var a = document.createElement('a'); a.href = cvs.toDataURL('image/png'); a.download = 'dash-citizen-card.png';
+      document.body.appendChild(a); a.click(); a.remove();
+    }
   }
   function shareX() {
-    var name = (document.getElementById('cardName') || {}).textContent || 'a Dash Citizen';
     var since = (document.getElementById('cardJoined') || {}).textContent || '2024';
     var lines = [
-      "I'm officially a Dash Citizen, verified since " + since + ".",
-      "Just verified my Dash Citizen card. HQ since " + since + ".",
-      "Dash HQ Citizen since " + since + ". One step ahead of the curve."
+      "Just claimed my Dash Citizen card. Verified since " + since + ", @DASHHQX.",
+      "Official Dash Citizen, verified since " + since + ". Come get yours, @DASHHQX.",
+      "Dash HQ Citizen since " + since + ". One step ahead of the curve. @DASHHQX",
+      "My Dash Citizen card just went live. Verified since " + since + ", @DASHHQX."
     ];
     var text = lines[Math.floor(Math.random() * lines.length)];
     var url = 'https://www.dashhq.site';
@@ -560,8 +676,10 @@ var WalletCard = (function () {
     });
   }
   // Branded download: composes the QR onto a Dash HQ-styled card (wordmark +
-  // dashhq.site + the address) instead of handing back a bare, anonymous QR
-  // PNG that carries no indication of what it's for or where it came from.
+  // dashhq.site + the full address) instead of handing back a bare,
+  // anonymous QR PNG that carries no indication of what it's for or where
+  // it came from. Height is measured then drawn (same two-pass approach as
+  // XRay.download) so there's no leftover blank space below the content.
   function downloadQr() {
     var qrImgEl = document.getElementById('wcardQr');
     var addr = document.getElementById('wcardAddr').dataset.full || document.getElementById('wcardAddr').textContent || '';
@@ -570,33 +688,64 @@ var WalletCard = (function () {
     var loader = new Image();
     loader.crossOrigin = 'anonymous';
     loader.onload = function () {
-      var W = 640, H = 860;
-      var cv = document.createElement('canvas'); cv.width = W; cv.height = H;
-      var x = cv.getContext('2d');
-      function rr(px, py, w, h, r) { x.beginPath(); x.moveTo(px + r, py); x.arcTo(px + w, py, px + w, py + h, r); x.arcTo(px + w, py + h, px, py + h, r); x.arcTo(px, py + h, px, py, r); x.arcTo(px, py, px + w, py, r); x.closePath(); }
-      rr(0, 0, W, H, 28); x.save(); x.clip();
-      var g = x.createLinearGradient(0, 0, W, H); g.addColorStop(0, '#10204f'); g.addColorStop(0.55, '#0a1330'); g.addColorStop(1, '#0a1a3e');
-      x.fillStyle = g; x.fillRect(0, 0, W, H);
-      var sh = x.createLinearGradient(0, 0, W, H); sh.addColorStop(0.30, 'rgba(255,255,255,0)'); sh.addColorStop(0.45, 'rgba(145,190,255,0.18)'); sh.addColorStop(0.52, 'rgba(145,190,255,0.10)'); sh.addColorStop(0.62, 'rgba(255,255,255,0)');
-      x.fillStyle = sh; x.fillRect(0, 0, W, H);
-      x.textAlign = 'center';
-      x.fillStyle = '#fff'; x.font = '800 30px Sora,sans-serif'; x.letterSpacing = '3px';
-      x.fillText('DASH HQ', W / 2, 76); x.letterSpacing = '0px';
-      x.fillStyle = '#5B9BF8'; x.font = '700 13px "JetBrains Mono",monospace'; x.letterSpacing = '2px';
-      x.fillText('WALLET ID · DASHHQ.SITE', W / 2, 104); x.letterSpacing = '0px';
-      var qrSize = 380, qrX = (W - qrSize) / 2, qrY = 148;
-      rr(qrX - 16, qrY - 16, qrSize + 32, qrSize + 32, 20); x.fillStyle = '#fff'; x.fill();
-      x.drawImage(loader, qrX, qrY, qrSize, qrSize);
-      x.fillStyle = '#E8EFFF'; x.font = '700 20px "JetBrains Mono",monospace';
-      x.fillText(short(addr), W / 2, qrY + qrSize + 66);
-      if (ens) {
-        x.fillStyle = '#5B9BF8'; x.font = '600 14px "JetBrains Mono",monospace';
-        x.fillText(ens, W / 2, qrY + qrSize + 92);
+      var W = 560, padX = 48;
+      function rr(ctx, px, py, w, h, r) { ctx.beginPath(); ctx.moveTo(px + r, py); ctx.arcTo(px + w, py, px + w, py + h, r); ctx.arcTo(px + w, py + h, px, py + h, r); ctx.arcTo(px, py + h, px, py, r); ctx.arcTo(px, py, px + w, py, r); ctx.closePath(); }
+      function fitFont(x, weight, text, maxW, startPx) {
+        var size = startPx;
+        x.font = weight + ' ' + size + 'px "JetBrains Mono",monospace';
+        while (x.measureText(text).width > maxW && size > 11) { size -= 1; x.font = weight + ' ' + size + 'px "JetBrains Mono",monospace'; }
+        return size;
       }
-      x.fillStyle = '#8A9BBF'; x.font = '400 11px "JetBrains Mono",monospace'; x.letterSpacing = '1px';
-      x.fillText('SCAN TO VERIFY · DASH HQ CITIZEN PORTAL', W / 2, H - 40);
-      x.restore();
-      rr(1, 1, W - 2, H - 2, 28); x.strokeStyle = 'rgba(255,255,255,0.16)'; x.lineWidth = 2; x.stroke();
+
+      function paint(x, H, finalize) {
+        if (finalize) {
+          rr(x, 0, 0, W, H, 28); x.save(); x.clip();
+          var g = x.createLinearGradient(0, 0, W, H); g.addColorStop(0, '#10204f'); g.addColorStop(0.55, '#0a1330'); g.addColorStop(1, '#0a1a3e');
+          x.fillStyle = g; x.fillRect(0, 0, W, H);
+          var sh = x.createLinearGradient(0, 0, W, H); sh.addColorStop(0.30, 'rgba(255,255,255,0)'); sh.addColorStop(0.45, 'rgba(145,190,255,0.18)'); sh.addColorStop(0.52, 'rgba(145,190,255,0.10)'); sh.addColorStop(0.62, 'rgba(255,255,255,0)');
+          x.fillStyle = sh; x.fillRect(0, 0, W, H);
+        }
+        var dy = 58;
+        x.textAlign = 'center';
+        x.fillStyle = '#fff'; x.font = '800 27px Sora,sans-serif'; x.letterSpacing = '3px';
+        x.fillText('DASH HQ', W / 2, dy); x.letterSpacing = '0px';
+        dy += 26;
+        x.fillStyle = '#5B9BF8'; x.font = '700 12px "JetBrains Mono",monospace'; x.letterSpacing = '2px';
+        x.fillText('WALLET ID · DASHHQ.SITE', W / 2, dy); x.letterSpacing = '0px';
+        dy += 40;
+        var qrSize = 250, qrX = (W - qrSize) / 2;
+        rr(x, qrX - 14, dy, qrSize + 28, qrSize + 28, 18); x.fillStyle = '#fff'; x.fill();
+        if (finalize) x.drawImage(loader, qrX, dy + 14, qrSize, qrSize);
+        dy += qrSize + 28 + 42;
+        if (ens) {
+          x.fillStyle = '#fff'; x.font = '700 18px "JetBrains Mono",monospace';
+          x.fillText(ens, W / 2, dy);
+          dy += 30;
+        }
+        var addrSize = fitFont(x, ens ? '400' : '700', addr, W - padX * 2, ens ? 14 : 16);
+        x.fillStyle = ens ? '#8A9BBF' : '#E8EFFF';
+        x.fillText(addr, W / 2, dy);
+        dy += 44;
+        x.strokeStyle = 'rgba(255,255,255,.1)'; x.lineWidth = 1;
+        x.beginPath(); x.moveTo(padX, dy); x.lineTo(W - padX, dy); x.stroke();
+        dy += 32;
+        x.fillStyle = '#8A9BBF'; x.font = '400 11px "JetBrains Mono",monospace'; x.letterSpacing = '1px';
+        x.fillText('SCAN TO VERIFY · DASH HQ CITIZEN PORTAL', W / 2, dy);
+        x.letterSpacing = '0px';
+        dy += 32;
+        if (finalize) {
+          x.restore();
+          rr(x, 1, 1, W - 2, H - 2, 28); x.strokeStyle = 'rgba(255,255,255,0.16)'; x.lineWidth = 2; x.stroke();
+        }
+        return dy;
+      }
+
+      var probeCv = document.createElement('canvas'); probeCv.width = W; probeCv.height = 1200;
+      var H = Math.ceil(paint(probeCv.getContext('2d'), 1200, false));
+
+      var cv = document.createElement('canvas'); cv.width = W; cv.height = H;
+      paint(cv.getContext('2d'), H, true);
+
       var a = document.createElement('a'); a.href = cv.toDataURL('image/png'); a.download = 'dash-hq-wallet-qr.png';
       document.body.appendChild(a); a.click(); a.remove();
     };
@@ -1430,47 +1579,146 @@ var XRay = (function () {
   var lastResult = null;
 
   // Result card export — same canvas-drawing approach as the membership
-  // card (CardActions.download), just laid out for a score reveal instead
-  // of an ID card.
+  // card (CardActions.download), laid out as a full stats reveal instead
+  // of an ID card. Height isn't fixed: a wallet with 6 sub-scores and long
+  // notes needs more room than one with 2, so paint() runs once against an
+  // oversized probe canvas purely to measure the real content height, then
+  // runs again for real at that exact height - that's what keeps this from
+  // either clipping content or leaving dead space at the bottom.
   function download() {
     if (!lastResult) return;
     var data = lastResult, tier = data.tier;
-    var W = 640, H = 800;
+    var accent = tier.color || '#5B9BF8';
+    var subs = (data.subs || []).filter(function (s) { return s.v != null; });
+    var crypto = data.crypto || {}, nft = data.nft || {}, defi = data.defi || {}, behavior = data.behavior || {};
+    var fmtOrDash = function (v) { return v == null ? '-' : v.toLocaleString('en-US'); };
+    var notesArr = [];
+    if ((crypto.otherChains || []).length) notesArr.push('Also active on ' + crypto.otherChains.join(', ') + '.');
+    if (crypto.unpricedTokens) notesArr.push(crypto.unpricedTokens + (crypto.unpricedTokens === 1 ? ' token not priced.' : ' tokens not priced.'));
+    var notesText = notesArr.join(' ');
+    var W = 680, padX = 48;
+
+    function rr(ctx, px, py, w, h, r) { ctx.beginPath(); ctx.moveTo(px + r, py); ctx.arcTo(px + w, py, px + w, py + h, r); ctx.arcTo(px + w, py + h, px, py + h, r); ctx.arcTo(px, py + h, px, py, r); ctx.arcTo(px, py, px + w, py, r); ctx.closePath(); }
+
+    function paint(x, H, finalize) {
+      if (finalize) {
+        rr(x, 0, 0, W, H, 28); x.save(); x.clip();
+        var g = x.createLinearGradient(0, 0, W, H); g.addColorStop(0, '#10204f'); g.addColorStop(0.55, '#0a1330'); g.addColorStop(1, '#0a1a3e');
+        x.fillStyle = g; x.fillRect(0, 0, W, H);
+        var sh = x.createLinearGradient(0, 0, W, H); sh.addColorStop(0.30, 'rgba(255,255,255,0)'); sh.addColorStop(0.45, 'rgba(145,190,255,0.18)'); sh.addColorStop(0.52, 'rgba(145,190,255,0.10)'); sh.addColorStop(0.62, 'rgba(255,255,255,0)');
+        x.fillStyle = sh; x.fillRect(0, 0, W, H);
+      }
+      var dy = 46;
+      x.textAlign = 'center';
+      x.fillStyle = '#5B9BF8'; x.font = '700 13px "JetBrains Mono",monospace'; x.letterSpacing = '2px';
+      x.fillText('DASH HQ · WALLET X-RAY', W / 2, dy); x.letterSpacing = '0px';
+      dy += 84;
+      x.font = '68px sans-serif'; x.fillText(tier.emoji, W / 2, dy);
+      dy += 40;
+      x.fillStyle = '#fff'; x.font = '800 32px Sora,sans-serif';
+      x.fillText(tier.name, W / 2, dy);
+      dy += 24;
+      x.fillStyle = '#8A9BBF'; x.font = '400 13px "JetBrains Mono",monospace';
+      x.fillText(data.ensName || short(data.address), W / 2, dy);
+      dy += 92;
+      var scoreTxt = String(data.composite);
+      x.fillStyle = accent; x.font = '800 80px "JetBrains Mono",monospace';
+      x.fillText(scoreTxt, W / 2, dy);
+      x.fillStyle = '#8A9BBF'; x.font = '600 14px "JetBrains Mono",monospace';
+      x.fillText('/ 100', W / 2, dy + 26);
+      dy += 40;
+      var badgeTxt = data.archetype;
+      x.font = '700 14px "JetBrains Mono",monospace';
+      var bw = x.measureText(badgeTxt).width + 34, bh = 40;
+      rr(x, (W - bw) / 2, dy, bw, bh, bh / 2); x.fillStyle = 'rgba(91,155,248,.16)'; x.fill();
+      x.strokeStyle = 'rgba(91,155,248,.4)'; x.lineWidth = 1.5; x.stroke();
+      x.fillStyle = accent; x.fillText(badgeTxt, W / 2, dy + bh / 2 + 5);
+      dy += bh + 26;
+      x.fillStyle = '#C8D4EE'; x.font = '400 15px "JetBrains Mono",monospace';
+      var flavorLines = wrapText(x, tier.flavor, W - padX * 2 - 40);
+      flavorLines.forEach(function (line, i) { x.fillText(line, W / 2, dy + i * 22); });
+      dy += flavorLines.length * 22 + 30;
+
+      x.strokeStyle = 'rgba(255,255,255,.1)'; x.lineWidth = 1;
+      x.beginPath(); x.moveTo(padX, dy); x.lineTo(W - padX, dy); x.stroke();
+      dy += 30;
+
+      x.textAlign = 'left';
+      if (subs.length) {
+        x.fillStyle = '#8A9BBF'; x.font = '700 12px "JetBrains Mono",monospace'; x.letterSpacing = '1.5px';
+        x.fillText('SCORE BREAKDOWN', padX, dy); x.letterSpacing = '0px';
+        dy += 26;
+        subs.forEach(function (s) {
+          x.fillStyle = '#C8D4EE'; x.font = '400 13px "JetBrains Mono",monospace';
+          x.fillText(s.k, padX, dy);
+          x.textAlign = 'right'; x.fillStyle = '#fff'; x.font = '700 13px "JetBrains Mono",monospace';
+          x.fillText(String(s.v), W - padX, dy);
+          x.textAlign = 'left';
+          var trackY = dy + 8, trackW = W - padX * 2, pct = Math.max(0, Math.min(100, s.v)) / 100;
+          rr(x, padX, trackY, trackW, 4, 2); x.fillStyle = 'rgba(255,255,255,.08)'; x.fill();
+          rr(x, padX, trackY, Math.max(4, trackW * pct), 4, 2); x.fillStyle = accent; x.fill();
+          dy += 34;
+        });
+        dy += 18;
+        x.strokeStyle = 'rgba(255,255,255,.1)'; x.beginPath(); x.moveTo(padX, dy); x.lineTo(W - padX, dy); x.stroke();
+        dy += 30;
+      }
+
+      function kvSection(title, rows) {
+        x.fillStyle = '#8A9BBF'; x.font = '700 12px "JetBrains Mono",monospace'; x.letterSpacing = '1.5px';
+        x.fillText(title, padX, dy); x.letterSpacing = '0px';
+        dy += 26;
+        rows.forEach(function (r) {
+          x.fillStyle = '#8A9BBF'; x.font = '400 13px "JetBrains Mono",monospace';
+          x.fillText(r[0], padX, dy);
+          x.textAlign = 'right'; x.fillStyle = '#E8EFFF'; x.font = '700 13px "JetBrains Mono",monospace';
+          x.fillText(r[1], W - padX, dy);
+          x.textAlign = 'left';
+          dy += 28;
+        });
+      }
+
+      kvSection('💰 CRYPTO HOLDINGS', [
+        ['Net Worth (est.)', '$' + (crypto.netWorthUsd || 0).toLocaleString('en-US')],
+        ['ETH Balance', (crypto.ethBalance || 0) + ' ETH'],
+        ['Distinct Tokens', String(crypto.distinctTokens || 0)]
+      ]);
+      var noteLines = notesText ? wrapText(x, notesText, W - padX * 2) : [];
+      if (noteLines.length) {
+        x.fillStyle = '#5A6A8A'; x.font = '400 11px "JetBrains Mono",monospace';
+        noteLines.forEach(function (l, i) { x.fillText(l, padX, dy + i * 16); });
+        dy += noteLines.length * 16 + 6;
+      }
+      dy += 22;
+      x.strokeStyle = 'rgba(255,255,255,.1)'; x.beginPath(); x.moveTo(padX, dy); x.lineTo(W - padX, dy); x.stroke();
+      dy += 30;
+
+      kvSection('📊 ON-CHAIN ACTIVITY', [
+        ['Transactions', fmtOrDash(behavior.txCount)],
+        ['Token Transfers', fmtOrDash(defi.tokenTransfers)],
+        ['NFT Collections', String(nft.collections || 0)]
+      ]);
+      dy += 12;
+
+      x.textAlign = 'center';
+      x.fillStyle = '#8A9BBF'; x.font = '400 11px "JetBrains Mono",monospace'; x.letterSpacing = '1px';
+      x.fillText('HEURISTIC ON-CHAIN SCORE · DASHHQ.SITE', W / 2, dy + 20);
+      x.letterSpacing = '0px';
+      dy += 46;
+
+      if (finalize) {
+        x.restore();
+        rr(x, 1, 1, W - 2, H - 2, 28); x.strokeStyle = 'rgba(255,255,255,0.16)'; x.lineWidth = 2; x.stroke();
+      }
+      return dy;
+    }
+
+    var probeCv = document.createElement('canvas'); probeCv.width = W; probeCv.height = 3000;
+    var H = Math.ceil(paint(probeCv.getContext('2d'), 3000, false));
+
     var cv = document.createElement('canvas'); cv.width = W; cv.height = H;
-    var x = cv.getContext('2d');
-    function rr(px, py, w, h, r) { x.beginPath(); x.moveTo(px + r, py); x.arcTo(px + w, py, px + w, py + h, r); x.arcTo(px + w, py + h, px, py + h, r); x.arcTo(px, py + h, px, py, r); x.arcTo(px, py, px + w, py, r); x.closePath(); }
-    rr(0, 0, W, H, 28); x.save(); x.clip();
-    var g = x.createLinearGradient(0, 0, W, H); g.addColorStop(0, '#10204f'); g.addColorStop(0.55, '#0a1330'); g.addColorStop(1, '#0a1a3e');
-    x.fillStyle = g; x.fillRect(0, 0, W, H);
-    var sh = x.createLinearGradient(0, 0, W, H); sh.addColorStop(0.30, 'rgba(255,255,255,0)'); sh.addColorStop(0.45, 'rgba(145,190,255,0.18)'); sh.addColorStop(0.52, 'rgba(145,190,255,0.10)'); sh.addColorStop(0.62, 'rgba(255,255,255,0)');
-    x.fillStyle = sh; x.fillRect(0, 0, W, H);
-    x.textAlign = 'center';
-    x.fillStyle = '#5B9BF8'; x.font = '700 13px "JetBrains Mono",monospace'; x.letterSpacing = '2px';
-    x.fillText('DASH HQ · WALLET X-RAY', W / 2, 64); x.letterSpacing = '0px';
-    x.font = '64px sans-serif';
-    x.fillText(tier.emoji, W / 2, 168);
-    x.fillStyle = '#fff'; x.font = '800 34px Sora,sans-serif';
-    x.fillText(tier.name, W / 2, 214);
-    x.fillStyle = '#8A9BBF'; x.font = '400 14px "JetBrains Mono",monospace';
-    x.fillText(data.ensName || short(data.address), W / 2, 242);
-    var scoreTxt = String(data.composite);
-    x.fillStyle = '#5B9BF8'; x.font = '800 86px "JetBrains Mono",monospace';
-    x.fillText(scoreTxt, W / 2, 350);
-    x.fillStyle = '#8A9BBF'; x.font = '600 15px "JetBrains Mono",monospace';
-    x.fillText('/ 100', W / 2, 378);
-    var badgeTxt = data.archetype;
-    x.font = '700 15px "JetBrains Mono",monospace';
-    var bw = x.measureText(badgeTxt).width + 36, bh = 38;
-    rr((W - bw) / 2, 410, bw, bh, bh / 2); x.fillStyle = 'rgba(91,155,248,.16)'; x.fill();
-    x.strokeStyle = 'rgba(91,155,248,.4)'; x.lineWidth = 1.5; x.stroke();
-    x.fillStyle = '#5B9BF8'; x.fillText(badgeTxt, W / 2, 410 + bh / 2 + 5);
-    x.fillStyle = '#C8D4EE'; x.font = '400 14px "JetBrains Mono",monospace';
-    var flavorLines = wrapText(x, tier.flavor, W - 120);
-    flavorLines.forEach(function (line, i) { x.fillText(line, W / 2, 490 + i * 22); });
-    x.fillStyle = '#8A9BBF'; x.font = '400 11px "JetBrains Mono",monospace'; x.letterSpacing = '1px';
-    x.fillText('HEURISTIC ON-CHAIN SCORE · DASHHQ.SITE', W / 2, H - 40);
-    x.restore();
-    rr(1, 1, W - 2, H - 2, 28); x.strokeStyle = 'rgba(255,255,255,0.16)'; x.lineWidth = 2; x.stroke();
+    paint(cv.getContext('2d'), H, true);
+
     var a = document.createElement('a'); a.href = cv.toDataURL('image/png'); a.download = 'dash-hq-wallet-xray.png';
     document.body.appendChild(a); a.click(); a.remove();
   }
@@ -1487,7 +1735,12 @@ var XRay = (function () {
   function shareX() {
     if (!lastResult) return;
     var data = lastResult;
-    var text = 'Scanned my wallet on Dash HQ\'s Wallet X-Ray: ' + data.composite + '/100, ' + data.tier.name + ' (' + data.archetype + '). Check yours →';
+    var lines = [
+      data.tier.emoji + ' ' + data.tier.name + ', ' + data.composite + '/100 on Dash HQ\'s Wallet X-Ray. Archetype: ' + data.archetype + '. Go scan yours, @DASHHQX.',
+      'My wallet just scored ' + data.composite + '/100 on Wallet X-Ray. ' + data.tier.emoji + ' ' + data.tier.name + ' tier, ' + data.archetype + '. Try @DASHHQX.',
+      'Wallet X-Ray says I\'m a ' + data.tier.emoji + ' ' + data.tier.name + ' (' + data.composite + '/100, ' + data.archetype + '). Scan yours on @DASHHQX.'
+    ];
+    var text = lines[Math.floor(Math.random() * lines.length)];
     var url = 'https://www.dashhq.site';
     var intent = 'https://twitter.com/intent/tweet?text=' + encodeURIComponent(text) + '&url=' + encodeURIComponent(url);
     window.open(intent, '_blank', 'noopener,width=600,height=520');
