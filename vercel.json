@@ -11,7 +11,8 @@
     { "src": "app.js",        "use": "@vercel/static" },
     { "src": "portal.js",     "use": "@vercel/static" },
     { "src": "apply.js",      "use": "@vercel/static" },
-    { "src": "assets/**",     "use": "@vercel/static" }
+    { "src": "assets/**",     "use": "@vercel/static" },
+    { "src": "fonts/**",      "use": "@vercel/static" }
   ],
   "routes": [
     { "src": "/auth/(.*)",     "dest": "/api/index.py" },
