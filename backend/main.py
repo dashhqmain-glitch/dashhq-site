@@ -182,7 +182,7 @@ async def _discord_callback_flow(code: str) -> RedirectResponse:
             "avatar": avatar_url,
             "is_member": is_member,
             "tier": tier,
-            "joined": joined_year or "—",
+            "joined": joined_year or "-",
             "iat": int(time.time()),
             "exp": int(time.time()) + 3600,
         }
@@ -348,9 +348,9 @@ class ApplicationIn(BaseModel):
     def _min_8_words(cls, v: str) -> str:
         v = v.strip()
         if len(v.split()) < 8:
-            raise ValueError("must be at least 8 words — give a real answer, not a one-liner")
+            raise ValueError("must be at least 8 words, give a real answer, not a one-liner")
         if len(v) > 600:
-            raise ValueError("must be 600 characters or fewer — keep it concise")
+            raise ValueError("must be 600 characters or fewer, keep it concise")
         return v
 
     @field_validator("communities")
@@ -358,7 +358,7 @@ class ApplicationIn(BaseModel):
     def _min_2_words(cls, v: str) -> str:
         v = v.strip()
         if len(v) > 600:
-            raise ValueError("must be 600 characters or fewer — keep it concise")
+            raise ValueError("must be 600 characters or fewer, keep it concise")
         if len(v.split()) < 2:
             raise ValueError("list at least one real community")
         return v
@@ -423,7 +423,7 @@ def _application_embed(app_row: dict, status: str = "pending", reviewer: str = N
         # straight out of the embed to hand to the applicant.
         fields.append({"name": "Invite Link (one-time use)", "value": invite_url, "inline": False})
     return {
-        "title": f"New Citizenship Application — {app_row['name']}",
+        "title": f"New Citizenship Application: {app_row['name']}",
         "color": color,
         "fields": fields,
         "footer": {"text": footer},
@@ -609,7 +609,7 @@ async def discord_interactions(request: Request):
                 invite_url = await _create_one_time_invite(client)
     except (httpx.HTTPError, KeyError, IndexError):
         logger.exception("Discord interaction failed for application %s", app_id)
-        return {"type": 4, "data": {"content": "Something went wrong saving that — please try the button again.", "flags": 64}}
+        return {"type": 4, "data": {"content": "Something went wrong saving that. Please try the button again.", "flags": 64}}
 
     # Accept/Decline buttons are done their job and go away, but the X
     # profile link stays on the message permanently so the team can always
@@ -1341,14 +1341,14 @@ async def nft_discover(request: Request, tab: str = Query("trending")):
 # heuristic (the UI calls it that) built entirely from these real numbers —
 # no fabricated/random values, unlike a hash-based mock.
 _XRAY_TIERS = [
-    {"min": 0, "emoji": "🦐", "name": "Shrimp", "color": "#8A9BBF", "flavor": "Just getting started on-chain — every whale began here."},
+    {"min": 0, "emoji": "🦐", "name": "Shrimp", "color": "#8A9BBF", "flavor": "Just getting started on-chain, every whale began here."},
     {"min": 14, "emoji": "🦀", "name": "Crab", "color": "#5A6A8A", "flavor": "Building a position, one transaction at a time."},
     {"min": 28, "emoji": "🐙", "name": "Octopus", "color": "#22D3EE", "flavor": "Dabbling across a few chains and protocols."},
     {"min": 42, "emoji": "🐟", "name": "Fish", "color": "#5B9BF8", "flavor": "An established, well-diversified retail wallet."},
     {"min": 58, "emoji": "🐬", "name": "Dolphin", "color": "#4D72FF", "flavor": "A serious, well-rounded on-chain presence."},
     {"min": 72, "emoji": "🦈", "name": "Shark", "color": "#1B42FF", "flavor": "A high-roller with real depth across the board."},
     {"min": 85, "emoji": "🐋", "name": "Whale", "color": "#F59E0B", "flavor": "Moves markets. Deep holdings, deep history."},
-    {"min": 94, "emoji": "🐳", "name": "Humpback", "color": "#F59E0B", "flavor": "Apex on-chain presence — the top of the curve."},
+    {"min": 94, "emoji": "🐳", "name": "Humpback", "color": "#F59E0B", "flavor": "Apex on-chain presence: the top of the curve."},
 ]
 
 
@@ -1652,7 +1652,7 @@ def _cmd_options(payload: dict) -> dict:
 
 def _fmt_usd(n) -> str:
     if n is None:
-        return "—"
+        return "-"
     if n >= 1e9:
         return f"${n / 1e9:.2f}B"
     if n >= 1e6:
@@ -1664,7 +1664,7 @@ def _fmt_usd(n) -> str:
 
 def _fmt_price(n) -> str:
     if n is None:
-        return "—"
+        return "-"
     if n >= 1:
         return f"${n:,.2f}"
     if n >= 0.01:
@@ -1695,7 +1695,7 @@ async def _cmd_xray(address: str) -> dict:
         pron = "it isn't" if n == 1 else "they aren't"
         fields.append({"name": "Note", "value": f"{n} {noun} a real balance but have no market price available, so {pron} included in Net Worth.", "inline": False})
     if crypto.get("tokenDataOk") is False:
-        fields.append({"name": "Note", "value": "Token holdings could not be fully loaded this scan — Net Worth and Distinct Tokens may be incomplete. Try again.", "inline": False})
+        fields.append({"name": "Note", "value": "Token holdings could not be fully loaded this scan. Net Worth and Distinct Tokens may be incomplete. Try again.", "inline": False})
     return {
         "title": f"{tier['emoji']} {tier['name']} · {data.get('ensName') or address}",
         "description": tier["flavor"],
@@ -1711,21 +1711,21 @@ async def _cmd_gas(chain: str) -> dict:
     label = _GAS_CHAIN_DISPLAY.get(chain, chain.title())
     if chain == "solana":
         fees = data.get("solana_fees")
-        big = f"{fees['avg']:,} µ◎/CU" if fees else "—"
+        big = f"{fees['avg']:,} µ◎/CU" if fees else "-"
     else:
         gwei = data.get("gwei")
-        big = f"{gwei:.4f} gwei" if gwei is not None else "—"
+        big = f"{gwei:.4f} gwei" if gwei is not None else "-"
     fields = [{"name": "Current", "value": big, "inline": True}]
     if data.get("native_usd") is not None:
         fields.append({"name": "Native token price", "value": _fmt_usd(data["native_usd"]), "inline": True})
-    return {"title": f"⛽ Gas — {label}", "color": EMBED_COLOR, "fields": fields, "footer": TOOLKIT_FOOTER}
+    return {"title": f"⛽ Gas: {label}", "color": EMBED_COLOR, "fields": fields, "footer": TOOLKIT_FOOTER}
 
 
 async def _cmd_scan(address: str) -> dict:
     data = await _ca_scan_core(address)
     fields = [
         {"name": "Price", "value": _fmt_price(data["priceUsd"]), "inline": True},
-        {"name": "24h Change", "value": f"{data['change24h']:+.2f}%" if data.get("change24h") is not None else "—", "inline": True},
+        {"name": "24h Change", "value": f"{data['change24h']:+.2f}%" if data.get("change24h") is not None else "-", "inline": True},
         {"name": "Chain / DEX", "value": f"{data['chain']} · {data['dex']}", "inline": True},
         {"name": "Market Cap", "value": _fmt_usd(data["marketCap"]), "inline": True},
         {"name": "Liquidity", "value": _fmt_usd(data["liquidityUsd"]), "inline": True},
@@ -1748,7 +1748,7 @@ async def _cmd_rug(address: str, chain_id: str) -> dict:
     checklist = "\n".join(f"{'✅' if c['pass'] else '❌'} {c['label']}" for c in data["checks"])
     label = _RUG_CHAIN_DISPLAY.get(chain_id, chain_id)
     return {
-        "title": f"🛡️ {data['label']} — {label}",
+        "title": f"🛡️ {data['label']}: {label}",
         "description": checklist,
         "color": color,
         "footer": TOOLKIT_FOOTER,
@@ -1762,9 +1762,9 @@ async def _cmd_nft(query: str) -> dict:
     c = results[0]
     check = "✅ " if c.get("verified") else ""
     fields = [
-        {"name": "Floor", "value": f"{c['floor']:.3f} {c['symbol']}" if c.get("floor") is not None else "—", "inline": True},
-        {"name": "24h Volume", "value": f"{c['vol1d']:.2f} {c['symbol']}" if c.get("vol1d") is not None else "—", "inline": True},
-        {"name": "Owners", "value": f"{c['owners']:,}" if c.get("owners") is not None else "—", "inline": True},
+        {"name": "Floor", "value": f"{c['floor']:.3f} {c['symbol']}" if c.get("floor") is not None else "-", "inline": True},
+        {"name": "24h Volume", "value": f"{c['vol1d']:.2f} {c['symbol']}" if c.get("vol1d") is not None else "-", "inline": True},
+        {"name": "Owners", "value": f"{c['owners']:,}" if c.get("owners") is not None else "-", "inline": True},
     ]
     if c.get("category"):
         fields.append({"name": "Category", "value": c["category"], "inline": True})
@@ -1796,9 +1796,9 @@ async def _cmd_pairs(chain: str) -> dict:
     pools = await _pairs_core(chain, limit=5)
     label = _PAIRS_CHAIN_DISPLAY.get(chain, chain.title())
     if not pools:
-        return {"title": f"🔥 Fresh Pairs — {label}", "description": "No pairs found right now.", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
-    lines = [f"[{p['name']}]({p['url']}) — {_fmt_usd(p['liquidityUsd'])} liquidity" for p in pools]
-    return {"title": f"🔥 Fresh Pairs — {label}", "description": "\n".join(lines), "color": EMBED_COLOR, "footer": TOOLKIT_FOOTER}
+        return {"title": f"🔥 Fresh Pairs: {label}", "description": "No pairs found right now.", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
+    lines = [f"[{p['name']}]({p['url']}): {_fmt_usd(p['liquidityUsd'])} liquidity" for p in pools]
+    return {"title": f"🔥 Fresh Pairs: {label}", "description": "\n".join(lines), "color": EMBED_COLOR, "footer": TOOLKIT_FOOTER}
 
 
 async def _cmd_watchlist(payload: dict, discord_user_id: str) -> dict:
@@ -1812,12 +1812,12 @@ async def _cmd_watchlist(payload: dict, discord_user_id: str) -> dict:
     if sub_name == "list":
         collections = await _discord_watchlist_list(discord_user_id)
         if not collections:
-            return {"title": "📌 Your NFT Watchlist", "description": "Nothing watched yet — try `/watchlist add`.", "color": EMBED_COLOR, "footer": TOOLKIT_FOOTER}
+            return {"title": "📌 Your NFT Watchlist", "description": "Nothing watched yet. Try `/watchlist add`.", "color": EMBED_COLOR, "footer": TOOLKIT_FOOTER}
         lines = []
         for c in collections:
             check = "✅ " if c.get("verified") else ""
-            floor = f"{c['floor']:.3f} {c['symbol']}" if c.get("floor") is not None else "—"
-            lines.append(f"{check}**[{c['name']}]({c.get('openseaUrl')})** — Floor {floor}")
+            floor = f"{c['floor']:.3f} {c['symbol']}" if c.get("floor") is not None else "-"
+            lines.append(f"{check}**[{c['name']}]({c.get('openseaUrl')})**: Floor {floor}")
         return {"title": "📌 Your NFT Watchlist", "description": "\n".join(lines), "color": EMBED_COLOR, "footer": TOOLKIT_FOOTER}
 
     query = (sub_opts.get("collection") or "").strip()
@@ -1893,7 +1893,7 @@ TOOLKIT_TOOLS = {
     },
     "scan": {
         "emoji": "🔍", "label": "CA Scanner",
-        "short": "Look up a token contract — price, liquidity, volume",
+        "short": "Look up a token contract: price, liquidity, volume",
         "usage": "/scan address:<token contract address>",
         "example": "/scan address:0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
     },
@@ -1946,7 +1946,7 @@ def _dashboard_select_component() -> dict:
 
 
 def _dashboard_response() -> dict:
-    lines = [f"{t['emoji']} **{t['label']}** — {t['short']}" for t in TOOLKIT_TOOLS.values()]
+    lines = [f"{t['emoji']} **{t['label']}**: {t['short']}" for t in TOOLKIT_TOOLS.values()]
     embed = {
         "title": "🧰 Dash HQ Toolkit",
         "description": "Pick a tool below to see exactly how to use it.\n\n" + "\n".join(lines),
@@ -1982,7 +1982,7 @@ async def _handle_toolkit_select(payload: dict) -> dict:
 
 async def _handle_toolkit_command(payload: dict) -> dict:
     if not _is_citizen(payload):
-        return {"type": 4, "data": {"content": "This command is reserved for verified Dash HQ citizens — head to the site and verify with Discord to unlock it.", "flags": 64}}
+        return {"type": 4, "data": {"content": "This command is reserved for verified Dash HQ citizens. Head to the site and verify with Discord to unlock it.", "flags": 64}}
 
     name = (payload.get("data") or {}).get("name")
     opts = _cmd_options(payload)
