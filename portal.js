@@ -63,7 +63,7 @@ function updateCard(data) {
   set('profileHandle', data.handle);
   set('profileTierTag', `★ ${data.tier}`);
   set('profileSinceTag', `Citizen since ${data.joined}`);
-  ['cardAvatar', 'dtopAvatar', 'profileAvatar'].forEach(id => {
+  ['dtopAvatar', 'profileAvatar'].forEach(id => {
     const av = document.getElementById(id);
     if (av && data.avatar) { av.src = data.avatar; av.alt = data.display_name; }
   });
