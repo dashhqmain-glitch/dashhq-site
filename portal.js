@@ -151,12 +151,16 @@ async function init() {
 // ── DASHBOARD SHELL — sidebar nav, collapse, mobile drawer, bento overview ───
 var Dash = (function () {
   var inited = false;
+  var currentPage = 'overview';
   function go(page) {
     document.querySelectorAll('.dsb-item').forEach(function (t) { t.classList.toggle('active', t.dataset.page === page); });
     document.querySelectorAll('.dpage').forEach(function (p) { p.classList.toggle('on', p.dataset.page === page); });
     closeMobile();
     var c = document.getElementById('dcontent');
     if (c) c.scrollTop = 0;
+    if (currentPage === 'pairs' && page !== 'pairs' && typeof Pairs !== 'undefined') Pairs.onLeave();
+    if (page === 'pairs' && typeof Pairs !== 'undefined') Pairs.onEnter();
+    currentPage = page;
     if (page === 'overview') renderBento();
   }
   function toggleCollapse() { document.getElementById('dash').classList.toggle('collapsed'); }
@@ -726,11 +730,28 @@ var Pairs = (function () {
     cache[chain] = await fetchNetwork(chain);
     render();
   }
+  var ageTicker = null;
+  function onEnter() {
+    // The "Xm ago" labels only updated on a full network refetch (every
+    // 45s) or a filter change, so they visibly sat frozen for most of
+    // that window even though the underlying data was fine, that read as
+    // "not refreshing" even when it was. A cheap local re-render (no
+    // network call, just reformats the already-cached list) keeps them
+    // visibly live without adding any extra load. Also refresh
+    // immediately on entering the page instead of waiting for whatever
+    // point the background interval happens to be at.
+    refresh();
+    if (ageTicker) clearInterval(ageTicker);
+    ageTicker = setInterval(render, 15000);
+  }
+  function onLeave() {
+    if (ageTicker) { clearInterval(ageTicker); ageTicker = null; }
+  }
   function init() {
     refresh();
     setInterval(refresh, 45000);
   }
-  return { init: init, render: render, refresh: refresh, copyAddress: copyAddress };
+  return { init: init, render: render, refresh: refresh, copyAddress: copyAddress, onEnter: onEnter, onLeave: onLeave };
 })();
 
 // ── 7. CA SCANNER — real DexScreener data, chain auto-detected ───────────────

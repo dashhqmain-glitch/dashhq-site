@@ -174,6 +174,8 @@
 .bento{display:grid;grid-template-columns:repeat(4,1fr);grid-auto-rows:150px;gap:14px}
 .bento-tile{border:1px solid var(--border);border-radius:16px;background:var(--card);padding:18px;cursor:pointer;transition:all .2s;display:flex;flex-direction:column;justify-content:space-between}
 .bento-tile:hover{border-color:rgba(77,114,255,.5);background:rgba(27,66,255,.07);transform:translateY(-2px)}
+.bento-tile-static{cursor:default}
+.bento-tile-static:hover{border-color:var(--border);background:var(--card);transform:none}
 .bh-top{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .bh-eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--sky)}
 .bh-cta{font-family:var(--mono);font-size:11px;color:var(--muted2)}
