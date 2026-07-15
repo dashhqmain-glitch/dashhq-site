@@ -134,6 +134,7 @@
 .dsb-tag{margin-left:auto;flex:none;font-family:var(--mono);font-size:9.5px;letter-spacing:.06em;color:var(--gold);background:rgba(245,158,11,.14);border:1px solid rgba(245,158,11,.4);border-radius:20px;padding:2px 7px}
 .dsb-foot{padding:14px 18px 18px;border-top:1px solid var(--border);flex:none}
 .dsb-signout{width:100%;justify-content:center;padding:11px}
+.dsb-signout svg{width:16px;height:16px;flex:none;stroke:currentColor;fill:none;stroke-width:1.8}
 
 .dsb-scrim{display:none}
 
