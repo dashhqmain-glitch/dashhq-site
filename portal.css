@@ -80,54 +80,31 @@
 .welcome{font-family:var(--mono);font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--green);margin-bottom:18px;display:inline-flex;align-items:center;gap:8px}
 .welcome .d{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 8px var(--green)}
 
-/* Card themes: each is just a set of custom properties, the .card markup
-   below never changes, only which theme class is on it. Gold/Purple/Red
-   colors match the source card designs; Blue reuses the site's own brand
-   blue (its gradient stops are the site's original, un-themed card look);
-   Mono is silver-on-black for a colorless option. */
-.card.theme-gold{--c-1:#000;--c-2:#1a1400;--c-3:#3d3000;--c-line:rgba(240,201,74,.55);--c-accent:#F0C94A;--c-accent-soft:rgba(240,201,74,.16);--c-accent-border:rgba(240,201,74,.5);--c-glow:rgba(240,201,74,.4)}
-.card.theme-purple{--c-1:#000;--c-2:#160a2e;--c-3:#2d1259;--c-line:rgba(151,124,246,.5);--c-accent:#977CF6;--c-accent-soft:rgba(151,124,246,.16);--c-accent-border:rgba(151,124,246,.5);--c-glow:rgba(151,124,246,.4)}
-.card.theme-red{--c-1:#000;--c-2:#1c0508;--c-3:#3d0a10;--c-line:rgba(240,90,71,.5);--c-accent:#F0473A;--c-accent-soft:rgba(240,71,58,.16);--c-accent-border:rgba(240,71,58,.5);--c-glow:rgba(240,71,58,.4)}
-.card.theme-blue{--c-1:#10204f;--c-2:#0a1330;--c-3:#0a1a3e;--c-line:rgba(91,155,248,.5);--c-accent:#5B9BF8;--c-accent-soft:rgba(91,155,248,.16);--c-accent-border:rgba(91,155,248,.5);--c-glow:rgba(91,155,248,.4)}
+/* Card art: all four themes are the actual Figma card designs exported as
+   one pixel-exact background photo each (circuit pattern, gradient,
+   border, logo, DASH HQ wordmark, CITIZEN badge+gem, orb, status/ACTIVE
+   and the "member since" label all baked in) - only the citizen's real
+   name/handle/join-year render as live text, positioned at the exact spot
+   those fields sit in the source design. container-type lets that live
+   text scale in lockstep with the card's rendered width at any screen
+   size, matching the fixed 1034x652 design canvas ratio exactly. */
+.card.theme-gold{--c-photo:url('assets/card-bg-gold.jpg')}
+.card.theme-purple{--c-photo:url('assets/card-bg-purple.jpg')}
+.card.theme-red{--c-photo:url('assets/card-bg-red.jpg')}
+.card.theme-blue{--c-photo:url('assets/card-bg-blue.jpg')}
 
-.card{position:relative;width:100%;aspect-ratio:1.586/1;border-radius:18px;overflow:hidden;border:1.5px solid var(--c-accent-border);background:linear-gradient(135deg,var(--c-1),var(--c-2) 55%,var(--c-3));text-align:left;padding:24px;box-shadow:0 30px 70px -28px var(--c-glow)}
+.card{position:relative;width:100%;aspect-ratio:1034/652;border-radius:3.87%/6.13%;overflow:hidden;background-image:var(--c-photo);background-size:cover;background-position:center;background-color:#000;text-align:left;container-type:inline-size;box-shadow:0 30px 70px -28px rgba(0,0,0,.55)}
 
-/* Gold/Purple/Red are the actual source card artwork (logo, badge, gem,
-   orb, and circuit pattern baked in as one pixel-exact photo) with only
-   the citizen's real name/handle/join-year overlaid as live text at the
-   same spot those fields sit in the source design - not a hand-rebuilt
-   approximation. Blue has no source art (it's an extrapolated scheme
-   using the site's own brand color), so it keeps the hand-drawn
-   circuit/badge/orb built below. Both share the exact same absolute
-   positions for name/handle/orb/status/year so switching themes never
-   shifts anything on screen. */
-.card.card-photo{background-image:var(--c-photo);background-size:cover;background-position:center;background-color:#000}
-.card.card-photo.theme-gold{--c-photo:url('assets/card-bg-gold.jpg')}
-.card.card-photo.theme-purple{--c-photo:url('assets/card-bg-purple.jpg')}
-.card.card-photo.theme-red{--c-photo:url('assets/card-bg-red.jpg')}
-.card.card-photo .card-circuit,.card.card-photo .card-glow,.card.card-photo .top,.card.card-photo .orb-indicator{display:none}
-.card.card-photo .status-block{display:none}
-.card.card-photo .since-block .l{display:none}
-.card-circuit{position:absolute;inset:0;width:100%;height:100%;color:var(--c-line);opacity:.7}
-.card-glow{position:absolute;top:-30%;right:-20%;width:65%;height:80%;border-radius:50%;background:radial-gradient(circle,var(--c-glow),transparent 70%);mix-blend-mode:screen;pointer-events:none}
+/* Hand-drawn fallback pieces from the pre-photo version - always hidden
+   now that every theme has real source art baked into its background. */
+.card .card-circuit,.card .card-glow,.card .top,.card .orb-indicator,.card .status-block,.card .since-block .l{display:none}
+
 .card .ct{position:relative;z-index:2;height:100%}
-.card .top{display:flex;align-items:center;justify-content:space-between}
-.card .brand{display:inline-flex;align-items:center;gap:8px;font-family:'Geist',var(--display);font-weight:700;font-size:14px;letter-spacing:.12em;color:#fff;text-shadow:0 1px 1px rgba(0,0,0,.6),0 -1px 0 rgba(255,255,255,.18)}
-.card .brand .card-brand-mark{width:19px;height:19px;flex:none;object-fit:contain}
-.card .tier-badge{display:inline-flex;align-items:center;gap:6px;font-family:'Geist',var(--body);font-weight:600;font-size:11px;letter-spacing:.1em;padding:6px 13px 6px 10px;border-radius:20px;background:var(--c-accent-soft);border:1px solid var(--c-accent-border);color:var(--c-accent);text-shadow:0 1px 1px rgba(0,0,0,.5),0 -1px 0 rgba(255,255,255,.15)}
-.card .tier-badge .gem-ic{width:14px;height:14px;flex:none;color:var(--c-accent);stroke-width:1.4;stroke-linejoin:round}
-.card .id-block{position:absolute;left:8.7%;top:38%;max-width:65%}
-.card .name{font-family:'OCRAStd',var(--mono);font-weight:400;font-size:clamp(22px,6vw,32px);letter-spacing:.02em;line-height:1.15;background:linear-gradient(180deg,#f7f7fa 0%,#c7c7d2 32%,#f2f3f7 55%,#93939f 100%);-webkit-background-clip:text;background-clip:text;color:transparent;filter:drop-shadow(0 1px 1px rgba(0,0,0,.55))}
-.card .handle{font-family:var(--mono);font-size:13px;color:#C7CEDD;margin-top:4px;text-shadow:0 1px 2px rgba(0,0,0,.5)}
-.card .orb-indicator{position:absolute;right:8%;top:41%;display:flex;align-items:center;gap:6px}
-.card .orb-tri{width:0;height:0;border-top:7px solid transparent;border-bottom:7px solid transparent;border-right:11px solid var(--c-accent);opacity:.85}
-.card .orb-ball{width:38px;height:38px;border-radius:50%;flex:none;background:radial-gradient(circle at 30% 24%,rgba(255,255,255,.98) 0%,rgba(255,255,255,.55) 8%,rgba(255,255,255,0) 22%),radial-gradient(circle at 38% 32%,#fff 0%,var(--c-accent) 34%,var(--c-2) 92%);box-shadow:0 0 22px var(--c-glow),inset 0 -8px 12px rgba(0,0,0,.45),inset 0 4px 6px rgba(255,255,255,.3),inset -6px -4px 10px rgba(0,0,0,.25)}
-.card .status-block{position:absolute;left:8.7%;top:83.6%}
-.card .foot .l{font-family:'Geist',var(--mono);font-size:10px;letter-spacing:.08em;color:var(--muted2);display:flex;align-items:center;gap:6px}
-.card .foot .since-block .l{justify-content:flex-end}
-.card .foot .dot{width:7px;height:7px;border-radius:50%;background:var(--c-accent);box-shadow:0 0 8px var(--c-glow)}
-.card .foot .v{font-family:'OCRAStd',var(--mono);font-weight:400;font-size:17px;margin-top:3px;background:linear-gradient(180deg,#f7f7fa 0%,#c7c7d2 32%,#f2f3f7 55%,#93939f 100%);-webkit-background-clip:text;background-clip:text;color:transparent;filter:drop-shadow(0 1px 1px rgba(0,0,0,.55))}
-.card .since-block{position:absolute;right:10.4%;top:88.5%;text-align:right}
+.card .id-block{position:absolute;inset:0}
+.card .name{position:absolute;left:8.7%;top:38.3%;max-width:65%;font-family:'Orbitron',var(--mono);font-weight:400;font-size:9.67cqw;line-height:1;letter-spacing:.19cqw;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.5)}
+.card .handle{position:absolute;left:8.7%;top:55.8%;font-family:'Asap Condensed',var(--mono);font-size:3.1cqw;color:#fff;letter-spacing:.06cqw;text-shadow:0 1px 2px rgba(0,0,0,.5)}
+.card .since-block{position:absolute;inset:0}
+.card .since-block .v{position:absolute;left:77%;top:82.8%;font-family:'Orbitron',var(--mono);font-weight:400;font-size:4.84cqw;letter-spacing:.1cqw;color:#fff;text-shadow:0 1px 2px rgba(0,0,0,.5)}
 
 /* orb theme-selector, sits below the card so its glossy-sphere buttons
    read as separate "pick a color" controls rather than card decoration */
@@ -577,11 +554,6 @@
   .tool-card{padding:13px}
   .tool-head{gap:9px;margin-bottom:11px}
   .tk-tile{padding:12px;gap:6px}
-  .card{padding:14px}
-  .card .name{font-size:17px}
-  .card .brand{font-size:11px}
-  .card .orb-ball{width:28px;height:28px}
-  .card .tier-badge{font-size:9.5px;padding:5px 10px 5px 8px}
   .card-label{font-size:10.5px}
   .orb-btn{width:30px;height:30px}
   .orb-strip{gap:12px}
@@ -610,9 +582,6 @@
   .pair-liq{order:2;margin-left:0}
   .pair-age{order:3}
   .pair-copy{order:4;margin-left:auto}
-  .card .name{font-size:19px}
-  .card .brand{font-size:12px}
-  .card{padding:16px}
   .gas-est-row{font-size:12px}
   .auth.wide{padding:16px 12px 20px}
   .tool-card{padding:12px;border-radius:13px}

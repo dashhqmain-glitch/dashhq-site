@@ -245,7 +245,6 @@ var Dash = (function () {
 // ── Membership card color theme (orb selector) ───────────────────────────────
 var CardTheme = (function () {
   var THEMES = ['blue', 'gold', 'purple', 'red'];
-  var PHOTO_THEMES = ['gold', 'purple', 'red'];
   var KEY = 'dashhq_card_theme';
   var current = 'blue';
   function set(name) {
@@ -255,7 +254,6 @@ var CardTheme = (function () {
     if (card) {
       THEMES.forEach(function (t) { card.classList.remove('theme-' + t); });
       card.classList.add('theme-' + name);
-      card.classList.toggle('card-photo', PHOTO_THEMES.indexOf(name) !== -1);
       card.dataset.theme = name;
     }
     document.querySelectorAll('.orb-btn').forEach(function (b) {
@@ -277,176 +275,48 @@ var CardActions = (function () {
     var card = document.getElementById('memberCard');
     var rect = card.getBoundingClientRect();
     var S = 3, W = Math.round(rect.width * S), H = Math.round(rect.height * S);
-    var cs = getComputedStyle(card);
-    var cv1 = cs.getPropertyValue('--c-1').trim() || '#10204f';
-    var cv2 = cs.getPropertyValue('--c-2').trim() || '#0a1330';
-    var cv3 = cs.getPropertyValue('--c-3').trim() || '#0a1a3e';
-    var accent = cs.getPropertyValue('--c-accent').trim() || '#5B9BF8';
-    var lineColor = cs.getPropertyValue('--c-line').trim() || 'rgba(91,155,248,.5)';
-    var glowColor = cs.getPropertyValue('--c-glow').trim() || 'rgba(91,155,248,.4)';
-    var accentSoft = cs.getPropertyValue('--c-accent-soft').trim() || 'rgba(91,155,248,.16)';
-    var accentBorder = cs.getPropertyValue('--c-accent-border').trim() || 'rgba(91,155,248,.5)';
-
     var theme = card.dataset.theme || 'blue';
-    var isPhoto = ['gold', 'purple', 'red'].indexOf(theme) !== -1;
 
-    var logo = new Image(); logo.crossOrigin = 'anonymous';
-    var logoReady = new Promise(function (res) { logo.onload = res; logo.onerror = res; logo.src = 'assets/logo-mark-white.png'; });
     var bgImg = new Image(); bgImg.crossOrigin = 'anonymous';
-    var bgReady = isPhoto
-      ? new Promise(function (res) { bgImg.onload = res; bgImg.onerror = res; bgImg.src = 'assets/card-bg-' + theme + '.jpg'; })
-      : Promise.resolve();
+    var bgReady = new Promise(function (res) { bgImg.onload = res; bgImg.onerror = res; bgImg.src = 'assets/card-bg-' + theme + '.jpg'; });
     var fontsReady = Promise.all([
-      document.fonts.load('400 40px OCRAStd'),
-      document.fonts.load('700 16px Geist'),
-      document.fonts.load('600 14px Geist')
+      document.fonts.load('400 40px Orbitron'),
+      document.fonts.load('400 20px "Asap Condensed"')
     ]).catch(function () { });
 
-    Promise.all([fontsReady, logoReady, bgReady]).then(draw);
+    Promise.all([fontsReady, bgReady]).then(draw);
 
-    function chromeGrad(x, yTop, yBottom) {
-      var g = x.createLinearGradient(0, yTop, 0, yBottom);
-      g.addColorStop(0, '#f7f7fa'); g.addColorStop(0.32, '#c7c7d2'); g.addColorStop(0.55, '#f2f3f7'); g.addColorStop(1, '#93939f');
-      return g;
-    }
-
-    // Gold/Purple/Red reuse the exact source card art (drawn pixel-for-pixel
-    // here, same as on screen) with just the live name/handle/join-year
-    // painted on top - only Blue (no source art) gets the fully hand-drawn
-    // circuit/badge/orb below.
-    function drawPhoto(x) {
-      x.drawImage(bgImg, 0, 0, W, H);
-      var nameTxt = (document.getElementById('cardName') || {}).textContent || 'CITIZEN';
-      var nameY = H * 0.487;
-      x.font = '400 ' + (30 * S) + 'px OCRAStd,monospace';
-      x.fillStyle = chromeGrad(x, nameY - 26 * S, nameY + 6 * S);
-      x.fillText(nameTxt, W * 0.087, nameY);
-      var handleTxt = (document.getElementById('cardHandle') || {}).textContent || '';
-      x.fillStyle = '#C7CEDD'; x.font = '400 ' + (13 * S) + 'px "JetBrains Mono",monospace';
-      x.shadowColor = 'rgba(0,0,0,.5)'; x.shadowBlur = 2 * S;
-      x.fillText(handleTxt, W * 0.087, nameY + 24 * S);
-      x.shadowBlur = 0;
-      var sinceTxt = (document.getElementById('cardJoined') || {}).textContent || '-';
-      x.textAlign = 'right';
-      var yearGrad = chromeGrad(x, H * 0.905 - 2 * S, H * 0.905 + 16 * S);
-      x.font = '400 ' + (15 * S) + 'px OCRAStd,monospace'; x.fillStyle = yearGrad;
-      x.fillText(sinceTxt, W * 0.897, H * 0.923);
-      x.textAlign = 'left';
-    }
-
+    // Every theme is the actual Figma card art (circuit, gradient, border,
+    // logo, badge, orb, status/since label all baked into the photo) - only
+    // the citizen's real name/handle/join-year get painted on top, at the
+    // exact same percentages the on-screen .card CSS uses.
     function draw() {
       var cvs = document.createElement('canvas'); cvs.width = W; cvs.height = H;
       var x = cvs.getContext('2d');
-      function rr(px, py, w, h, r) { x.beginPath(); x.moveTo(px + r, py); x.arcTo(px + w, py, px + w, py + h, r); x.arcTo(px + w, py + h, px, py + h, r); x.arcTo(px, py + h, px, py, r); x.arcTo(px, py, px + w, py, r); x.closePath(); }
-      rr(0, 0, W, H, 20 * S); x.save(); x.clip();
+      function rr(px, py, w, h, rxv, ryv) { x.beginPath(); x.moveTo(px + rxv, py); x.arcTo(px + w, py, px + w, py + h, rxv); x.arcTo(px + w, py + h, px, py + h, rxv); x.arcTo(px, py + h, px, py, rxv); x.arcTo(px, py, px + w, py, rxv); x.closePath(); }
+      var rx = W * 0.0387, ry = H * 0.0613;
+      rr(0, 0, W, H, rx, ry); x.save(); x.clip();
 
-      if (isPhoto && bgImg.complete && bgImg.naturalWidth) {
-        drawPhoto(x);
-        x.restore();
-        rr(1 * S, 1 * S, W - 2 * S, H - 2 * S, 20 * S); x.strokeStyle = 'rgba(255,255,255,0.16)'; x.lineWidth = 2 * S; x.stroke();
-        var aPhoto = document.createElement('a'); aPhoto.href = cvs.toDataURL('image/png'); aPhoto.download = 'dash-citizen-card.png';
-        document.body.appendChild(aPhoto); aPhoto.click(); aPhoto.remove();
-        return;
-      }
-
-      var g = x.createLinearGradient(0, 0, W, H); g.addColorStop(0, cv1); g.addColorStop(0.55, cv2); g.addColorStop(1, cv3);
-      x.fillStyle = g; x.fillRect(0, 0, W, H);
-
-      var rg = x.createRadialGradient(W * 0.88, H * 0.05, 0, W * 0.88, H * 0.05, W * 0.42);
-      rg.addColorStop(0, glowColor); rg.addColorStop(1, 'rgba(0,0,0,0)');
-      x.globalCompositeOperation = 'screen'; x.fillStyle = rg; x.fillRect(0, 0, W, H);
-      x.globalCompositeOperation = 'source-over';
-
-      var vx = W / 1034, vy = H / 652;
-      var segs = [[0, 652, 1034, 0], [30, 70, 150, 190], [150, 190, 150, 280], [150, 280, 260, 280], [260, 280, 260, 380], [700, 60, 820, 180], [820, 180, 820, 80], [60, 450, 180, 570], [380, 500, 500, 620], [600, 440, 720, 560], [850, 380, 970, 500], [900, 240, 1010, 130]];
-      x.strokeStyle = lineColor; x.lineWidth = 1.3 * S; x.globalAlpha = 0.55;
-      segs.forEach(function (l) { x.beginPath(); x.moveTo(l[0] * vx, l[1] * vy); x.lineTo(l[2] * vx, l[3] * vy); x.stroke(); });
-      [46, 80, 114].forEach(function (r) { x.beginPath(); x.arc(890 * vx, 70 * vy, r * Math.min(vx, vy), 0, Math.PI * 2); x.stroke(); });
-      var dots = [[30, 70], [150, 190], [150, 280], [260, 280], [260, 380], [700, 60], [820, 180], [820, 80], [60, 450], [180, 570], [380, 500], [500, 620], [600, 440], [720, 560], [850, 380], [970, 500], [900, 240], [1010, 130]];
-      x.fillStyle = lineColor;
-      dots.forEach(function (d) { x.beginPath(); x.arc(d[0] * vx, d[1] * vy, 4 * Math.min(vx, vy), 0, Math.PI * 2); x.fill(); });
-      x.globalAlpha = 1;
-
-      var P = 26 * S;
-      var ls = 18 * S;
-      if (logo.complete && logo.naturalWidth) x.drawImage(logo, P, P - 3 * S, ls, ls);
-      x.fillStyle = '#fff'; x.font = '700 ' + (14 * S) + 'px Geist,Sora,sans-serif'; x.textBaseline = 'middle'; x.letterSpacing = (1.5 * S) + 'px';
-      x.shadowColor = 'rgba(0,0,0,.6)'; x.shadowBlur = 2 * S; x.shadowOffsetY = 1 * S;
-      x.fillText('DASH CITIZEN', P + ls + 8 * S, P - 3 * S + ls / 2); x.letterSpacing = '0px'; x.textBaseline = 'alphabetic';
-      x.shadowColor = 'transparent'; x.shadowBlur = 0; x.shadowOffsetY = 0;
-
-      var tierTxt = ((document.getElementById('cardTier') || {}).textContent || 'CITIZEN').toUpperCase();
-      x.font = '600 ' + (11 * S) + 'px Geist,"JetBrains Mono",monospace'; x.letterSpacing = (1 * S) + 'px';
-      var gemW = 15 * S, gap = 6 * S, padL = 10 * S, padR = 13 * S;
-      var tw = x.measureText(tierTxt).width;
-      var pw = gemW + gap + tw + padL + padR, ph = 30 * S;
-      var bx = W - P - pw, by = P - 4 * S;
-      rr(bx, by, pw, ph, ph / 2); x.fillStyle = accentSoft; x.fill();
-      x.strokeStyle = accentBorder; x.lineWidth = 1.5 * S; x.stroke();
-      x.save(); x.translate(bx + padL, by + ph / 2 - gemW / 2); var gs = gemW / 24; x.scale(gs, gs);
-      x.lineJoin = 'round';
-      var gemGrad = x.createLinearGradient(0, 3, 0, 21);
-      gemGrad.addColorStop(0, '#fff'); gemGrad.addColorStop(0.34, accent); gemGrad.addColorStop(1, cv2);
-      x.beginPath(); x.moveTo(7, 3); x.lineTo(17, 3); x.lineTo(21, 10); x.lineTo(12, 21); x.lineTo(3, 10); x.closePath();
-      x.fillStyle = gemGrad; x.fill();
-      x.strokeStyle = 'rgba(0,0,0,.45)'; x.lineWidth = 0.6; x.stroke();
-      x.beginPath(); x.moveTo(6.7, 4.6); x.bezierCurveTo(8.5, 3.6, 15.5, 3.6, 17.3, 4.6); x.lineTo(15.2, 7.6); x.lineTo(8.8, 7.6); x.closePath();
-      x.fillStyle = 'rgba(255,255,255,.65)'; x.fill();
-      x.fillStyle = 'rgba(255,255,255,.95)'; x.beginPath(); x.arc(7.6, 9.2, 0.85, 0, Math.PI * 2); x.fill();
-      x.fillStyle = 'rgba(255,255,255,.8)'; x.beginPath(); x.arc(8.2, 14, 0.65, 0, Math.PI * 2); x.fill();
-      x.fillStyle = 'rgba(255,255,255,.7)'; x.beginPath(); x.arc(17, 12.6, 0.65, 0, Math.PI * 2); x.fill();
-      x.restore();
-      x.fillStyle = accent; x.textBaseline = 'middle';
-      x.shadowColor = 'rgba(0,0,0,.5)'; x.shadowBlur = 2 * S; x.shadowOffsetY = 1 * S;
-      x.fillText(tierTxt, bx + padL + gemW + gap, by + ph / 2 + 1 * S);
-      x.shadowColor = 'transparent'; x.shadowBlur = 0; x.shadowOffsetY = 0;
-      x.textBaseline = 'alphabetic'; x.letterSpacing = '0px';
+      x.drawImage(bgImg, 0, 0, W, H);
+      x.textBaseline = 'top';
 
       var nameTxt = (document.getElementById('cardName') || {}).textContent || 'CITIZEN';
-      var nameY = H * 0.487;
-      x.font = '400 ' + (30 * S) + 'px OCRAStd,monospace';
-      x.fillStyle = chromeGrad(x, nameY - 26 * S, nameY + 6 * S);
-      x.fillText(nameTxt, W * 0.087, nameY);
-      var handleTxt = (document.getElementById('cardHandle') || {}).textContent || '';
-      x.fillStyle = '#C7CEDD'; x.font = '400 ' + (13 * S) + 'px "JetBrains Mono",monospace';
+      x.font = '400 ' + (0.0967 * W) + 'px Orbitron,monospace';
+      x.fillStyle = '#fff'; x.letterSpacing = (0.001934 * W) + 'px';
       x.shadowColor = 'rgba(0,0,0,.5)'; x.shadowBlur = 2 * S;
-      x.fillText(handleTxt, W * 0.087, nameY + 24 * S);
-      x.shadowBlur = 0;
+      x.fillText(nameTxt, W * 0.087, H * 0.383);
 
-      var orbR = 19 * S, orbCx = W - W * 0.08 - orbR, orbCy = H * 0.478;
-      var triX = orbCx - orbR - 14 * S;
-      x.beginPath(); x.moveTo(triX, orbCy - 7 * S); x.lineTo(triX, orbCy + 7 * S); x.lineTo(triX - 11 * S, orbCy); x.closePath();
-      x.fillStyle = accent; x.globalAlpha = 0.85; x.fill(); x.globalAlpha = 1;
-      x.save(); x.shadowColor = glowColor; x.shadowBlur = 22 * S;
-      var og = x.createRadialGradient(orbCx - orbR * 0.24, orbCy - orbR * 0.3, orbR * 0.05, orbCx - orbR * 0.1, orbCy - orbR * 0.05, orbR * 1.05);
-      og.addColorStop(0, '#fff'); og.addColorStop(0.32, accent); og.addColorStop(0.92, cv2); og.addColorStop(1, cv1);
-      x.beginPath(); x.arc(orbCx, orbCy, orbR, 0, Math.PI * 2); x.fillStyle = og; x.fill();
-      var spec = x.createRadialGradient(orbCx - orbR * 0.3, orbCy - orbR * 0.36, 0, orbCx - orbR * 0.3, orbCy - orbR * 0.36, orbR * 0.4);
-      spec.addColorStop(0, 'rgba(255,255,255,.95)'); spec.addColorStop(1, 'rgba(255,255,255,0)');
-      x.beginPath(); x.arc(orbCx, orbCy, orbR, 0, Math.PI * 2); x.fillStyle = spec; x.fill();
-      x.restore();
-
-      var labelY = H * 0.845, valueY = H * 0.923;
-      x.font = '600 ' + (9.5 * S) + 'px Geist,"JetBrains Mono",monospace'; x.letterSpacing = (1 * S) + 'px';
-      var dotR = 3.5 * S, dotX = W * 0.087 + dotR;
-      x.save(); x.shadowColor = glowColor; x.shadowBlur = 8 * S;
-      x.beginPath(); x.arc(dotX, labelY, dotR, 0, Math.PI * 2); x.fillStyle = accent; x.fill(); x.restore();
-      x.fillStyle = '#8A9BBF'; x.fillText('STATUS', dotX + dotR + 6 * S, labelY + 1 * S);
-      x.letterSpacing = '0px';
-      var footGrad = chromeGrad(x, valueY - 16 * S, valueY + 2 * S);
-      x.font = '400 ' + (15 * S) + 'px OCRAStd,monospace'; x.fillStyle = footGrad;
-      x.fillText('ACTIVE', W * 0.087, valueY);
+      var handleTxt = (document.getElementById('cardHandle') || {}).textContent || '';
+      x.font = '400 ' + (0.031 * W) + 'px "Asap Condensed",sans-serif'; x.letterSpacing = (0.000619 * W) + 'px';
+      x.fillText(handleTxt, W * 0.087, H * 0.558);
 
       var sinceTxt = (document.getElementById('cardJoined') || {}).textContent || '-';
-      x.textAlign = 'right';
-      x.font = '600 ' + (9.5 * S) + 'px Geist,"JetBrains Mono",monospace'; x.letterSpacing = (1 * S) + 'px'; x.fillStyle = '#8A9BBF';
-      x.fillText('MEMBER SINCE', W * 0.897, labelY); x.letterSpacing = '0px';
-      x.font = '400 ' + (15 * S) + 'px OCRAStd,monospace'; x.fillStyle = footGrad;
-      x.fillText(sinceTxt, W * 0.897, valueY);
-      x.textAlign = 'left';
+      x.font = '400 ' + (0.0484 * W) + 'px Orbitron,monospace'; x.letterSpacing = (0.000967 * W) + 'px';
+      x.fillText(sinceTxt, W * 0.77, H * 0.828);
 
+      x.shadowBlur = 0; x.letterSpacing = '0px'; x.textBaseline = 'alphabetic';
       x.restore();
-      rr(1 * S, 1 * S, W - 2 * S, H - 2 * S, 20 * S); x.strokeStyle = 'rgba(255,255,255,0.16)'; x.lineWidth = 2 * S; x.stroke();
+      rr(1 * S, 1 * S, W - 2 * S, H - 2 * S, rx, ry); x.strokeStyle = 'rgba(255,255,255,0.16)'; x.lineWidth = 2 * S; x.stroke();
       var a = document.createElement('a'); a.href = cvs.toDataURL('image/png'); a.download = 'dash-citizen-card.png';
       document.body.appendChild(a); a.click(); a.remove();
     }
