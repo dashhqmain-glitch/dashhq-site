@@ -105,7 +105,7 @@
 .card .handle{font-family:var(--mono);font-size:13px;color:var(--c-accent);margin-top:4px;text-shadow:0 0 12px var(--c-glow)}
 .card .orb-indicator{display:flex;align-items:center;gap:6px;flex:none}
 .card .orb-tri{width:0;height:0;border-top:7px solid transparent;border-bottom:7px solid transparent;border-right:11px solid var(--c-accent);opacity:.85}
-.card .orb-ball{width:38px;height:38px;border-radius:50%;flex:none;background:radial-gradient(circle at 32% 28%,#fff,var(--c-accent) 38%,var(--c-2) 100%);box-shadow:0 0 22px var(--c-glow),inset 0 -4px 8px rgba(0,0,0,.35)}
+.card .orb-ball{width:38px;height:38px;border-radius:50%;flex:none;background:radial-gradient(circle at 30% 24%,rgba(255,255,255,.98) 0%,rgba(255,255,255,.55) 8%,rgba(255,255,255,0) 22%),radial-gradient(circle at 38% 32%,#fff 0%,var(--c-accent) 34%,var(--c-2) 92%);box-shadow:0 0 22px var(--c-glow),inset 0 -8px 12px rgba(0,0,0,.45),inset 0 4px 6px rgba(255,255,255,.3),inset -6px -4px 10px rgba(0,0,0,.25)}
 .card .foot{display:flex;align-items:flex-end;justify-content:space-between}
 .card .foot .l{font-family:'Geist',var(--mono);font-size:10px;letter-spacing:.08em;color:var(--muted2);display:flex;align-items:center;gap:6px}
 .card .foot .since-block .l{justify-content:flex-end}
@@ -117,7 +117,7 @@
    read as separate "pick a color" controls rather than card decoration */
 .card-layout{display:flex;flex-direction:column;align-items:center;gap:20px}
 .orb-strip{display:flex;flex-direction:row;gap:16px;justify-content:center}
-.orb-btn{width:36px;height:36px;border-radius:50%;flex:none;cursor:pointer;border:2px solid transparent;padding:0;background:radial-gradient(circle at 32% 28%,#fff,var(--ob-accent) 38%,var(--ob-dark) 100%);box-shadow:0 0 14px var(--ob-glow);transition:transform .15s,border-color .15s}
+.orb-btn{width:36px;height:36px;border-radius:50%;flex:none;cursor:pointer;border:2px solid transparent;padding:0;background:radial-gradient(circle at 30% 24%,rgba(255,255,255,.98) 0%,rgba(255,255,255,.55) 8%,rgba(255,255,255,0) 22%),radial-gradient(circle at 38% 32%,#fff 0%,var(--ob-accent) 34%,var(--ob-dark) 92%);box-shadow:0 0 14px var(--ob-glow),inset 0 -6px 9px rgba(0,0,0,.45),inset 0 3px 5px rgba(255,255,255,.3),inset -4px -3px 8px rgba(0,0,0,.25);transition:transform .15s,border-color .15s}
 .orb-btn:hover{transform:scale(1.08)}
 .orb-btn.active{border-color:#fff;transform:scale(1.14)}
 .orb-btn[data-theme="gold"]{--ob-accent:#F0C94A;--ob-dark:#1a1400;--ob-glow:rgba(240,201,74,.5)}

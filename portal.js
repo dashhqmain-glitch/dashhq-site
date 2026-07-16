@@ -367,9 +367,13 @@ var CardActions = (function () {
       x.beginPath(); x.moveTo(triX, orbCy - 7 * S); x.lineTo(triX, orbCy + 7 * S); x.lineTo(triX - 11 * S, orbCy); x.closePath();
       x.fillStyle = accent; x.globalAlpha = 0.85; x.fill(); x.globalAlpha = 1;
       x.save(); x.shadowColor = glowColor; x.shadowBlur = 22 * S;
-      var og = x.createRadialGradient(orbCx - orbR * 0.35, orbCy - orbR * 0.4, orbR * 0.05, orbCx, orbCy, orbR);
-      og.addColorStop(0, '#fff'); og.addColorStop(0.38, accent); og.addColorStop(1, cv2);
-      x.beginPath(); x.arc(orbCx, orbCy, orbR, 0, Math.PI * 2); x.fillStyle = og; x.fill(); x.restore();
+      var og = x.createRadialGradient(orbCx - orbR * 0.24, orbCy - orbR * 0.3, orbR * 0.05, orbCx - orbR * 0.1, orbCy - orbR * 0.05, orbR * 1.05);
+      og.addColorStop(0, '#fff'); og.addColorStop(0.32, accent); og.addColorStop(0.92, cv2); og.addColorStop(1, cv1);
+      x.beginPath(); x.arc(orbCx, orbCy, orbR, 0, Math.PI * 2); x.fillStyle = og; x.fill();
+      var spec = x.createRadialGradient(orbCx - orbR * 0.3, orbCy - orbR * 0.36, 0, orbCx - orbR * 0.3, orbCy - orbR * 0.36, orbR * 0.4);
+      spec.addColorStop(0, 'rgba(255,255,255,.95)'); spec.addColorStop(1, 'rgba(255,255,255,0)');
+      x.beginPath(); x.arc(orbCx, orbCy, orbR, 0, Math.PI * 2); x.fillStyle = spec; x.fill();
+      x.restore();
 
       var by2 = H - 40 * S, dotY = by2 - 22 * S;
       x.font = '600 ' + (9.5 * S) + 'px Geist,"JetBrains Mono",monospace'; x.letterSpacing = (1 * S) + 'px';
