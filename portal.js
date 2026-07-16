@@ -244,7 +244,7 @@ var Dash = (function () {
 // ── CARD ACTIONS — download + share ───────────────────────────────────────────
 // ── Membership card color theme (orb selector) ───────────────────────────────
 var CardTheme = (function () {
-  var THEMES = ['blue', 'gold', 'purple', 'red', 'mono'];
+  var THEMES = ['blue', 'gold', 'purple', 'red'];
   var PHOTO_THEMES = ['gold', 'purple', 'red'];
   var KEY = 'dashhq_card_theme';
   var current = 'blue';
@@ -312,8 +312,8 @@ var CardActions = (function () {
 
     // Gold/Purple/Red reuse the exact source card art (drawn pixel-for-pixel
     // here, same as on screen) with just the live name/handle/join-year
-    // painted on top - only Blue/Mono (no source art) get the fully
-    // hand-drawn circuit/badge/orb below.
+    // painted on top - only Blue (no source art) gets the fully hand-drawn
+    // circuit/badge/orb below.
     function drawPhoto(x) {
       x.drawImage(bgImg, 0, 0, W, H);
       var nameTxt = (document.getElementById('cardName') || {}).textContent || 'CITIZEN';
@@ -322,8 +322,8 @@ var CardActions = (function () {
       x.fillStyle = chromeGrad(x, nameY - 26 * S, nameY + 6 * S);
       x.fillText(nameTxt, W * 0.087, nameY);
       var handleTxt = (document.getElementById('cardHandle') || {}).textContent || '';
-      x.fillStyle = accent; x.font = '400 ' + (13 * S) + 'px "JetBrains Mono",monospace';
-      x.shadowColor = accent; x.shadowBlur = 8 * S;
+      x.fillStyle = '#C7CEDD'; x.font = '400 ' + (13 * S) + 'px "JetBrains Mono",monospace';
+      x.shadowColor = 'rgba(0,0,0,.5)'; x.shadowBlur = 2 * S;
       x.fillText(handleTxt, W * 0.087, nameY + 24 * S);
       x.shadowBlur = 0;
       var sinceTxt = (document.getElementById('cardJoined') || {}).textContent || '-';
@@ -371,7 +371,9 @@ var CardActions = (function () {
       var ls = 18 * S;
       if (logo.complete && logo.naturalWidth) x.drawImage(logo, P, P - 3 * S, ls, ls);
       x.fillStyle = '#fff'; x.font = '700 ' + (14 * S) + 'px Geist,Sora,sans-serif'; x.textBaseline = 'middle'; x.letterSpacing = (1.5 * S) + 'px';
+      x.shadowColor = 'rgba(0,0,0,.6)'; x.shadowBlur = 2 * S; x.shadowOffsetY = 1 * S;
       x.fillText('DASH CITIZEN', P + ls + 8 * S, P - 3 * S + ls / 2); x.letterSpacing = '0px'; x.textBaseline = 'alphabetic';
+      x.shadowColor = 'transparent'; x.shadowBlur = 0; x.shadowOffsetY = 0;
 
       var tierTxt = ((document.getElementById('cardTier') || {}).textContent || 'CITIZEN').toUpperCase();
       x.font = '600 ' + (11 * S) + 'px Geist,"JetBrains Mono",monospace'; x.letterSpacing = (1 * S) + 'px';
@@ -395,21 +397,23 @@ var CardActions = (function () {
       x.fillStyle = 'rgba(255,255,255,.65)'; x.beginPath(); x.arc(17, 12.6, 0.65, 0, Math.PI * 2); x.fill();
       x.restore();
       x.fillStyle = accent; x.textBaseline = 'middle';
+      x.shadowColor = 'rgba(0,0,0,.5)'; x.shadowBlur = 2 * S; x.shadowOffsetY = 1 * S;
       x.fillText(tierTxt, bx + padL + gemW + gap, by + ph / 2 + 1 * S);
+      x.shadowColor = 'transparent'; x.shadowBlur = 0; x.shadowOffsetY = 0;
       x.textBaseline = 'alphabetic'; x.letterSpacing = '0px';
 
       var nameTxt = (document.getElementById('cardName') || {}).textContent || 'CITIZEN';
-      var nameY = H * 0.52;
+      var nameY = H * 0.487;
       x.font = '400 ' + (30 * S) + 'px OCRAStd,monospace';
       x.fillStyle = chromeGrad(x, nameY - 26 * S, nameY + 6 * S);
-      x.fillText(nameTxt, P, nameY);
+      x.fillText(nameTxt, W * 0.087, nameY);
       var handleTxt = (document.getElementById('cardHandle') || {}).textContent || '';
-      x.fillStyle = accent; x.font = '400 ' + (13 * S) + 'px "JetBrains Mono",monospace';
-      x.shadowColor = accent; x.shadowBlur = 8 * S;
-      x.fillText(handleTxt, P, nameY + 24 * S);
+      x.fillStyle = '#C7CEDD'; x.font = '400 ' + (13 * S) + 'px "JetBrains Mono",monospace';
+      x.shadowColor = 'rgba(0,0,0,.5)'; x.shadowBlur = 2 * S;
+      x.fillText(handleTxt, W * 0.087, nameY + 24 * S);
       x.shadowBlur = 0;
 
-      var orbCy = nameY - 10 * S, orbR = 19 * S, orbCx = W - P - orbR;
+      var orbR = 19 * S, orbCx = W - W * 0.08 - orbR, orbCy = H * 0.478;
       var triX = orbCx - orbR - 14 * S;
       x.beginPath(); x.moveTo(triX, orbCy - 7 * S); x.lineTo(triX, orbCy + 7 * S); x.lineTo(triX - 11 * S, orbCy); x.closePath();
       x.fillStyle = accent; x.globalAlpha = 0.85; x.fill(); x.globalAlpha = 1;
@@ -422,23 +426,23 @@ var CardActions = (function () {
       x.beginPath(); x.arc(orbCx, orbCy, orbR, 0, Math.PI * 2); x.fillStyle = spec; x.fill();
       x.restore();
 
-      var by2 = H - 40 * S, dotY = by2 - 22 * S;
+      var labelY = H * 0.845, valueY = H * 0.923;
       x.font = '600 ' + (9.5 * S) + 'px Geist,"JetBrains Mono",monospace'; x.letterSpacing = (1 * S) + 'px';
-      var dotR = 3.5 * S, dotX = P + dotR;
+      var dotR = 3.5 * S, dotX = W * 0.087 + dotR;
       x.save(); x.shadowColor = glowColor; x.shadowBlur = 8 * S;
-      x.beginPath(); x.arc(dotX, dotY, dotR, 0, Math.PI * 2); x.fillStyle = accent; x.fill(); x.restore();
-      x.fillStyle = '#8A9BBF'; x.fillText('STATUS', dotX + dotR + 6 * S, dotY + 1 * S);
+      x.beginPath(); x.arc(dotX, labelY, dotR, 0, Math.PI * 2); x.fillStyle = accent; x.fill(); x.restore();
+      x.fillStyle = '#8A9BBF'; x.fillText('STATUS', dotX + dotR + 6 * S, labelY + 1 * S);
       x.letterSpacing = '0px';
-      var footGrad = chromeGrad(x, by2 - 2 * S, by2 + 16 * S);
+      var footGrad = chromeGrad(x, valueY - 16 * S, valueY + 2 * S);
       x.font = '400 ' + (15 * S) + 'px OCRAStd,monospace'; x.fillStyle = footGrad;
-      x.fillText('ACTIVE', P, by2 + 14 * S);
+      x.fillText('ACTIVE', W * 0.087, valueY);
 
       var sinceTxt = (document.getElementById('cardJoined') || {}).textContent || '-';
       x.textAlign = 'right';
       x.font = '600 ' + (9.5 * S) + 'px Geist,"JetBrains Mono",monospace'; x.letterSpacing = (1 * S) + 'px'; x.fillStyle = '#8A9BBF';
-      x.fillText('MEMBER SINCE', W - P, dotY + 1 * S); x.letterSpacing = '0px';
+      x.fillText('MEMBER SINCE', W * 0.897, labelY); x.letterSpacing = '0px';
       x.font = '400 ' + (15 * S) + 'px OCRAStd,monospace'; x.fillStyle = footGrad;
-      x.fillText(sinceTxt, W - P, by2 + 14 * S);
+      x.fillText(sinceTxt, W * 0.897, valueY);
       x.textAlign = 'left';
 
       x.restore();
