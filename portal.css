@@ -92,6 +92,26 @@
 .card.theme-mono{--c-1:#000;--c-2:#141414;--c-3:#262626;--c-line:rgba(232,232,236,.4);--c-accent:#E7E7EC;--c-accent-soft:rgba(232,232,236,.14);--c-accent-border:rgba(232,232,236,.45);--c-glow:rgba(232,232,236,.3)}
 
 .card{position:relative;width:100%;aspect-ratio:1.586/1;border-radius:18px;overflow:hidden;border:1px solid var(--border2);background:linear-gradient(135deg,var(--c-1),var(--c-2) 55%,var(--c-3));text-align:left;padding:24px;box-shadow:0 30px 70px -28px rgba(27,66,255,.5)}
+
+/* Gold/Purple/Red are the actual source card artwork (logo, badge, gem,
+   orb, and circuit pattern baked in as one pixel-exact photo) with only
+   the citizen's real name/handle/join-year overlaid as live text at the
+   same spot those fields sit in the source design - not a hand-rebuilt
+   approximation. Blue/Mono have no source art (extrapolated schemes), so
+   they keep the fully hand-drawn circuit/badge/orb built above. */
+.card.card-photo{background-image:var(--c-photo);background-size:cover;background-position:center;background-color:#000}
+.card.card-photo.theme-gold{--c-photo:url('assets/card-bg-gold.jpg')}
+.card.card-photo.theme-purple{--c-photo:url('assets/card-bg-purple.jpg')}
+.card.card-photo.theme-red{--c-photo:url('assets/card-bg-red.jpg')}
+.card.card-photo .card-circuit,.card.card-photo .card-glow,.card.card-photo .top{display:none}
+.card.card-photo .ct{display:block}
+.card.card-photo .mid{display:block}
+.card.card-photo .id-block{position:absolute;left:8.7%;top:38%;max-width:65%}
+.card.card-photo .orb-indicator{display:none}
+.card.card-photo .foot{display:block}
+.card.card-photo .status-block{display:none}
+.card.card-photo .since-block{position:absolute;right:10.4%;top:88.5%;text-align:right}
+.card.card-photo .since-block .l{display:none}
 .card-circuit{position:absolute;inset:0;width:100%;height:100%;color:var(--c-line);opacity:.55}
 .card-glow{position:absolute;top:-30%;right:-20%;width:65%;height:80%;border-radius:50%;background:radial-gradient(circle,var(--c-glow),transparent 70%);mix-blend-mode:screen;pointer-events:none}
 .card .ct{position:relative;z-index:2;display:flex;flex-direction:column;height:100%;justify-content:space-between}

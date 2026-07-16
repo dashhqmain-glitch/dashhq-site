@@ -245,6 +245,7 @@ var Dash = (function () {
 // ── Membership card color theme (orb selector) ───────────────────────────────
 var CardTheme = (function () {
   var THEMES = ['blue', 'gold', 'purple', 'red', 'mono'];
+  var PHOTO_THEMES = ['gold', 'purple', 'red'];
   var KEY = 'dashhq_card_theme';
   var current = 'blue';
   function set(name) {
@@ -254,6 +255,7 @@ var CardTheme = (function () {
     if (card) {
       THEMES.forEach(function (t) { card.classList.remove('theme-' + t); });
       card.classList.add('theme-' + name);
+      card.classList.toggle('card-photo', PHOTO_THEMES.indexOf(name) !== -1);
       card.dataset.theme = name;
     }
     document.querySelectorAll('.orb-btn').forEach(function (b) {
@@ -285,15 +287,22 @@ var CardActions = (function () {
     var accentSoft = cs.getPropertyValue('--c-accent-soft').trim() || 'rgba(91,155,248,.16)';
     var accentBorder = cs.getPropertyValue('--c-accent-border').trim() || 'rgba(91,155,248,.5)';
 
+    var theme = card.dataset.theme || 'blue';
+    var isPhoto = ['gold', 'purple', 'red'].indexOf(theme) !== -1;
+
     var logo = new Image(); logo.crossOrigin = 'anonymous';
     var logoReady = new Promise(function (res) { logo.onload = res; logo.onerror = res; logo.src = 'assets/logo-mark-white.png'; });
+    var bgImg = new Image(); bgImg.crossOrigin = 'anonymous';
+    var bgReady = isPhoto
+      ? new Promise(function (res) { bgImg.onload = res; bgImg.onerror = res; bgImg.src = 'assets/card-bg-' + theme + '.jpg'; })
+      : Promise.resolve();
     var fontsReady = Promise.all([
       document.fonts.load('400 40px OCRAStd'),
       document.fonts.load('700 16px Geist'),
       document.fonts.load('600 14px Geist')
     ]).catch(function () { });
 
-    Promise.all([fontsReady, logoReady]).then(draw);
+    Promise.all([fontsReady, logoReady, bgReady]).then(draw);
 
     function chromeGrad(x, yTop, yBottom) {
       var g = x.createLinearGradient(0, yTop, 0, yBottom);
@@ -301,11 +310,44 @@ var CardActions = (function () {
       return g;
     }
 
+    // Gold/Purple/Red reuse the exact source card art (drawn pixel-for-pixel
+    // here, same as on screen) with just the live name/handle/join-year
+    // painted on top - only Blue/Mono (no source art) get the fully
+    // hand-drawn circuit/badge/orb below.
+    function drawPhoto(x) {
+      x.drawImage(bgImg, 0, 0, W, H);
+      var nameTxt = (document.getElementById('cardName') || {}).textContent || 'CITIZEN';
+      var nameY = H * 0.487;
+      x.font = '400 ' + (30 * S) + 'px OCRAStd,monospace';
+      x.fillStyle = chromeGrad(x, nameY - 26 * S, nameY + 6 * S);
+      x.fillText(nameTxt, W * 0.087, nameY);
+      var handleTxt = (document.getElementById('cardHandle') || {}).textContent || '';
+      x.fillStyle = accent; x.font = '400 ' + (13 * S) + 'px "JetBrains Mono",monospace';
+      x.shadowColor = accent; x.shadowBlur = 8 * S;
+      x.fillText(handleTxt, W * 0.087, nameY + 24 * S);
+      x.shadowBlur = 0;
+      var sinceTxt = (document.getElementById('cardJoined') || {}).textContent || '-';
+      x.textAlign = 'right';
+      var yearGrad = chromeGrad(x, H * 0.905 - 2 * S, H * 0.905 + 16 * S);
+      x.font = '400 ' + (15 * S) + 'px OCRAStd,monospace'; x.fillStyle = yearGrad;
+      x.fillText(sinceTxt, W * 0.897, H * 0.923);
+      x.textAlign = 'left';
+    }
+
     function draw() {
       var cvs = document.createElement('canvas'); cvs.width = W; cvs.height = H;
       var x = cvs.getContext('2d');
       function rr(px, py, w, h, r) { x.beginPath(); x.moveTo(px + r, py); x.arcTo(px + w, py, px + w, py + h, r); x.arcTo(px + w, py + h, px, py + h, r); x.arcTo(px, py + h, px, py, r); x.arcTo(px, py, px + w, py, r); x.closePath(); }
       rr(0, 0, W, H, 20 * S); x.save(); x.clip();
+
+      if (isPhoto && bgImg.complete && bgImg.naturalWidth) {
+        drawPhoto(x);
+        x.restore();
+        rr(1 * S, 1 * S, W - 2 * S, H - 2 * S, 20 * S); x.strokeStyle = 'rgba(255,255,255,0.16)'; x.lineWidth = 2 * S; x.stroke();
+        var aPhoto = document.createElement('a'); aPhoto.href = cvs.toDataURL('image/png'); aPhoto.download = 'dash-citizen-card.png';
+        document.body.appendChild(aPhoto); aPhoto.click(); aPhoto.remove();
+        return;
+      }
 
       var g = x.createLinearGradient(0, 0, W, H); g.addColorStop(0, cv1); g.addColorStop(0.55, cv2); g.addColorStop(1, cv3);
       x.fillStyle = g; x.fillRect(0, 0, W, H);
