@@ -97,7 +97,7 @@
 .card .ct{position:relative;z-index:2;display:flex;flex-direction:column;height:100%;justify-content:space-between}
 .card .top{display:flex;align-items:center;justify-content:space-between}
 .card .brand{display:inline-flex;align-items:center;gap:8px;font-family:'Geist',var(--display);font-weight:700;font-size:14px;letter-spacing:.12em;color:#fff}
-.card .brand .logo-mark-img{width:18px;height:18px;border-radius:5px}
+.card .brand .card-brand-mark{width:19px;height:19px;flex:none;object-fit:contain}
 .card .tier-badge{display:inline-flex;align-items:center;gap:6px;font-family:'Geist',var(--body);font-weight:600;font-size:11px;letter-spacing:.1em;padding:6px 13px 6px 10px;border-radius:20px;background:var(--c-accent-soft);border:1px solid var(--c-accent-border);color:var(--c-accent)}
 .card .tier-badge .gem-ic{width:14px;height:14px;flex:none;color:var(--c-accent);stroke-width:1.4;stroke-linejoin:round}
 .card .mid{display:flex;align-items:center;justify-content:space-between;gap:14px}

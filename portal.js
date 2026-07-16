@@ -286,7 +286,7 @@ var CardActions = (function () {
     var accentBorder = cs.getPropertyValue('--c-accent-border').trim() || 'rgba(91,155,248,.5)';
 
     var logo = new Image(); logo.crossOrigin = 'anonymous';
-    var logoReady = new Promise(function (res) { logo.onload = res; logo.onerror = res; logo.src = 'assets/logo.png'; });
+    var logoReady = new Promise(function (res) { logo.onload = res; logo.onerror = res; logo.src = 'assets/logo-mark-white.png'; });
     var fontsReady = Promise.all([
       document.fonts.load('400 40px OCRAStd'),
       document.fonts.load('700 16px Geist'),
@@ -341,11 +341,16 @@ var CardActions = (function () {
       x.strokeStyle = accentBorder; x.lineWidth = 1.5 * S; x.stroke();
       x.save(); x.translate(bx + padL, by + ph / 2 - gemW / 2); var gs = gemW / 24; x.scale(gs, gs);
       x.lineJoin = 'round';
-      x.beginPath(); x.moveTo(7, 3); x.lineTo(17, 3); x.lineTo(21, 9); x.lineTo(12, 21); x.lineTo(3, 9); x.closePath();
-      x.fillStyle = accent; x.globalAlpha = 0.28; x.fill(); x.globalAlpha = 1;
-      x.strokeStyle = accent; x.lineWidth = 1.4;
-      x.stroke();
-      x.beginPath(); x.moveTo(3, 9); x.lineTo(21, 9); x.moveTo(7, 3); x.lineTo(12, 9); x.moveTo(17, 3); x.lineTo(12, 9); x.moveTo(12, 9); x.lineTo(12, 21); x.stroke();
+      var gemGrad = x.createLinearGradient(0, 3, 0, 21);
+      gemGrad.addColorStop(0, '#fff'); gemGrad.addColorStop(0.38, accent); gemGrad.addColorStop(1, accent);
+      x.beginPath(); x.moveTo(7, 3); x.lineTo(17, 3); x.lineTo(21, 10); x.lineTo(12, 21); x.lineTo(3, 10); x.closePath();
+      x.fillStyle = gemGrad; x.fill();
+      x.strokeStyle = accent; x.globalAlpha = 0.4; x.lineWidth = 0.6; x.stroke(); x.globalAlpha = 1;
+      x.beginPath(); x.moveTo(6.7, 4.6); x.bezierCurveTo(8.5, 3.6, 15.5, 3.6, 17.3, 4.6); x.lineTo(15.2, 7.6); x.lineTo(8.8, 7.6); x.closePath();
+      x.fillStyle = 'rgba(255,255,255,.55)'; x.fill();
+      x.fillStyle = 'rgba(255,255,255,.9)'; x.beginPath(); x.arc(7.6, 9.2, 0.85, 0, Math.PI * 2); x.fill();
+      x.fillStyle = 'rgba(255,255,255,.75)'; x.beginPath(); x.arc(8.2, 14, 0.65, 0, Math.PI * 2); x.fill();
+      x.fillStyle = 'rgba(255,255,255,.65)'; x.beginPath(); x.arc(17, 12.6, 0.65, 0, Math.PI * 2); x.fill();
       x.restore();
       x.fillStyle = accent; x.textBaseline = 'middle';
       x.fillText(tierTxt, bx + padL + gemW + gap, by + ph / 2 + 1 * S);
