@@ -108,7 +108,7 @@
 .card.card-photo .card-circuit,.card.card-photo .card-glow,.card.card-photo .top,.card.card-photo .orb-indicator{display:none}
 .card.card-photo .status-block{display:none}
 .card.card-photo .since-block .l{display:none}
-.card-circuit{position:absolute;inset:0;width:100%;height:100%;color:var(--c-line);opacity:.55}
+.card-circuit{position:absolute;inset:0;width:100%;height:100%;color:var(--c-line);opacity:.7}
 .card-glow{position:absolute;top:-30%;right:-20%;width:65%;height:80%;border-radius:50%;background:radial-gradient(circle,var(--c-glow),transparent 70%);mix-blend-mode:screen;pointer-events:none}
 .card .ct{position:relative;z-index:2;height:100%}
 .card .top{display:flex;align-items:center;justify-content:space-between}
