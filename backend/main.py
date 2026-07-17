@@ -1027,9 +1027,14 @@ def _history_components(rows: list[dict], status_filter: str, offset: int, resol
 
 
 async def _history_list_response(status_filter: str, offset: int) -> dict:
+    # Run both queries concurrently rather than one after another - Discord
+    # gives interactions a hard 3-second window to respond, so every bit of
+    # round-trip time here matters.
     async with httpx.AsyncClient(timeout=15) as client:
-        rows, total = await _history_fetch(client, status_filter, offset)
-        resolved_total = await _history_resolved_count(client)
+        (rows, total), resolved_total = await asyncio.gather(
+            _history_fetch(client, status_filter, offset),
+            _history_resolved_count(client),
+        )
     return {
         "embeds": [_history_list_embed(rows, total, status_filter, resolved_total)],
         "components": _history_components(rows, status_filter, offset, resolved_total),
