@@ -757,6 +757,8 @@ async def discord_interactions(request: Request):
         return {"type": 1}
 
     if itype == 2:  # APPLICATION_COMMAND — a /slash command
+        if (payload.get("data") or {}).get("name") == "history":
+            return await _handle_history_command(payload)
         return await _handle_toolkit_command(payload)
 
     member_user = payload.get("member", {}).get("user", {})
@@ -779,6 +781,12 @@ async def discord_interactions(request: Request):
 
     if payload.get("data", {}).get("custom_id") == "toolkit_select":
         return await _handle_toolkit_select(payload)
+
+    history_id = payload.get("data", {}).get("custom_id", "")
+    if history_id.startswith("history_select:"):
+        return await _handle_history_select(payload)
+    if history_id.startswith("history_page:"):
+        return await _handle_history_page(payload)
 
     custom_id = payload.get("data", {}).get("custom_id", "")
     action, _, app_id = custom_id.partition(":")
@@ -870,6 +878,178 @@ async def _finalize_review(app_id: str, status: str, reviewer: str, decline_reas
             "components": updated_components,
         },
     }
+
+
+# ── /history — team-only application archive, browsable in Discord ──────────
+# Registered with default_member_permissions requiring Manage Server (see
+# register_commands.py), so regular citizens never see this command at all.
+# _is_team_member is a second, server-side check on top of that in case a
+# server admin ever loosens the command's visibility in Integrations settings.
+HISTORY_PAGE_SIZE = 20
+STATUS_EMOJI = {"pending": "🕓", "accepted": "✅", "declined": "❌"}
+
+
+def _is_team_member(payload: dict) -> bool:
+    try:
+        perms = int((payload.get("member") or {}).get("permissions", "0"))
+    except (TypeError, ValueError):
+        return False
+    return bool(perms & 0x20)  # MANAGE_GUILD
+
+
+async def _history_fetch(client: httpx.AsyncClient, status_filter: str, offset: int) -> tuple[list[dict], int]:
+    params = {
+        "select": "id,name,x_username,status,submitted_at,reviewed_by",
+        "order": "submitted_at.desc",
+        "limit": HISTORY_PAGE_SIZE,
+        "offset": offset,
+    }
+    if status_filter and status_filter != "all":
+        params["status"] = f"eq.{status_filter}"
+    res = await client.get(
+        f"{settings.supabase_url}/rest/v1/applications",
+        headers={**_supabase_headers(), "Prefer": "count=exact"},
+        params=params,
+    )
+    res.raise_for_status()
+    rows = res.json()
+    range_total = res.headers.get("content-range", "").split("/")[-1]
+    total = int(range_total) if range_total.isdigit() else len(rows)
+    return rows, total
+
+
+def _history_list_embed(rows: list[dict], total: int, status_filter: str) -> dict:
+    if not rows:
+        desc = "No applications match this filter."
+    else:
+        lines = []
+        for r in rows:
+            emoji = STATUS_EMOJI.get(r["status"], "•")
+            when = (r.get("submitted_at") or "")[:10]
+            lines.append(f"{emoji} **{r['name']}** (@{r['x_username']}) · {r['status']} · {when}")
+        desc = "\n".join(lines)
+    label = {"all": "All", "pending": "Pending", "accepted": "Accepted", "declined": "Declined"}.get(status_filter, "All")
+    return {
+        "title": f"📋 Application History: {label}",
+        "description": desc,
+        "color": EMBED_COLOR,
+        "footer": {"text": f"{total} total · select a name below for full details"},
+    }
+
+
+def _history_components(rows: list[dict], status_filter: str, offset: int) -> list[dict]:
+    components = []
+    if rows:
+        options = [
+            {
+                "label": r["name"][:100],
+                "value": r["id"],
+                "description": f"@{r['x_username']} · {r['status']}"[:100],
+                "emoji": {"name": STATUS_EMOJI.get(r["status"], "•")},
+            }
+            for r in rows
+        ]
+        components.append({
+            "type": 1,
+            "components": [{
+                "type": 3,  # SELECT_MENU
+                "custom_id": f"history_select:{status_filter}:{offset}",
+                "placeholder": "View an applicant's full details",
+                "options": options,
+            }],
+        })
+    components.append({
+        "type": 1,
+        "components": [
+            {
+                "type": 2, "style": 2, "label": "◀ Prev",
+                "custom_id": f"history_page:{status_filter}:{max(0, offset - HISTORY_PAGE_SIZE)}",
+                "disabled": offset <= 0,
+            },
+            {
+                "type": 2, "style": 2, "label": "Next ▶",
+                "custom_id": f"history_page:{status_filter}:{offset + HISTORY_PAGE_SIZE}",
+                "disabled": len(rows) < HISTORY_PAGE_SIZE,
+            },
+        ],
+    })
+    return components
+
+
+async def _history_list_response(status_filter: str, offset: int) -> dict:
+    async with httpx.AsyncClient(timeout=15) as client:
+        rows, total = await _history_fetch(client, status_filter, offset)
+    return {
+        "embeds": [_history_list_embed(rows, total, status_filter)],
+        "components": _history_components(rows, status_filter, offset),
+    }
+
+
+def _history_detail_embed(app_row: dict) -> dict:
+    status = app_row["status"]
+    color = {"pending": 0x1B42FF, "accepted": 0x10B981, "declined": 0xEF4444}[status]
+    fields = [
+        {"name": "X Profile", "value": f"@{app_row['x_username']}", "inline": True},
+        {"name": "Status", "value": f"{STATUS_EMOJI.get(status, '')} {status.capitalize()}", "inline": True},
+        {"name": "Submitted", "value": (app_row.get("submitted_at") or "")[:10], "inline": True},
+        {"name": "Intro & Role", "value": _trunc(app_row["intro"]), "inline": False},
+        {"name": "Communities", "value": _trunc(app_row["communities"]), "inline": False},
+        {"name": "Adding Value", "value": _trunc(app_row["value"]), "inline": False},
+    ]
+    if app_row.get("reviewed_by"):
+        fields.append({"name": "Reviewed By", "value": app_row["reviewed_by"], "inline": True})
+    if app_row.get("reviewed_at"):
+        fields.append({"name": "Reviewed At", "value": app_row["reviewed_at"][:10], "inline": True})
+    if app_row.get("decline_reason"):
+        fields.append({"name": "Decline Reason", "value": _trunc(app_row["decline_reason"], 300), "inline": False})
+    if app_row.get("invite_url"):
+        fields.append({"name": "Invite Link", "value": app_row["invite_url"], "inline": False})
+    return {
+        "title": app_row["name"],
+        "color": color,
+        "fields": fields,
+        "footer": {"text": f"Application ID: {app_row['id']}"},
+    }
+
+
+async def _handle_history_command(payload: dict) -> dict:
+    if not _is_team_member(payload):
+        return {"type": 4, "data": {"content": "This command is for team members only.", "flags": 64}}
+    status_filter = _cmd_options(payload).get("status") or "all"
+    resp = await _history_list_response(status_filter, 0)
+    resp["flags"] = 64  # ephemeral - only the invoking team member sees it
+    return {"type": 4, "data": resp}
+
+
+async def _handle_history_select(payload: dict) -> dict:
+    if not _is_team_member(payload):
+        return {"type": 4, "data": {"content": "This command is for team members only.", "flags": 64}}
+    values = (payload.get("data") or {}).get("values") or []
+    app_id = values[0] if values else None
+    if not app_id:
+        return {"type": 4, "data": {"content": "Nothing selected.", "flags": 64}}
+    async with httpx.AsyncClient(timeout=15) as client:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/applications",
+            headers=_supabase_headers(),
+            params={"id": f"eq.{app_id}", "select": "*"},
+        )
+        res.raise_for_status()
+        rows = res.json()
+    if not rows:
+        return {"type": 4, "data": {"content": "Application not found.", "flags": 64}}
+    return {"type": 4, "data": {"embeds": [_history_detail_embed(rows[0])], "flags": 64}}
+
+
+async def _handle_history_page(payload: dict) -> dict:
+    if not _is_team_member(payload):
+        return {"type": 4, "data": {"content": "This command is for team members only.", "flags": 64}}
+    custom_id = (payload.get("data") or {}).get("custom_id", "")
+    _, _, rest = custom_id.partition(":")
+    status_filter, _, offset_str = rest.partition(":")
+    offset = int(offset_str) if offset_str.isdigit() else 0
+    resp = await _history_list_response(status_filter, offset)
+    return {"type": 7, "data": resp}  # UPDATE_MESSAGE — edits the list in place
 
 
 # Most public RPC endpoints don't send CORS headers (they're built for
