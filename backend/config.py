@@ -21,6 +21,10 @@ class Settings(BaseSettings):
     discord_applications_channel_id: str = ""
     discord_invite_channel_id: str = ""  # channel accepted citizens land in
 
+    x_client_id: str = ""
+    x_client_secret: str = ""
+    x_redirect_uri: str = "https://www.dashhq.site/auth/x/callback"
+
     model_config = {"env_file": ".env"}
 
 

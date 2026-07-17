@@ -38,12 +38,15 @@ alter table members enable row level security;
 create table if not exists applications (
   id                  uuid primary key default gen_random_uuid(),
   name                text not null,
-  x_profile           text not null,
+  x_user_id           text,          -- X (Twitter) numeric user id, from OAuth - the real dedup key
+  x_username          text,          -- X handle at time of connecting, for display only
   intro               text not null,
   communities         text not null,
   value               text not null,
   followed_team       boolean not null default false,
   status              text not null default 'pending', -- pending | accepted | declined
+  decline_reason      text,          -- shown to the applicant on their status page
+  invite_url          text,          -- one-time Discord invite, saved on accept
   reviewed_by         text,
   reviewed_at         timestamptz,
   discord_channel_id  text,
@@ -53,6 +56,7 @@ create table if not exists applications (
 );
 
 create index if not exists applications_status_idx on applications (status);
+create index if not exists applications_x_user_id_idx on applications (x_user_id);
 
 drop trigger if exists applications_set_updated_at on applications;
 create trigger applications_set_updated_at
@@ -60,6 +64,17 @@ create trigger applications_set_updated_at
   for each row execute function set_updated_at();
 
 alter table applications enable row level security;
+
+-- Migration for an applications table created before X OAuth replaced the
+-- typed-in X profile link: adds the new identity/decline/invite columns and
+-- frees x_profile from its old not-null constraint (existing rows keep
+-- their data, new rows just stop writing to it). Safe to re-run.
+alter table applications add column if not exists x_user_id text;
+alter table applications add column if not exists x_username text;
+alter table applications add column if not exists decline_reason text;
+alter table applications add column if not exists invite_url text;
+alter table applications alter column x_profile drop not null;
+create index if not exists applications_x_user_id_idx on applications (x_user_id);
 
 -- Shared cache for OpenSea's free "instant" API key (main.py's
 -- _get_opensea_key). OpenSea allows minting only one such key per hour,
@@ -96,3 +111,4 @@ create table if not exists discord_nft_watchlist (
 create index if not exists discord_nft_watchlist_user_idx on discord_nft_watchlist (discord_user_id);
 
 alter table discord_nft_watchlist enable row level security;
+

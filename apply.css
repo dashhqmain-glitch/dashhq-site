@@ -20,6 +20,7 @@ a{color:inherit;text-decoration:none}
 .fx{position:fixed;inset:0;pointer-events:none;z-index:0}
 .fx-grid{background-image:linear-gradient(rgba(91,155,248,.05) 1px,transparent 1px),linear-gradient(90deg,rgba(91,155,248,.05) 1px,transparent 1px);background-size:64px 64px;mask-image:radial-gradient(ellipse 70% 70% at 50% 20%,#000,transparent 75%);opacity:.6}
 #particles{position:fixed;inset:0;z-index:0}
+#confetti{position:fixed;inset:0;z-index:80;pointer-events:none}
 .glow{position:fixed;left:50%;top:10%;transform:translate(-50%,-50%);width:900px;height:900px;max-width:130vw;background:radial-gradient(circle,rgba(27,66,255,.14),transparent 62%);filter:blur(30px);z-index:0;pointer-events:none}
 .logo-mark-img{background:var(--logo) center/cover no-repeat;display:inline-block;flex:none;border-radius:9px}
 
@@ -99,6 +100,51 @@ nav{position:fixed;top:0;left:0;right:0;z-index:60;display:flex;align-items:cent
 .btn-g:hover{background:rgba(255,255,255,.09)}
 .btn:active{transform:scale(.97)}
 
+/* status link on the intro step */
+.status-link{display:inline-block;margin-top:28px;font-family:var(--mono);font-size:13px;color:var(--muted2);transition:color .2s}
+.status-link:hover{color:var(--sky)}
+
+/* connect X (both wizard step 1 and the status-check entry) */
+.step[data-step="connect"],.step[data-status="entry"]{text-align:center;align-items:center;padding:20px 8px}
+.step[data-step="connect"] .q-title,.step[data-status="entry"] .step-h1{margin-top:16px}
+.btn-x{background:#000;color:#fff;border-color:#1a1a1a;margin-top:30px;font-size:16px;padding:16px 32px}
+.btn-x:hover{background:#171717}
+.btn-x svg{width:18px;height:18px;fill:currentColor}
+.connect-x-btn{align-self:center}
+
+/* connected-as chip, shown once identity is confirmed */
+.connected-chip{display:inline-block;font-family:var(--mono);font-size:11.5px;letter-spacing:.06em;color:var(--green);background:rgba(16,185,129,.1);border:1px solid rgba(16,185,129,.35);border-radius:20px;padding:6px 14px;margin-bottom:16px}
+.connected-chip:empty{display:none}
+
+.review-row.no-edit{cursor:default}
+.review-row.no-edit:hover{border-color:var(--border)}
+
+/* generic failure/blocked badge, reused across blocked / notfound / declined / error states */
+.fail-badge{width:64px;height:64px;border-radius:50%;background:rgba(239,68,68,.12);border:1px solid rgba(239,68,68,.4);color:var(--red);font-size:28px;font-weight:700;display:grid;place-items:center;margin-bottom:6px}
+
+/* ═══ STATUS CHECK CARD ═══ */
+.status-card{display:none}
+.status-card .step{text-align:center;align-items:center;padding:20px 8px}
+.status-spinner{width:40px;height:40px;border-radius:50%;border:3px solid var(--border2);border-top-color:var(--electric);animation:spin .8s linear infinite;margin-bottom:8px}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+.pending-badge{width:64px;height:64px;border-radius:50%;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.4);display:grid;place-items:center;margin-bottom:6px}
+.pending-dot{width:14px;height:14px;border-radius:50%;background:var(--gold);box-shadow:0 0 0 0 rgba(245,158,11,.6);animation:pendingPulse 1.8s ease-out infinite}
+@keyframes pendingPulse{0%{box-shadow:0 0 0 0 rgba(245,158,11,.55)}70%{box-shadow:0 0 0 14px rgba(245,158,11,0)}100%{box-shadow:0 0 0 0 rgba(245,158,11,0)}}
+.status-meta{margin-top:18px;font-family:var(--mono);font-size:12.5px;color:var(--muted2)}
+
+/* accepted: the celebratory moment - bigger badge, warmer glow, confetti
+   fires alongside this from Status.render() in apply.js */
+.accept-badge{width:84px;height:84px;border-radius:50%;background:radial-gradient(circle,rgba(16,185,129,.22),rgba(16,185,129,.06));border:1.5px solid rgba(16,185,129,.55);color:var(--green);font-size:40px;font-weight:800;display:grid;place-items:center;margin-bottom:10px;box-shadow:0 0 60px rgba(16,185,129,.35)}
+.accept-eyebrow{color:var(--green)}
+.accept-eyebrow::before{background:var(--green)}
+.accept-h1{margin-top:22px}
+.accept-cta{background:linear-gradient(120deg,var(--electric),var(--teal));box-shadow:0 12px 34px rgba(34,211,238,.4)}
+.accept-cta:hover{box-shadow:0 16px 42px rgba(34,211,238,.55)}
+
+/* declined: honest, not harsh - the reason is the whole point of this screen */
+.decline-reason{width:100%;max-width:52ch;margin-top:20px;padding:18px 20px;background:rgba(239,68,68,.06);border:1px solid rgba(239,68,68,.3);border-radius:14px;color:var(--ghost);font-size:15px;line-height:1.6;text-align:left}
+
 @media(max-width:560px){
   .apply-shell{padding:104px 18px 40px}
   nav{padding:14px 20px}
@@ -110,6 +156,11 @@ nav{position:fixed;top:0;left:0;right:0;z-index:60;display:flex;align-items:cent
   .fc-name{font-size:14px}
   .review-row{flex-direction:column;gap:8px}
   .review-row .redit{align-self:flex-end}
+  .step-actions{width:100%}
+  .step-actions .btn{width:100%;justify-content:center}
+  .btn-x{width:100%;justify-content:center}
+  .decline-reason{padding:15px 16px;font-size:14px}
+  .accept-badge{width:68px;height:68px;font-size:32px}
 }
 @media(max-width:380px){
   .apply-shell{padding:96px 14px 34px}

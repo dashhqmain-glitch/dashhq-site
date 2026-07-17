@@ -15,6 +15,7 @@
 <body>
 <div class="fx fx-grid"></div>
 <canvas id="particles"></canvas>
+<canvas id="confetti"></canvas>
 <div class="glow"></div>
 
 <nav>
@@ -25,38 +26,56 @@
 <div id="progressTrack"><div id="progressFill"></div></div>
 
 <main class="apply-shell">
+
+  <!-- ═══ APPLICATION WIZARD ═══ -->
   <div class="apply-card" id="applyCard">
 
     <!-- STEP 0 — INTRO -->
     <section class="step on" data-step="0">
       <span class="step-eyebrow">Dash Citizens · Application</span>
       <h1 class="step-h1">Ready to become a<br><span class="gw">Dash Citizen?</span></h1>
-      <p class="step-lead">Seven quick questions. Takes about three minutes. Every application is read and personally reviewed by the founder.</p>
+      <p class="step-lead">Seven quick steps. Takes about three minutes. Every application is read and personally reviewed by the founder.</p>
       <div class="step-actions">
         <button class="btn btn-p magnetic" onclick="Apply.next()">Start Application →</button>
       </div>
+      <a class="status-link" href="javascript:void(0)" onclick="Status.open()">Already applied? Check your status →</a>
     </section>
 
-    <!-- STEP 1 -->
-    <section class="step" data-step="1">
+    <!-- STEP CONNECT — X OAUTH -->
+    <section class="step" data-step="connect">
       <span class="q-count">01 / 07</span>
+      <h2 class="q-title">Connect your X account.</h2>
+      <p class="q-help">This confirms who you are and keeps things fair: one application per account. We only read your public profile, nothing else.</p>
+      <button class="btn btn-x connect-x-btn" id="connectXBtn" onclick="Apply.connectX()">
+        <svg viewBox="0 0 24 24"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+        <span>Connect X to continue</span>
+      </button>
+      <div class="q-error" id="err-connect">Something went wrong connecting your X account. Please try again.</div>
+    </section>
+
+    <!-- BLOCKED — ALREADY HAS AN APPLICATION -->
+    <section class="step" data-step="blocked">
+      <div class="fail-badge">!</div>
+      <h1 class="step-h1">You've already applied.</h1>
+      <p class="step-lead" id="blockedText">Connected as <strong id="blockedHandle">@handle</strong>. There's already an application on file for this X account.</p>
+      <div class="step-actions">
+        <button class="btn btn-p magnetic" onclick="Status.open()">Check Your Status →</button>
+        <a href="/" class="btn btn-g">Back to Site</a>
+      </div>
+    </section>
+
+    <!-- STEP 1 — NAME -->
+    <section class="step" data-step="1">
+      <span class="q-count">02 / 07</span>
+      <div class="connected-chip" id="connectedChip"></div>
       <h2 class="q-title">What's your name or preferred alias?</h2>
       <p class="q-help">However you go by in the space, that's what we'll use.</p>
       <input class="q-input" type="text" id="f-name" placeholder="e.g. Valkyrie.eth" autocomplete="off">
       <div class="q-error" id="err-name">Please enter a name or alias.</div>
     </section>
 
-    <!-- STEP 2 -->
+    <!-- STEP 2 — INTRO -->
     <section class="step" data-step="2">
-      <span class="q-count">02 / 07</span>
-      <h2 class="q-title">Drop your X (Twitter) link.</h2>
-      <p class="q-help">So the team can find and verify you.</p>
-      <input class="q-input" type="text" id="f-x" placeholder="https://x.com/yourhandle" autocomplete="off">
-      <div class="q-error" id="err-x">Enter a valid X profile link (e.g. x.com/yourhandle).</div>
-    </section>
-
-    <!-- STEP 3 -->
-    <section class="step" data-step="3">
       <span class="q-count">03 / 07</span>
       <h2 class="q-title">Give us a brief intro about yourself and your role in Web3.</h2>
       <p class="q-help">Collector, builder, trader, analyst: tell us where you sit.</p>
@@ -65,8 +84,8 @@
       <div class="q-error" id="err-intro">Give a real answer, at least 8 words, 600 characters max.</div>
     </section>
 
-    <!-- STEP 4 -->
-    <section class="step" data-step="4">
+    <!-- STEP 3 — COMMUNITIES -->
+    <section class="step" data-step="3">
       <span class="q-count">04 / 07</span>
       <h2 class="q-title">Which communities are you actively involved in?</h2>
       <p class="q-help">Discords, collectives, DAOs: wherever you spend your time.</p>
@@ -75,8 +94,8 @@
       <div class="q-error" id="err-communities">List at least one community.</div>
     </section>
 
-    <!-- STEP 5 -->
-    <section class="step" data-step="5">
+    <!-- STEP 4 — VALUE -->
+    <section class="step" data-step="4">
       <span class="q-count">05 / 07</span>
       <h2 class="q-title">Dash HQ thrives on contributions. How do you see yourself adding value?</h2>
       <p class="q-help">Alpha, art, research, connections: be specific.</p>
@@ -85,8 +104,8 @@
       <div class="q-error" id="err-value">Give a real answer, at least 8 words, 600 characters max.</div>
     </section>
 
-    <!-- STEP 6 — FOLLOW CONFIRM -->
-    <section class="step" data-step="6">
+    <!-- STEP 5 — FOLLOW CONFIRM -->
+    <section class="step" data-step="5">
       <span class="q-count">06 / 07</span>
       <h2 class="q-title">Have you followed the team?</h2>
       <p class="q-help">They'll be sending out invites, so make sure you're reachable.</p>
@@ -116,8 +135,8 @@
       <div class="q-error" id="err-follow">Please visit all four links before continuing.</div>
     </section>
 
-    <!-- STEP 7 — REVIEW -->
-    <section class="step" data-step="7">
+    <!-- STEP 6 — REVIEW -->
+    <section class="step" data-step="6">
       <span class="q-count">07 / 07</span>
       <h2 class="q-title">Review your application</h2>
       <p class="q-help">Take a second look. You can jump back to any step to edit.</p>
@@ -134,9 +153,10 @@
     <section class="step" data-step="done">
       <div class="done-badge">✓</div>
       <h1 class="step-h1">You're in the queue.</h1>
-      <p class="step-lead">Your application has been received. The founder personally reviews every submission. If you're a fit, you'll get an invite directly.</p>
+      <p class="step-lead">Your application has been received. The founder personally reviews every submission. Come back any time and check your status: you'll see the verdict the moment there's one, including a reason if it's a no.</p>
       <div class="step-actions">
-        <a href="/" class="btn btn-p magnetic">Back to Site →</a>
+        <button class="btn btn-p magnetic" onclick="Status.open()">Check Status →</button>
+        <a href="/" class="btn btn-g">Back to Site</a>
       </div>
     </section>
 
@@ -145,6 +165,90 @@
       <button class="btn btn-p magnetic" id="nextBtn" onclick="Apply.next()">Continue →</button>
     </div>
   </div>
+
+  <!-- ═══ STATUS CHECK ═══ -->
+  <div class="apply-card status-card" id="statusCard" style="display:none">
+
+    <!-- CONNECT TO CHECK -->
+    <section class="step on" data-status="entry">
+      <span class="step-eyebrow">Dash Citizens · Status</span>
+      <h1 class="step-h1">Check your <span class="gw">application status.</span></h1>
+      <p class="step-lead">Connect the same X account you applied with, and we'll pull up exactly where things stand.</p>
+      <button class="btn btn-x connect-x-btn" onclick="Status.connectX()">
+        <svg viewBox="0 0 24 24"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-5.214-6.817L4.99 21.75H1.68l7.73-8.835L1.254 2.25H8.08l4.713 6.231zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+        <span>Connect X to check</span>
+      </button>
+      <a class="status-link" href="/apply">← Back to application</a>
+    </section>
+
+    <!-- LOADING -->
+    <section class="step" data-status="loading">
+      <div class="status-spinner"></div>
+      <p class="step-lead">Looking up your application…</p>
+    </section>
+
+    <!-- NOT FOUND -->
+    <section class="step" data-status="notfound">
+      <div class="fail-badge">?</div>
+      <h1 class="step-h1">No application found.</h1>
+      <p class="step-lead">We couldn't find an application for <strong id="nfHandle">@handle</strong>. If you haven't applied yet, now's a great time.</p>
+      <div class="step-actions">
+        <a href="/apply" class="btn btn-p magnetic">Apply Now →</a>
+        <a href="/" class="btn btn-g">Back to Site</a>
+      </div>
+    </section>
+
+    <!-- PENDING -->
+    <section class="step" data-status="pending">
+      <div class="pending-badge"><span class="pending-dot"></span></div>
+      <span class="step-eyebrow">Still under review</span>
+      <h1 class="step-h1">Sit tight, <span class="gw" id="pendingName">Citizen</span>.</h1>
+      <p class="step-lead">Your application is in the founder's queue, being read the same as every other one: carefully, personally, no shortcuts. There's nothing more to do on your end. Check back any time.</p>
+      <div class="status-meta" id="pendingMeta"></div>
+      <div class="step-actions">
+        <a href="/" class="btn btn-g">Back to Site</a>
+      </div>
+    </section>
+
+    <!-- ACCEPTED -->
+    <section class="step" data-status="accepted">
+      <div class="accept-badge">✓</div>
+      <span class="step-eyebrow accept-eyebrow">Verdict: accepted</span>
+      <h1 class="step-h1 accept-h1">Welcome to Dash HQ,<br><span class="gw" id="acceptName">Citizen</span>.</h1>
+      <p class="step-lead">You're in. Officially a Dash Citizen: read, reviewed, and approved by the founder. Your invite is below, one time use, so open it now.</p>
+      <div class="step-actions">
+        <a class="btn btn-p magnetic accept-cta" id="inviteBtn" href="#" target="_blank" rel="noopener">Join the Server →</a>
+        <a href="/" class="btn btn-g">Back to Site</a>
+      </div>
+    </section>
+
+    <!-- DECLINED -->
+    <section class="step" data-status="declined">
+      <div class="fail-badge">✕</div>
+      <span class="step-eyebrow">Verdict: not this time</span>
+      <h1 class="step-h1">Not a fit, right now.</h1>
+      <p class="step-lead">Your application wasn't approved this round. Here's the reason the team gave:</p>
+      <div class="decline-reason" id="declineReason">No reason provided.</div>
+      <p class="step-lead">You're welcome to apply again whenever you're ready: use the reason above to make the next one stronger.</p>
+      <div class="step-actions">
+        <button class="btn btn-p magnetic" onclick="Apply.reapply()">Apply Again →</button>
+        <a href="/" class="btn btn-g">Back to Site</a>
+      </div>
+    </section>
+
+    <!-- ERROR -->
+    <section class="step" data-status="error">
+      <div class="fail-badge">!</div>
+      <h1 class="step-h1">Something went wrong.</h1>
+      <p class="step-lead" id="statusErrorText">We couldn't check your status just now. Please try again.</p>
+      <div class="step-actions">
+        <button class="btn btn-p magnetic" onclick="Status.open()">Try Again →</button>
+        <a href="/" class="btn btn-g">Back to Site</a>
+      </div>
+    </section>
+
+  </div>
+
 </main>
 
 <script src="apply.js"></script>

@@ -1,6 +1,9 @@
 import asyncio
+import base64
+import hashlib
 import logging
 import re
+import secrets
 import time
 import urllib.parse
 from datetime import datetime, timezone
@@ -202,6 +205,145 @@ async def auth_me(token: str = Query(...)):
         raise HTTPException(status_code=401, detail="Invalid token")
 
 
+# ── X (Twitter) OAuth — identity for the application flow ───────────────────
+# Same JWT-based pattern as Discord auth above, but with one extra wrinkle:
+# X's OAuth 2.0 requires PKCE, and this deployment has no server-side session
+# store to hold the code_verifier between the redirect out and the callback
+# coming back. So the verifier (plus which flow triggered it - starting a
+# fresh application vs checking an existing one) travels round-trip inside
+# the "state" param itself, signed so it can't be tampered with in transit.
+X_API = "https://api.twitter.com/2"
+
+
+def _x_pkce_pair() -> tuple[str, str]:
+    verifier = base64.urlsafe_b64encode(secrets.token_bytes(64)).decode().rstrip("=")
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
+    return verifier, challenge
+
+
+def _redirect_with_params(base_url: str, **params) -> RedirectResponse:
+    parts = urllib.parse.urlsplit(base_url)
+    query = dict(urllib.parse.parse_qsl(parts.query))
+    query.update({k: v for k, v in params.items() if v is not None})
+    return RedirectResponse(urllib.parse.urlunsplit(parts._replace(query=urllib.parse.urlencode(query))))
+
+
+@app.get("/auth/x")
+async def x_login(intent: str = Query("apply")):
+    if intent not in ("apply", "status"):
+        intent = "apply"
+    verifier, challenge = _x_pkce_pair()
+    state = jwt.encode(
+        {"cv": verifier, "intent": intent, "exp": int(time.time()) + 600},
+        settings.jwt_secret,
+        algorithm="HS256",
+    )
+    params = {
+        "response_type": "code",
+        "client_id": settings.x_client_id,
+        "redirect_uri": settings.x_redirect_uri,
+        "scope": "users.read tweet.read",
+        "state": state,
+        "code_challenge": challenge,
+        "code_challenge_method": "S256",
+    }
+    return RedirectResponse(f"https://twitter.com/i/oauth2/authorize?{urllib.parse.urlencode(params)}")
+
+
+@app.get("/auth/x/callback")
+@limiter.limit("10/minute")
+async def x_callback(request: Request, code: str = None, state: str = None, error: str = None):
+    apply_page = f"{settings.frontend_url}/apply"
+    status_page = f"{settings.frontend_url}/apply?view=status"
+
+    if error or not code or not state:
+        return _redirect_with_params(apply_page, xerror="access_denied")
+
+    try:
+        state_payload = jwt.decode(state, settings.jwt_secret, algorithms=["HS256"])
+        verifier = state_payload["cv"]
+        intent = state_payload.get("intent", "apply")
+    except jwt.InvalidTokenError:
+        return _redirect_with_params(apply_page, xerror="bad_state")
+
+    landing = status_page if intent == "status" else apply_page
+
+    try:
+        async with httpx.AsyncClient() as client:
+            token_res = await client.post(
+                f"{X_API}/oauth2/token",
+                data={
+                    "grant_type": "authorization_code",
+                    "code": code,
+                    "redirect_uri": settings.x_redirect_uri,
+                    "code_verifier": verifier,
+                    "client_id": settings.x_client_id,
+                },
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+                auth=(settings.x_client_id, settings.x_client_secret),
+            )
+            if token_res.status_code != 200:
+                return _redirect_with_params(landing, xerror="token_failed")
+
+            access_token = token_res.json()["access_token"]
+
+            user_res = await client.get(
+                f"{X_API}/users/me",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            if user_res.status_code != 200:
+                return _redirect_with_params(landing, xerror="user_fetch_failed")
+
+            x_user = user_res.json()["data"]
+            x_user_id = x_user["id"]
+            x_username = x_user["username"]
+
+        if intent == "status":
+            status_token = jwt.encode(
+                {"x_user_id": x_user_id, "iat": int(time.time()), "exp": int(time.time()) + 600},
+                settings.jwt_secret,
+                algorithm="HS256",
+            )
+            return _redirect_with_params(status_page, token=status_token)
+
+        # intent == apply: re-applying is only allowed once the most recent
+        # application on file for this X account has been declined.
+        async with httpx.AsyncClient(timeout=15) as client:
+            existing_res = await client.get(
+                f"{settings.supabase_url}/rest/v1/applications",
+                headers=_supabase_headers(),
+                params={
+                    "x_user_id": f"eq.{x_user_id}",
+                    "select": "status",
+                    "order": "submitted_at.desc",
+                    "limit": 1,
+                },
+            )
+            existing_res.raise_for_status()
+            existing = existing_res.json()
+
+        if existing and existing[0]["status"] in ("pending", "accepted"):
+            return _redirect_with_params(
+                apply_page, xerror="already_applied", status=existing[0]["status"], handle=x_username
+            )
+
+        apply_token = jwt.encode(
+            {
+                "x_user_id": x_user_id,
+                "x_username": x_username,
+                "intent": "apply",
+                "iat": int(time.time()),
+                "exp": int(time.time()) + 1800,
+            },
+            settings.jwt_secret,
+            algorithm="HS256",
+        )
+        return _redirect_with_params(apply_page, token=apply_token)
+    except (httpx.HTTPError, KeyError, ValueError):
+        logger.exception("X OAuth callback failed")
+        return _redirect_with_params(landing, xerror="server_error")
+
+
 async def _fetch_all_guild_members(client: httpx.AsyncClient) -> list[dict]:
     members = []
     after = "0"
@@ -322,14 +464,9 @@ async def register_discord_commands(request: Request):
 
 # ── Citizenship applications ─────────────────────────────────────────────────
 
-X_PROFILE_RE = re.compile(
-    r"^(https?://)?(www\.)?(x\.com|twitter\.com)/[A-Za-z0-9_]{2,}/?$|^@?[A-Za-z0-9_]{2,}$"
-)
-
-
 class ApplicationIn(BaseModel):
     name: str
-    x: str
+    token: str  # X identity token from the /auth/x?intent=apply flow
     intro: str
     communities: str
     value: str
@@ -363,19 +500,6 @@ class ApplicationIn(BaseModel):
             raise ValueError("list at least one real community")
         return v
 
-    @field_validator("x")
-    @classmethod
-    def _valid_x_profile(cls, v: str) -> str:
-        v = v.strip()
-        if not X_PROFILE_RE.match(v):
-            raise ValueError("must be a valid X profile link or handle")
-        # Normalize to a full URL — a bare handle like "@name" isn't a valid
-        # link target, so without this the Discord follow-up's clickable
-        # profile link would silently fail to render as clickable.
-        if v.startswith("http://") or v.startswith("https://"):
-            return v
-        return f"https://x.com/{v.lstrip('@')}"
-
     @field_validator("followedTeam")
     @classmethod
     def _must_have_followed(cls, v: bool) -> bool:
@@ -397,15 +521,17 @@ def _trunc(s: str, n: int = 1000) -> str:
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
-def _x_profile_button(x_profile: str) -> dict:
+def _x_profile_button(x_username: str) -> dict:
     # A Link-style button (style 5) — Discord opens the URL directly on
     # click, no interaction/custom_id involved. Kept in the message's
     # components permanently, including after Accept/Decline replaces the
     # other buttons, so the team can always reach the applicant's profile.
-    return {"type": 2, "style": 5, "label": "View X Profile", "url": x_profile}
+    return {"type": 2, "style": 5, "label": "View X Profile", "url": f"https://x.com/{x_username}"}
 
 
-def _application_embed(app_row: dict, status: str = "pending", reviewer: str = None, invite_url: str = None) -> dict:
+def _application_embed(
+    app_row: dict, status: str = "pending", reviewer: str = None, invite_url: str = None, decline_reason: str = None
+) -> dict:
     color = {"pending": 0x1B42FF, "accepted": 0x10B981, "declined": 0xEF4444}[status]
     footer = f"Application ID: {app_row['id']}"
     if status != "pending":
@@ -413,11 +539,13 @@ def _application_embed(app_row: dict, status: str = "pending", reviewer: str = N
         footer = f"{icon} {status.capitalize()} by {reviewer} · {footer}"
     fields = [
         {"name": "Name / Alias", "value": _trunc(app_row["name"]), "inline": True},
-        {"name": "X Profile", "value": _trunc(app_row["x_profile"]), "inline": True},
+        {"name": "X Profile", "value": f"@{app_row['x_username']}", "inline": True},
         {"name": "Intro & Role", "value": _trunc(app_row["intro"]), "inline": False},
         {"name": "Communities", "value": _trunc(app_row["communities"]), "inline": False},
         {"name": "Adding Value", "value": _trunc(app_row["value"]), "inline": False},
     ]
+    if decline_reason:
+        fields.append({"name": "Reason for Declining", "value": _trunc(decline_reason, 300), "inline": False})
     if invite_url:
         # Plain text, not a button, so it can just be selected and copied
         # straight out of the embed to hand to the applicant.
@@ -475,9 +603,21 @@ async def submit_application(request: Request, application: ApplicationIn):
         # so scripted submitters don't learn to adapt.
         return {"status": "received"}
 
+    try:
+        identity = jwt.decode(application.token, settings.jwt_secret, algorithms=["HS256"])
+        if identity.get("intent") != "apply":
+            raise jwt.InvalidTokenError("wrong token intent")
+        x_user_id = identity["x_user_id"]
+        x_username = identity["x_username"]
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Your X connection expired, please connect again.")
+    except (jwt.InvalidTokenError, KeyError):
+        raise HTTPException(status_code=401, detail="Could not verify your X connection, please connect again.")
+
     row = {
         "name": application.name,
-        "x_profile": application.x,
+        "x_user_id": x_user_id,
+        "x_username": x_username,
         "intro": application.intro,
         "communities": application.communities,
         "value": application.value,
@@ -485,6 +625,24 @@ async def submit_application(request: Request, application: ApplicationIn):
     }
 
     async with httpx.AsyncClient(timeout=15) as client:
+        # Re-check the dedup rule at submit time too, not just at the OAuth
+        # redirect - closes the gap where someone connects X, then opens a
+        # second tab and submits twice before the first submission lands.
+        existing_res = await client.get(
+            f"{settings.supabase_url}/rest/v1/applications",
+            headers=_supabase_headers(),
+            params={
+                "x_user_id": f"eq.{x_user_id}",
+                "select": "status",
+                "order": "submitted_at.desc",
+                "limit": 1,
+            },
+        )
+        existing_res.raise_for_status()
+        existing = existing_res.json()
+        if existing and existing[0]["status"] in ("pending", "accepted"):
+            raise HTTPException(status_code=409, detail="You already have an application on file. Check your status instead.")
+
         res = await client.post(
             f"{settings.supabase_url}/rest/v1/applications",
             headers=_supabase_headers(),
@@ -504,7 +662,7 @@ async def submit_application(request: Request, application: ApplicationIn):
                     "components": [
                         {"type": 2, "style": 3, "label": "Accept", "custom_id": f"accept:{saved['id']}"},
                         {"type": 2, "style": 4, "label": "Decline", "custom_id": f"decline:{saved['id']}"},
-                        _x_profile_button(saved["x_profile"]),
+                        _x_profile_button(saved["x_username"]),
                     ],
                 }]
                 msg_res = await _discord_post_with_retry(
@@ -529,6 +687,47 @@ async def submit_application(request: Request, application: ApplicationIn):
                 logger.exception("Discord notification failed for application %s", saved.get("id"))
 
     return {"status": "received"}
+
+
+@app.get("/applications/status")
+@limiter.limit("20/minute")
+async def application_status(request: Request, token: str = Query(...)):
+    try:
+        payload = jwt.decode(token, settings.jwt_secret, algorithms=["HS256"])
+        x_user_id = payload["x_user_id"]
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="This link expired, please connect again.")
+    except (jwt.InvalidTokenError, KeyError):
+        raise HTTPException(status_code=401, detail="Could not verify your X connection, please connect again.")
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/applications",
+            headers=_supabase_headers(),
+            params={
+                "x_user_id": f"eq.{x_user_id}",
+                "select": "name,x_username,status,decline_reason,invite_url,submitted_at,reviewed_at",
+                "order": "submitted_at.desc",
+                "limit": 1,
+            },
+        )
+        res.raise_for_status()
+        rows = res.json()
+
+    if not rows:
+        return {"found": False}
+
+    row = rows[0]
+    return {
+        "found": True,
+        "name": row["name"],
+        "x_username": row["x_username"],
+        "status": row["status"],
+        "decline_reason": row.get("decline_reason"),
+        "invite_url": row.get("invite_url") if row["status"] == "accepted" else None,
+        "submitted_at": row["submitted_at"],
+        "reviewed_at": row.get("reviewed_at"),
+    }
 
 
 def _verify_discord_signature(signature: str, timestamp: str, body: bytes) -> bool:
@@ -560,6 +759,21 @@ async def discord_interactions(request: Request):
     if itype == 2:  # APPLICATION_COMMAND — a /slash command
         return await _handle_toolkit_command(payload)
 
+    member_user = payload.get("member", {}).get("user", {})
+    reviewer = member_user.get("global_name") or member_user.get("username", "someone")
+
+    if itype == 5:  # MODAL_SUBMIT — the decline-reason box was just submitted
+        custom_id = payload.get("data", {}).get("custom_id", "")
+        action, _, app_id = custom_id.partition(":")
+        if action != "declinereason" or not app_id:
+            return {"type": 4, "data": {"content": "Unrecognized submission.", "flags": 64}}
+        reason = ""
+        for row in payload.get("data", {}).get("components", []):
+            for comp in row.get("components", []):
+                if comp.get("custom_id") == "reason":
+                    reason = comp.get("value", "").strip()
+        return await _finalize_review(app_id, "declined", reviewer, decline_reason=reason[:300])
+
     if itype != 3:  # not a message-component (button) interaction
         return {"type": 4, "data": {"content": "Unsupported interaction.", "flags": 64}}
 
@@ -571,10 +785,35 @@ async def discord_interactions(request: Request):
     if action not in ("accept", "decline") or not app_id:
         return {"type": 4, "data": {"content": "Unrecognized action.", "flags": 64}}
 
-    member_user = payload.get("member", {}).get("user", {})
-    reviewer = member_user.get("global_name") or member_user.get("username", "someone")
-    status = "accepted" if action == "accept" else "declined"
+    if action == "decline":
+        # Open a modal to collect why, instead of declining blind - the
+        # applicant sees this reason on their status page later, and the
+        # team should always be leaving one.
+        return {
+            "type": 9,  # MODAL
+            "data": {
+                "custom_id": f"declinereason:{app_id}",
+                "title": "Decline Application",
+                "components": [{
+                    "type": 1,
+                    "components": [{
+                        "type": 4,  # TEXT_INPUT
+                        "custom_id": "reason",
+                        "style": 2,  # paragraph
+                        "label": "Reason (shown to the applicant)",
+                        "max_length": 300,
+                        "min_length": 1,
+                        "required": True,
+                        "placeholder": "e.g. Private X account, we need to see your activity",
+                    }],
+                }],
+            },
+        }
 
+    return await _finalize_review(app_id, "accepted", reviewer)
+
+
+async def _finalize_review(app_id: str, status: str, reviewer: str, decline_reason: str = None) -> dict:
     # A Supabase hiccup here shouldn't surface as a broken interaction with
     # no readable message — fall back to a clear ephemeral reply so the mod
     # knows to just click the button again, instead of Discord showing
@@ -592,21 +831,27 @@ async def discord_interactions(request: Request):
                 return {"type": 4, "data": {"content": "Application not found.", "flags": 64}}
             application = rows[0]
 
+            invite_url = None
+            if status == "accepted" and settings.discord_bot_token:
+                invite_url = await _create_one_time_invite(client)
+
+            patch_json = {
+                "status": status,
+                "reviewed_by": reviewer,
+                "reviewed_at": datetime.now(timezone.utc).isoformat(),
+            }
+            if decline_reason is not None:
+                patch_json["decline_reason"] = decline_reason
+            if invite_url:
+                patch_json["invite_url"] = invite_url
+
             patch_res = await client.patch(
                 f"{settings.supabase_url}/rest/v1/applications",
                 headers=_supabase_headers(prefer="return=minimal"),
                 params={"id": f"eq.{app_id}"},
-                json={
-                    "status": status,
-                    "reviewed_by": reviewer,
-                    "reviewed_at": datetime.now(timezone.utc).isoformat(),
-                },
+                json=patch_json,
             )
             patch_res.raise_for_status()
-
-            invite_url = None
-            if status == "accepted" and settings.discord_bot_token:
-                invite_url = await _create_one_time_invite(client)
     except (httpx.HTTPError, KeyError, IndexError):
         logger.exception("Discord interaction failed for application %s", app_id)
         return {"type": 4, "data": {"content": "Something went wrong saving that. Please try the button again.", "flags": 64}}
@@ -614,12 +859,14 @@ async def discord_interactions(request: Request):
     # Accept/Decline buttons are done their job and go away, but the X
     # profile link stays on the message permanently so the team can always
     # reach the applicant, whatever the decision.
-    updated_components = [{"type": 1, "components": [_x_profile_button(application["x_profile"])]}]
+    updated_components = [{"type": 1, "components": [_x_profile_button(application["x_username"])]}]
 
     return {
         "type": 7,  # UPDATE_MESSAGE — edits the original message in place
         "data": {
-            "embeds": [_application_embed(application, status=status, reviewer=reviewer, invite_url=invite_url)],
+            "embeds": [_application_embed(
+                application, status=status, reviewer=reviewer, invite_url=invite_url, decline_reason=decline_reason
+            )],
             "components": updated_components,
         },
     }
