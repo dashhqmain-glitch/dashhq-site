@@ -925,22 +925,7 @@ async def _history_fetch(client: httpx.AsyncClient, status_filter: str, offset: 
     return rows, total
 
 
-async def _history_resolved_count(client: httpx.AsyncClient) -> int:
-    # Only resolved (accepted/declined) applications ever get cleared, so
-    # Clear Old's visibility and threshold are based on this count, not the
-    # all-statuses total - a server with 60 pending and 3 resolved
-    # applications has nothing worth clearing yet.
-    res = await client.get(
-        f"{settings.supabase_url}/rest/v1/applications",
-        headers={**_supabase_headers(), "Prefer": "count=exact"},
-        params={"select": "id", "status": "neq.pending", "limit": 1},
-    )
-    res.raise_for_status()
-    range_total = res.headers.get("content-range", "").split("/")[-1]
-    return int(range_total) if range_total.isdigit() else 0
-
-
-def _history_list_embed(rows: list[dict], total: int, status_filter: str, resolved_total: int) -> dict:
+def _history_list_embed(rows: list[dict], total: int, status_filter: str) -> dict:
     if not rows:
         desc = "No applications match this filter."
     else:
@@ -952,7 +937,12 @@ def _history_list_embed(rows: list[dict], total: int, status_filter: str, resolv
         desc = "\n".join(lines)
     label = {"all": "All", "pending": "Pending", "accepted": "Accepted", "declined": "Declined"}.get(status_filter, "All")
     note = "Select a name below for full details. Use Prev/Next to page through the rest."
-    if resolved_total > HISTORY_KEEP_LIMIT:
+    # Whether Clear Old is worth mentioning is judged off the All tab's own
+    # total, already fetched for this same request - a dedicated exact count
+    # of just resolved applications used to require a second Supabase round
+    # trip on every single render, which was slow enough (stacked on a cold
+    # serverless start) to blow past Discord's 3-second response window.
+    if status_filter == "all" and total > HISTORY_KEEP_LIMIT:
         note += (
             f" Clear Old permanently deletes every resolved application except the {HISTORY_KEEP_LIMIT} most "
             "recent - it cannot be undone, and pending applications are never affected."
@@ -965,7 +955,7 @@ def _history_list_embed(rows: list[dict], total: int, status_filter: str, resolv
     }
 
 
-def _history_components(rows: list[dict], status_filter: str, offset: int, resolved_total: int) -> list[dict]:
+def _history_components(rows: list[dict], status_filter: str, offset: int, total: int) -> list[dict]:
     components = []
     if rows:
         options = [
@@ -1001,7 +991,7 @@ def _history_components(rows: list[dict], status_filter: str, offset: int, resol
             },
         ],
     }
-    if resolved_total > HISTORY_KEEP_LIMIT:
+    if status_filter == "all" and total > HISTORY_KEEP_LIMIT:
         nav_row["components"].append({
             "type": 2, "style": 4, "label": f"🗑 Clear Old (keep {HISTORY_KEEP_LIMIT})",
             "custom_id": "history_clear_prompt",
@@ -1027,17 +1017,14 @@ def _history_components(rows: list[dict], status_filter: str, offset: int, resol
 
 
 async def _history_list_response(status_filter: str, offset: int) -> dict:
-    # Run both queries concurrently rather than one after another - Discord
-    # gives interactions a hard 3-second window to respond, so every bit of
-    # round-trip time here matters.
+    # A single Supabase round trip, not two - Discord gives interactions a
+    # hard 3-second window to respond, and this already sits on top of
+    # whatever a cold serverless start costs, so every extra call matters.
     async with httpx.AsyncClient(timeout=15) as client:
-        (rows, total), resolved_total = await asyncio.gather(
-            _history_fetch(client, status_filter, offset),
-            _history_resolved_count(client),
-        )
+        rows, total = await _history_fetch(client, status_filter, offset)
     return {
-        "embeds": [_history_list_embed(rows, total, status_filter, resolved_total)],
-        "components": _history_components(rows, status_filter, offset, resolved_total),
+        "embeds": [_history_list_embed(rows, total, status_filter)],
+        "components": _history_components(rows, status_filter, offset, total),
     }
 
 
