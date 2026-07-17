@@ -925,7 +925,22 @@ async def _history_fetch(client: httpx.AsyncClient, status_filter: str, offset: 
     return rows, total
 
 
-def _history_list_embed(rows: list[dict], total: int, status_filter: str) -> dict:
+async def _history_resolved_count(client: httpx.AsyncClient) -> int:
+    # Only resolved (accepted/declined) applications ever get cleared, so
+    # Clear Old's visibility and threshold are based on this count, not the
+    # all-statuses total - a server with 60 pending and 3 resolved
+    # applications has nothing worth clearing yet.
+    res = await client.get(
+        f"{settings.supabase_url}/rest/v1/applications",
+        headers={**_supabase_headers(), "Prefer": "count=exact"},
+        params={"select": "id", "status": "neq.pending", "limit": 1},
+    )
+    res.raise_for_status()
+    range_total = res.headers.get("content-range", "").split("/")[-1]
+    return int(range_total) if range_total.isdigit() else 0
+
+
+def _history_list_embed(rows: list[dict], total: int, status_filter: str, resolved_total: int) -> dict:
     if not rows:
         desc = "No applications match this filter."
     else:
@@ -937,8 +952,11 @@ def _history_list_embed(rows: list[dict], total: int, status_filter: str) -> dic
         desc = "\n".join(lines)
     label = {"all": "All", "pending": "Pending", "accepted": "Accepted", "declined": "Declined"}.get(status_filter, "All")
     note = "Select a name below for full details. Use Prev/Next to page through the rest."
-    if total > HISTORY_KEEP_LIMIT:
-        note += f" Clear Old permanently deletes every application except the {HISTORY_KEEP_LIMIT} most recent - it cannot be undone."
+    if resolved_total > HISTORY_KEEP_LIMIT:
+        note += (
+            f" Clear Old permanently deletes every resolved application except the {HISTORY_KEEP_LIMIT} most "
+            "recent - it cannot be undone, and pending applications are never affected."
+        )
     return {
         "title": f"📋 Application History: {label}",
         "description": desc,
@@ -947,7 +965,7 @@ def _history_list_embed(rows: list[dict], total: int, status_filter: str) -> dic
     }
 
 
-def _history_components(rows: list[dict], status_filter: str, offset: int, total: int) -> list[dict]:
+def _history_components(rows: list[dict], status_filter: str, offset: int, resolved_total: int) -> list[dict]:
     components = []
     if rows:
         options = [
@@ -983,21 +1001,38 @@ def _history_components(rows: list[dict], status_filter: str, offset: int, total
             },
         ],
     }
-    if total > HISTORY_KEEP_LIMIT:
+    if resolved_total > HISTORY_KEEP_LIMIT:
         nav_row["components"].append({
             "type": 2, "style": 4, "label": f"🗑 Clear Old (keep {HISTORY_KEEP_LIMIT})",
             "custom_id": "history_clear_prompt",
         })
     components.append(nav_row)
+    # One-click filter row so pending requests are always a single tap
+    # away, without needing to re-run /history with a status option.
+    filter_defs = [("all", "All"), ("pending", "🕓 Pending"), ("accepted", "✅ Accepted"), ("declined", "❌ Declined")]
+    components.append({
+        "type": 1,
+        "components": [
+            {
+                "type": 2,
+                "style": 1 if status_filter == key else 2,  # highlight the active filter
+                "label": label,
+                "custom_id": f"history_page:{key}:0",
+                "disabled": status_filter == key,
+            }
+            for key, label in filter_defs
+        ],
+    })
     return components
 
 
 async def _history_list_response(status_filter: str, offset: int) -> dict:
     async with httpx.AsyncClient(timeout=15) as client:
         rows, total = await _history_fetch(client, status_filter, offset)
+        resolved_total = await _history_resolved_count(client)
     return {
-        "embeds": [_history_list_embed(rows, total, status_filter)],
-        "components": _history_components(rows, status_filter, offset, total),
+        "embeds": [_history_list_embed(rows, total, status_filter, resolved_total)],
+        "components": _history_components(rows, status_filter, offset, resolved_total),
     }
 
 
@@ -1008,7 +1043,8 @@ async def _handle_history_clear_prompt(payload: dict) -> dict:
         "type": 4,
         "data": {
             "content": (
-                f"**This will permanently delete every application except the {HISTORY_KEEP_LIMIT} most recent.** "
+                f"**This will permanently delete every resolved (accepted/declined) application except the "
+                f"{HISTORY_KEEP_LIMIT} most recent.** Pending applications are never touched, no matter how old. "
                 "This cannot be undone: declined reasons, invite links, and reviewer history for anything older "
                 "will be gone for good. Are you sure?"
             ),
@@ -1028,10 +1064,15 @@ async def _handle_history_clear_confirm(payload: dict) -> dict:
     if not _is_team_member(payload):
         return {"type": 4, "data": {"content": "This command is for team members only.", "flags": 64}}
     async with httpx.AsyncClient(timeout=15) as client:
+        # Only resolved applications ever count toward the keep-limit or get
+        # deleted - a pending one that's been sitting a while is still live
+        # work the team hasn't acted on yet, not clutter, so it's excluded
+        # from this query entirely and also re-excluded (belt and suspenders)
+        # directly on the delete call below.
         keep_res = await client.get(
             f"{settings.supabase_url}/rest/v1/applications",
             headers=_supabase_headers(),
-            params={"select": "id", "order": "submitted_at.desc", "limit": HISTORY_KEEP_LIMIT},
+            params={"select": "id", "status": "neq.pending", "order": "submitted_at.desc", "limit": HISTORY_KEEP_LIMIT},
         )
         keep_res.raise_for_status()
         keep_ids = [r["id"] for r in keep_res.json()]
@@ -1041,7 +1082,7 @@ async def _handle_history_clear_confirm(payload: dict) -> dict:
         del_res = await client.delete(
             f"{settings.supabase_url}/rest/v1/applications",
             headers=_supabase_headers(prefer="return=representation"),
-            params={"id": f"not.in.({','.join(keep_ids)})"},
+            params={"id": f"not.in.({','.join(keep_ids)})", "status": "neq.pending"},
         )
         del_res.raise_for_status()
         deleted_count = len(del_res.json())
@@ -1049,7 +1090,7 @@ async def _handle_history_clear_confirm(payload: dict) -> dict:
     return {
         "type": 7,  # UPDATE_MESSAGE — replaces the confirm prompt
         "data": {
-            "content": f"Deleted {deleted_count} old application{'s' if deleted_count != 1 else ''}. The {HISTORY_KEEP_LIMIT} most recent stay on file. Run `/history` again to see the updated list.",
+            "content": f"Deleted {deleted_count} old application{'s' if deleted_count != 1 else ''}. The {HISTORY_KEEP_LIMIT} most recent resolved applications stay on file, and every pending one was left untouched. Run `/history` again to see the updated list.",
             "components": [],
         },
     }
@@ -1086,6 +1127,21 @@ def _history_detail_embed(app_row: dict) -> dict:
     }
 
 
+def _history_detail_components(app_row: dict) -> list[dict]:
+    # Pending applications get real Accept/Decline buttons right here, not
+    # just a read-only view - reuses the exact same accept:/decline: custom
+    # IDs the original applications-channel message uses, so it's the same
+    # tested code path either way. Accepted/declined ones are read-only,
+    # nothing left to action.
+    row = [_x_profile_button(app_row["x_username"])]
+    if app_row["status"] == "pending":
+        row = [
+            {"type": 2, "style": 3, "label": "Accept", "custom_id": f"accept:{app_row['id']}"},
+            {"type": 2, "style": 4, "label": "Decline", "custom_id": f"decline:{app_row['id']}"},
+        ] + row
+    return [{"type": 1, "components": row}]
+
+
 async def _handle_history_command(payload: dict) -> dict:
     if not _is_team_member(payload):
         return {"type": 4, "data": {"content": "This command is for team members only.", "flags": 64}}
@@ -1112,7 +1168,14 @@ async def _handle_history_select(payload: dict) -> dict:
         rows = res.json()
     if not rows:
         return {"type": 4, "data": {"content": "Application not found.", "flags": 64}}
-    return {"type": 4, "data": {"embeds": [_history_detail_embed(rows[0])], "flags": 64}}
+    return {
+        "type": 4,
+        "data": {
+            "embeds": [_history_detail_embed(rows[0])],
+            "components": _history_detail_components(rows[0]),
+            "flags": 64,
+        },
+    }
 
 
 async def _handle_history_page(payload: dict) -> dict:
