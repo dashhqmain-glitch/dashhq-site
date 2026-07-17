@@ -916,11 +916,18 @@ async def _history_fetch(client: httpx.AsyncClient, status_filter: str, offset: 
     }
     if status_filter and status_filter != "all":
         params["status"] = f"eq.{status_filter}"
-    res = await client.get(
-        f"{settings.supabase_url}/rest/v1/applications",
-        headers={**_supabase_headers(), "Prefer": "count=exact"},
-        params=params,
-    )
+    _t0 = time.time()
+    try:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/applications",
+            headers={**_supabase_headers(), "Prefer": "count=exact"},
+            params=params,
+            timeout=5,
+        )
+        logger.info("supabase applications query took %.2fs, status %s", time.time() - _t0, res.status_code)
+    except httpx.TimeoutException:
+        logger.warning("supabase applications query TIMED OUT after %.2fs", time.time() - _t0)
+        raise
     res.raise_for_status()
     rows = res.json()
     range_total = res.headers.get("content-range", "").split("/")[-1]
@@ -1142,7 +1149,11 @@ async def _handle_history_command(payload: dict) -> dict:
     if not _is_team_member(payload):
         return {"type": 4, "data": {"content": "This command is for team members only.", "flags": 64}}
     status_filter = _cmd_options(payload).get("status") or "all"
-    resp = await _history_list_response(status_filter, 0)
+    try:
+        resp = await _history_list_response(status_filter, 0)
+    except (httpx.HTTPError, KeyError, ValueError):
+        logger.exception("history_command failed after %.2fs", time.time() - _t0)
+        return {"type": 4, "data": {"content": "Could not reach the database just now. Please try again.", "flags": 64}}
     logger.info("history_command db+build took %.2fs", time.time() - _t0)
     resp["flags"] = 64  # ephemeral - only the invoking team member sees it
     return {"type": 4, "data": resp}
