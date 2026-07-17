@@ -787,6 +787,12 @@ async def discord_interactions(request: Request):
         return await _handle_history_select(payload)
     if history_id.startswith("history_page:"):
         return await _handle_history_page(payload)
+    if history_id == "history_clear_prompt":
+        return await _handle_history_clear_prompt(payload)
+    if history_id == "history_clear_confirm":
+        return await _handle_history_clear_confirm(payload)
+    if history_id == "history_clear_cancel":
+        return await _handle_history_clear_cancel(payload)
 
     custom_id = payload.get("data", {}).get("custom_id", "")
     action, _, app_id = custom_id.partition(":")
@@ -886,6 +892,7 @@ async def _finalize_review(app_id: str, status: str, reviewer: str, decline_reas
 # _is_team_member is a second, server-side check on top of that in case a
 # server admin ever loosens the command's visibility in Integrations settings.
 HISTORY_PAGE_SIZE = 20
+HISTORY_KEEP_LIMIT = 50
 STATUS_EMOJI = {"pending": "🕓", "accepted": "✅", "declined": "❌"}
 
 
@@ -929,15 +936,18 @@ def _history_list_embed(rows: list[dict], total: int, status_filter: str) -> dic
             lines.append(f"{emoji} **{r['name']}** (@{r['x_username']}) · {r['status']} · {when}")
         desc = "\n".join(lines)
     label = {"all": "All", "pending": "Pending", "accepted": "Accepted", "declined": "Declined"}.get(status_filter, "All")
+    note = "Select a name below for full details. Use Prev/Next to page through the rest."
+    if total > HISTORY_KEEP_LIMIT:
+        note += f" Clear Old permanently deletes every application except the {HISTORY_KEEP_LIMIT} most recent - it cannot be undone."
     return {
         "title": f"📋 Application History: {label}",
         "description": desc,
         "color": EMBED_COLOR,
-        "footer": {"text": f"{total} total · select a name below for full details"},
+        "footer": {"text": f"{total} total. {note}"},
     }
 
 
-def _history_components(rows: list[dict], status_filter: str, offset: int) -> list[dict]:
+def _history_components(rows: list[dict], status_filter: str, offset: int, total: int) -> list[dict]:
     components = []
     if rows:
         options = [
@@ -958,7 +968,7 @@ def _history_components(rows: list[dict], status_filter: str, offset: int) -> li
                 "options": options,
             }],
         })
-    components.append({
+    nav_row = {
         "type": 1,
         "components": [
             {
@@ -972,7 +982,13 @@ def _history_components(rows: list[dict], status_filter: str, offset: int) -> li
                 "disabled": len(rows) < HISTORY_PAGE_SIZE,
             },
         ],
-    })
+    }
+    if total > HISTORY_KEEP_LIMIT:
+        nav_row["components"].append({
+            "type": 2, "style": 4, "label": f"🗑 Clear Old (keep {HISTORY_KEEP_LIMIT})",
+            "custom_id": "history_clear_prompt",
+        })
+    components.append(nav_row)
     return components
 
 
@@ -981,8 +997,66 @@ async def _history_list_response(status_filter: str, offset: int) -> dict:
         rows, total = await _history_fetch(client, status_filter, offset)
     return {
         "embeds": [_history_list_embed(rows, total, status_filter)],
-        "components": _history_components(rows, status_filter, offset),
+        "components": _history_components(rows, status_filter, offset, total),
     }
+
+
+async def _handle_history_clear_prompt(payload: dict) -> dict:
+    if not _is_team_member(payload):
+        return {"type": 4, "data": {"content": "This command is for team members only.", "flags": 64}}
+    return {
+        "type": 4,
+        "data": {
+            "content": (
+                f"**This will permanently delete every application except the {HISTORY_KEEP_LIMIT} most recent.** "
+                "This cannot be undone: declined reasons, invite links, and reviewer history for anything older "
+                "will be gone for good. Are you sure?"
+            ),
+            "flags": 64,
+            "components": [{
+                "type": 1,
+                "components": [
+                    {"type": 2, "style": 4, "label": "Confirm Delete", "custom_id": "history_clear_confirm"},
+                    {"type": 2, "style": 2, "label": "Cancel", "custom_id": "history_clear_cancel"},
+                ],
+            }],
+        },
+    }
+
+
+async def _handle_history_clear_confirm(payload: dict) -> dict:
+    if not _is_team_member(payload):
+        return {"type": 4, "data": {"content": "This command is for team members only.", "flags": 64}}
+    async with httpx.AsyncClient(timeout=15) as client:
+        keep_res = await client.get(
+            f"{settings.supabase_url}/rest/v1/applications",
+            headers=_supabase_headers(),
+            params={"select": "id", "order": "submitted_at.desc", "limit": HISTORY_KEEP_LIMIT},
+        )
+        keep_res.raise_for_status()
+        keep_ids = [r["id"] for r in keep_res.json()]
+        if not keep_ids:
+            return {"type": 7, "data": {"content": "Nothing to clear.", "components": []}}
+
+        del_res = await client.delete(
+            f"{settings.supabase_url}/rest/v1/applications",
+            headers=_supabase_headers(prefer="return=representation"),
+            params={"id": f"not.in.({','.join(keep_ids)})"},
+        )
+        del_res.raise_for_status()
+        deleted_count = len(del_res.json())
+
+    return {
+        "type": 7,  # UPDATE_MESSAGE — replaces the confirm prompt
+        "data": {
+            "content": f"Deleted {deleted_count} old application{'s' if deleted_count != 1 else ''}. The {HISTORY_KEEP_LIMIT} most recent stay on file. Run `/history` again to see the updated list.",
+            "components": [],
+        },
+    }
+
+
+async def _handle_history_clear_cancel(payload: dict) -> dict:
+    return {"type": 7, "data": {"content": "Cancelled, nothing was deleted.", "components": []}}
 
 
 def _history_detail_embed(app_row: dict) -> dict:
