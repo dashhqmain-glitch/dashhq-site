@@ -24,6 +24,7 @@ from config import settings
 from register_commands import COMMANDS as TOOLKIT_BOT_COMMANDS
 
 logger = logging.getLogger("dashhq")
+_MODULE_LOAD_TIME = time.time()  # temporary: lets request logs show cold-start age
 
 limiter = Limiter(key_func=get_remote_address)
 
@@ -743,6 +744,8 @@ def _verify_discord_signature(signature: str, timestamp: str, body: bytes) -> bo
 
 @app.post("/discord/interactions")
 async def discord_interactions(request: Request):
+    _req_start = time.time()
+    logger.info("interaction received, process age %.2fs", _req_start - _MODULE_LOAD_TIME)
     body = await request.body()
     signature = request.headers.get("x-signature-ed25519", "")
     timestamp = request.headers.get("x-signature-timestamp", "")
@@ -1135,10 +1138,12 @@ def _history_detail_components(app_row: dict) -> list[dict]:
 
 
 async def _handle_history_command(payload: dict) -> dict:
+    _t0 = time.time()
     if not _is_team_member(payload):
         return {"type": 4, "data": {"content": "This command is for team members only.", "flags": 64}}
     status_filter = _cmd_options(payload).get("status") or "all"
     resp = await _history_list_response(status_filter, 0)
+    logger.info("history_command db+build took %.2fs", time.time() - _t0)
     resp["flags"] = 64  # ephemeral - only the invoking team member sees it
     return {"type": 4, "data": resp}
 
