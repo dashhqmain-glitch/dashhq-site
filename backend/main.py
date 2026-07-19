@@ -785,7 +785,7 @@ async def discord_interactions(request: Request):
     history_id = payload.get("data", {}).get("custom_id", "")
     if history_id.startswith("history_select:"):
         return await _handle_history_select(payload)
-    if history_id.startswith("history_page:"):
+    if history_id.startswith("history_page:") or history_id.startswith("history_filter:"):
         return await _handle_history_page(payload)
     if history_id == "history_clear_prompt":
         return await _handle_history_clear_prompt(payload)
@@ -1073,7 +1073,7 @@ def _history_components(rows: list[dict], status_filter: str, offset: int, resol
                 "type": 2,
                 "style": 1 if status_filter == key else 2,  # highlight the active filter
                 "label": label,
-                "custom_id": f"history_page:{key}:0",
+                "custom_id": f"history_filter:{key}:0",
                 "disabled": status_filter == key,
             }
             for key, label in filter_defs
