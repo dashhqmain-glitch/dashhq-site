@@ -1167,6 +1167,22 @@ def _history_detail_components(app_row: dict) -> list[dict]:
 async def _handle_history_command(payload: dict) -> dict:
     if not _is_team_member(payload):
         return {"type": 4, "data": {"content": "This command is for team members only.", "flags": 64}}
+    # Tied to the applications channel specifically, not just gated by
+    # permission - even a team member typing this from #general gets
+    # pointed back to the right place instead of getting a result out of
+    # context. The permission check above is what actually keeps citizens
+    # out; this is about where, not who.
+    if (
+        settings.discord_applications_channel_id
+        and payload.get("channel_id") != settings.discord_applications_channel_id
+    ):
+        return {
+            "type": 4,
+            "data": {
+                "content": f"Use this in <#{settings.discord_applications_channel_id}> instead.",
+                "flags": 64,
+            },
+        }
     status_filter = _cmd_options(payload).get("status") or "all"
     await _dispatch_history_worker("list", token=payload["token"], status_filter=status_filter, offset=0)
     return {"type": 5, "data": {"flags": 64}}  # DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE, ephemeral
