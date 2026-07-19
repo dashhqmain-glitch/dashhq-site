@@ -62,7 +62,7 @@ COMMANDS = [
     },
     {
         "name": "scan",
-        "description": "Look up a token contract address — price, liquidity, volume",
+        "description": "Look up a token contract address: price, liquidity, volume",
         "options": [{"name": "address", "description": "Token contract address", "type": 3, "required": True}],
     },
     {
@@ -75,7 +75,7 @@ COMMANDS = [
     },
     {
         "name": "nft",
-        "description": "Look up an NFT collection — floor, volume, verified status",
+        "description": "Look up an NFT collection: floor, volume, verified status",
         "options": [{"name": "collection", "description": "Collection name", "type": 3, "required": True}],
     },
     {
