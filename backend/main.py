@@ -757,6 +757,8 @@ async def discord_interactions(request: Request):
         return {"type": 1}
 
     if itype == 2:  # APPLICATION_COMMAND — a /slash command
+        if (payload.get("data") or {}).get("name") == "history":
+            return await _handle_history_command(payload)
         return await _handle_toolkit_command(payload)
 
     member_user = payload.get("member", {}).get("user", {})
@@ -779,6 +781,18 @@ async def discord_interactions(request: Request):
 
     if payload.get("data", {}).get("custom_id") == "toolkit_select":
         return await _handle_toolkit_select(payload)
+
+    history_id = payload.get("data", {}).get("custom_id", "")
+    if history_id.startswith("history_select:"):
+        return await _handle_history_select(payload)
+    if history_id.startswith("history_page:"):
+        return await _handle_history_page(payload)
+    if history_id == "history_clear_prompt":
+        return await _handle_history_clear_prompt(payload)
+    if history_id == "history_clear_confirm":
+        return await _handle_history_clear_confirm(payload)
+    if history_id == "history_clear_cancel":
+        return await _handle_history_clear_cancel(payload)
 
     custom_id = payload.get("data", {}).get("custom_id", "")
     action, _, app_id = custom_id.partition(":")
@@ -870,6 +884,397 @@ async def _finalize_review(app_id: str, status: str, reviewer: str, decline_reas
             "components": updated_components,
         },
     }
+
+
+# ── /history — team-only application archive, browsable in Discord ──────────
+# Registered with default_member_permissions requiring Manage Server (see
+# register_commands.py), so regular citizens never see this command at all.
+# _is_team_member is a second, server-side check on top of that in case a
+# server admin ever loosens the command's visibility in Integrations settings.
+#
+# Why this looks the way it does: Discord requires an interaction response
+# within 3 seconds. A cold serverless start plus a Supabase round trip can
+# blow past that on its own - and Mangum (the ASGI-to-Lambda adapter this
+# backend runs on) makes FastAPI's normal BackgroundTasks useless for fixing
+# it, because Mangum's Lambda handler blocks on the *entire* ASGI response
+# cycle, background tasks included, before it hands anything back to the
+# caller (confirmed against Mangum's own HTTPCycle source: it awaits the
+# whole app() call, background task and all, before building the Lambda
+# response). So a "deferred ack now, background work after" pattern doesn't
+# actually respond any faster on this platform - the client still waits for
+# both.
+#
+# The fix that actually works: every slow handler below does zero DB work
+# itself. It fires a real, independent HTTP request to this same backend's
+# own /discord/history-worker endpoint (a genuinely separate Vercel/Lambda
+# invocation, not a task tied to this one), then immediately returns
+# Discord's deferred-response type - which this invocation can do in
+# milliseconds since it never touches Supabase. The short client-side
+# timeout on that dispatch call exists only so *this* request doesn't sit
+# around waiting for the worker's slower response; once the worker's own
+# invocation has been accepted by Vercel's routing layer, it keeps running
+# to completion on its own regardless of what this caller does afterward.
+# The worker then PATCHes the real content into Discord's follow-up message
+# endpoint once it's ready, with up to 15 minutes to do it in instead of 3
+# seconds.
+HISTORY_PAGE_SIZE = 20
+HISTORY_KEEP_LIMIT = 50
+STATUS_EMOJI = {"pending": "🕓", "accepted": "✅", "declined": "❌"}
+
+
+def _is_team_member(payload: dict) -> bool:
+    try:
+        perms = int((payload.get("member") or {}).get("permissions", "0"))
+    except (TypeError, ValueError):
+        return False
+    return bool(perms & 0x20)  # MANAGE_GUILD
+
+
+async def _dispatch_history_worker(action: str, **kwargs) -> None:
+    body = {"action": action, **kwargs}
+    try:
+        async with httpx.AsyncClient(timeout=2.5) as client:
+            await client.post(
+                f"{settings.frontend_url}/discord/history-worker",
+                json=body,
+                headers={"X-Internal-Secret": settings.cron_secret},
+            )
+    except (httpx.TimeoutException, httpx.HTTPError):
+        # Expected in the common case: this only needs to wait long enough
+        # for the request to be dispatched, not for the worker's own
+        # (slower) DB work to finish. See the module note above.
+        pass
+
+
+async def _discord_followup_patch(token: str, data: dict) -> None:
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            res = await client.patch(
+                f"{DISCORD_API}/webhooks/{settings.discord_client_id}/{token}/messages/@original",
+                json=data,
+            )
+            res.raise_for_status()
+    except (httpx.HTTPError, KeyError, ValueError):
+        logger.exception("Discord follow-up failed for /history interaction")
+
+
+async def _history_fetch(client: httpx.AsyncClient, status_filter: str, offset: int) -> tuple[list[dict], int]:
+    params = {
+        "select": "id,name,x_username,status,submitted_at,reviewed_by",
+        "order": "submitted_at.desc",
+        "limit": HISTORY_PAGE_SIZE,
+        "offset": offset,
+    }
+    if status_filter and status_filter != "all":
+        params["status"] = f"eq.{status_filter}"
+    res = await client.get(
+        f"{settings.supabase_url}/rest/v1/applications",
+        headers={**_supabase_headers(), "Prefer": "count=exact"},
+        params=params,
+    )
+    res.raise_for_status()
+    rows = res.json()
+    range_total = res.headers.get("content-range", "").split("/")[-1]
+    total = int(range_total) if range_total.isdigit() else len(rows)
+    return rows, total
+
+
+async def _history_resolved_count(client: httpx.AsyncClient) -> int:
+    # Only resolved (accepted/declined) applications ever get cleared, so
+    # Clear Old's visibility and threshold are based on this count, not the
+    # all-statuses total - a server with 60 pending and 3 resolved
+    # applications has nothing worth clearing yet.
+    res = await client.get(
+        f"{settings.supabase_url}/rest/v1/applications",
+        headers={**_supabase_headers(), "Prefer": "count=exact"},
+        params={"select": "id", "status": "neq.pending", "limit": 1},
+    )
+    res.raise_for_status()
+    range_total = res.headers.get("content-range", "").split("/")[-1]
+    return int(range_total) if range_total.isdigit() else 0
+
+
+def _history_list_embed(rows: list[dict], total: int, status_filter: str, resolved_total: int) -> dict:
+    if not rows:
+        desc = "No applications match this filter."
+    else:
+        lines = []
+        for r in rows:
+            emoji = STATUS_EMOJI.get(r["status"], "•")
+            when = (r.get("submitted_at") or "")[:10]
+            lines.append(f"{emoji} **{r['name']}** (@{r['x_username']}) · {r['status']} · {when}")
+        desc = "\n".join(lines)
+    label = {"all": "All", "pending": "Pending", "accepted": "Accepted", "declined": "Declined"}.get(status_filter, "All")
+    note = "Select a name below for full details. Use Prev/Next to page through the rest."
+    if resolved_total > HISTORY_KEEP_LIMIT:
+        note += (
+            f" Clear Old permanently deletes every resolved application except the {HISTORY_KEEP_LIMIT} most "
+            "recent - it cannot be undone, and pending applications are never affected."
+        )
+    return {
+        "title": f"📋 Application History: {label}",
+        "description": desc,
+        "color": EMBED_COLOR,
+        "footer": {"text": f"{total} total. {note}"},
+    }
+
+
+def _history_components(rows: list[dict], status_filter: str, offset: int, resolved_total: int) -> list[dict]:
+    components = []
+    if rows:
+        options = [
+            {
+                "label": r["name"][:100],
+                "value": r["id"],
+                "description": f"@{r['x_username']} · {r['status']}"[:100],
+                "emoji": {"name": STATUS_EMOJI.get(r["status"], "•")},
+            }
+            for r in rows
+        ]
+        components.append({
+            "type": 1,
+            "components": [{
+                "type": 3,  # SELECT_MENU
+                "custom_id": f"history_select:{status_filter}:{offset}",
+                "placeholder": "View an applicant's full details",
+                "options": options,
+            }],
+        })
+    nav_row = {
+        "type": 1,
+        "components": [
+            {
+                "type": 2, "style": 2, "label": "◀ Prev",
+                "custom_id": f"history_page:{status_filter}:{max(0, offset - HISTORY_PAGE_SIZE)}",
+                "disabled": offset <= 0,
+            },
+            {
+                "type": 2, "style": 2, "label": "Next ▶",
+                "custom_id": f"history_page:{status_filter}:{offset + HISTORY_PAGE_SIZE}",
+                "disabled": len(rows) < HISTORY_PAGE_SIZE,
+            },
+        ],
+    }
+    if resolved_total > HISTORY_KEEP_LIMIT:
+        nav_row["components"].append({
+            "type": 2, "style": 4, "label": f"🗑 Clear Old (keep {HISTORY_KEEP_LIMIT})",
+            "custom_id": "history_clear_prompt",
+        })
+    components.append(nav_row)
+    # One-click filter row so pending requests are always a single tap
+    # away, without needing to re-run /history with a status option.
+    filter_defs = [("all", "All"), ("pending", "🕓 Pending"), ("accepted", "✅ Accepted"), ("declined", "❌ Declined")]
+    components.append({
+        "type": 1,
+        "components": [
+            {
+                "type": 2,
+                "style": 1 if status_filter == key else 2,  # highlight the active filter
+                "label": label,
+                "custom_id": f"history_page:{key}:0",
+                "disabled": status_filter == key,
+            }
+            for key, label in filter_defs
+        ],
+    })
+    return components
+
+
+async def _history_list_response(status_filter: str, offset: int) -> dict:
+    async with httpx.AsyncClient(timeout=15) as client:
+        rows, total = await _history_fetch(client, status_filter, offset)
+        resolved_total = await _history_resolved_count(client)
+    return {
+        "embeds": [_history_list_embed(rows, total, status_filter, resolved_total)],
+        "components": _history_components(rows, status_filter, offset, resolved_total),
+    }
+
+
+async def _handle_history_clear_prompt(payload: dict) -> dict:
+    # No DB work here - just showing the confirm dialog - so this responds
+    # directly rather than round-tripping through the worker.
+    if not _is_team_member(payload):
+        return {"type": 4, "data": {"content": "This command is for team members only.", "flags": 64}}
+    return {
+        "type": 4,
+        "data": {
+            "content": (
+                f"**This will permanently delete every resolved (accepted/declined) application except the "
+                f"{HISTORY_KEEP_LIMIT} most recent.** Pending applications are never touched, no matter how old. "
+                "This cannot be undone: declined reasons, invite links, and reviewer history for anything older "
+                "will be gone for good. Are you sure?"
+            ),
+            "flags": 64,
+            "components": [{
+                "type": 1,
+                "components": [
+                    {"type": 2, "style": 4, "label": "Confirm Delete", "custom_id": "history_clear_confirm"},
+                    {"type": 2, "style": 2, "label": "Cancel", "custom_id": "history_clear_cancel"},
+                ],
+            }],
+        },
+    }
+
+
+async def _handle_history_clear_cancel(payload: dict) -> dict:
+    return {"type": 7, "data": {"content": "Cancelled, nothing was deleted.", "components": []}}
+
+
+def _history_detail_embed(app_row: dict) -> dict:
+    status = app_row["status"]
+    color = {"pending": 0x1B42FF, "accepted": 0x10B981, "declined": 0xEF4444}[status]
+    fields = [
+        {"name": "X Profile", "value": f"@{app_row['x_username']}", "inline": True},
+        {"name": "Status", "value": f"{STATUS_EMOJI.get(status, '')} {status.capitalize()}", "inline": True},
+        {"name": "Submitted", "value": (app_row.get("submitted_at") or "")[:10], "inline": True},
+        {"name": "Intro & Role", "value": _trunc(app_row["intro"]), "inline": False},
+        {"name": "Communities", "value": _trunc(app_row["communities"]), "inline": False},
+        {"name": "Adding Value", "value": _trunc(app_row["value"]), "inline": False},
+    ]
+    if app_row.get("reviewed_by"):
+        fields.append({"name": "Reviewed By", "value": app_row["reviewed_by"], "inline": True})
+    if app_row.get("reviewed_at"):
+        fields.append({"name": "Reviewed At", "value": app_row["reviewed_at"][:10], "inline": True})
+    if app_row.get("decline_reason"):
+        fields.append({"name": "Decline Reason", "value": _trunc(app_row["decline_reason"], 300), "inline": False})
+    if app_row.get("invite_url"):
+        fields.append({"name": "Invite Link", "value": app_row["invite_url"], "inline": False})
+    return {
+        "title": app_row["name"],
+        "color": color,
+        "fields": fields,
+        "footer": {"text": f"Application ID: {app_row['id']}"},
+    }
+
+
+def _history_detail_components(app_row: dict) -> list[dict]:
+    # Pending applications get real Accept/Decline buttons right here, not
+    # just a read-only view - reuses the exact same accept:/decline: custom
+    # IDs the original applications-channel message uses, so it's the same
+    # tested code path either way. Accepted/declined ones are read-only,
+    # nothing left to action.
+    row = [_x_profile_button(app_row["x_username"])]
+    if app_row["status"] == "pending":
+        row = [
+            {"type": 2, "style": 3, "label": "Accept", "custom_id": f"accept:{app_row['id']}"},
+            {"type": 2, "style": 4, "label": "Decline", "custom_id": f"decline:{app_row['id']}"},
+        ] + row
+    return [{"type": 1, "components": row}]
+
+
+async def _handle_history_command(payload: dict) -> dict:
+    if not _is_team_member(payload):
+        return {"type": 4, "data": {"content": "This command is for team members only.", "flags": 64}}
+    status_filter = _cmd_options(payload).get("status") or "all"
+    await _dispatch_history_worker("list", token=payload["token"], status_filter=status_filter, offset=0)
+    return {"type": 5, "data": {"flags": 64}}  # DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE, ephemeral
+
+
+async def _handle_history_select(payload: dict) -> dict:
+    if not _is_team_member(payload):
+        return {"type": 4, "data": {"content": "This command is for team members only.", "flags": 64}}
+    values = (payload.get("data") or {}).get("values") or []
+    app_id = values[0] if values else None
+    if not app_id:
+        return {"type": 4, "data": {"content": "Nothing selected.", "flags": 64}}
+    await _dispatch_history_worker("select", token=payload["token"], app_id=app_id)
+    return {"type": 5, "data": {"flags": 64}}  # DEFERRED_CHANNEL_MESSAGE_WITH_SOURCE, ephemeral
+
+
+async def _handle_history_page(payload: dict) -> dict:
+    if not _is_team_member(payload):
+        return {"type": 4, "data": {"content": "This command is for team members only.", "flags": 64}}
+    custom_id = (payload.get("data") or {}).get("custom_id", "")
+    _, _, rest = custom_id.partition(":")
+    status_filter, _, offset_str = rest.partition(":")
+    offset = int(offset_str) if offset_str.isdigit() else 0
+    await _dispatch_history_worker("list", token=payload["token"], status_filter=status_filter, offset=offset)
+    return {"type": 6}  # DEFERRED_UPDATE_MESSAGE — edits the list message once ready
+
+
+async def _handle_history_clear_confirm(payload: dict) -> dict:
+    if not _is_team_member(payload):
+        return {"type": 4, "data": {"content": "This command is for team members only.", "flags": 64}}
+    await _dispatch_history_worker("clear_confirm", token=payload["token"])
+    return {"type": 6}  # DEFERRED_UPDATE_MESSAGE — edits the confirm prompt once the delete finishes
+
+
+async def _history_clear_confirm_run(token: str) -> None:
+    async with httpx.AsyncClient(timeout=15) as client:
+        # Only resolved applications ever count toward the keep-limit or get
+        # deleted - a pending one that's been sitting a while is still live
+        # work the team hasn't acted on yet, not clutter, so it's excluded
+        # from this query entirely and also re-excluded (belt and suspenders)
+        # directly on the delete call below.
+        keep_res = await client.get(
+            f"{settings.supabase_url}/rest/v1/applications",
+            headers=_supabase_headers(),
+            params={"select": "id", "status": "neq.pending", "order": "submitted_at.desc", "limit": HISTORY_KEEP_LIMIT},
+        )
+        keep_res.raise_for_status()
+        keep_ids = [r["id"] for r in keep_res.json()]
+        if not keep_ids:
+            await _discord_followup_patch(token, {"content": "Nothing to clear.", "components": []})
+            return
+
+        del_res = await client.delete(
+            f"{settings.supabase_url}/rest/v1/applications",
+            headers=_supabase_headers(prefer="return=representation"),
+            params={"id": f"not.in.({','.join(keep_ids)})", "status": "neq.pending"},
+        )
+        del_res.raise_for_status()
+        deleted_count = len(del_res.json())
+
+    await _discord_followup_patch(token, {
+        "content": f"Deleted {deleted_count} old application{'s' if deleted_count != 1 else ''}. The {HISTORY_KEEP_LIMIT} most recent resolved applications stay on file, and every pending one was left untouched. Run `/history` again to see the updated list.",
+        "components": [],
+    })
+
+
+@app.post("/discord/history-worker")
+async def discord_history_worker(request: Request):
+    # Not reachable from Discord directly - only this backend's own
+    # /history handlers call it, authenticated with the same shared secret
+    # the /cron/* endpoints use. See the big comment above the /history
+    # section for why this exists as a separate endpoint at all.
+    if request.headers.get("X-Internal-Secret") != settings.cron_secret:
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+    body = await request.json()
+    action = body.get("action")
+    token = body.get("token")
+
+    try:
+        if action == "list":
+            resp = await _history_list_response(body.get("status_filter") or "all", body.get("offset") or 0)
+            resp["flags"] = 64
+            await _discord_followup_patch(token, resp)
+        elif action == "select":
+            async with httpx.AsyncClient(timeout=15) as client:
+                res = await client.get(
+                    f"{settings.supabase_url}/rest/v1/applications",
+                    headers=_supabase_headers(),
+                    params={"id": f"eq.{body.get('app_id')}", "select": "*"},
+                )
+                res.raise_for_status()
+                rows = res.json()
+            if not rows:
+                await _discord_followup_patch(token, {"content": "Application not found."})
+            else:
+                await _discord_followup_patch(token, {
+                    "embeds": [_history_detail_embed(rows[0])],
+                    "components": _history_detail_components(rows[0]),
+                })
+        elif action == "clear_confirm":
+            await _history_clear_confirm_run(token)
+        else:
+            await _discord_followup_patch(token, {"content": "Unrecognized request."})
+    except Exception:
+        logger.exception("history worker failed for action %s", action)
+        if token:
+            await _discord_followup_patch(token, {"content": "Something went wrong loading that. Please try again.", "components": []})
+
+    return {"ok": True}
 
 
 # Most public RPC endpoints don't send CORS headers (they're built for

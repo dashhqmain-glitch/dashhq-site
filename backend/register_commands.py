@@ -103,6 +103,26 @@ COMMANDS = [
             {"name": "list", "description": "Show everything on your watchlist", "type": 1},
         ],
     },
+    {
+        "name": "history",
+        "description": "Team only: browse every citizenship application and its verdict",
+        # Hidden from regular members entirely - Discord only shows/allows a
+        # command to members holding this permission bit (32 = Manage
+        # Server), unless a server admin overrides it in Integrations
+        # settings. No new role or config needed to turn this on.
+        "default_member_permissions": "32",
+        "options": [
+            {
+                "name": "status", "description": "Filter by verdict (default: all)", "type": 3, "required": False,
+                "choices": [
+                    {"name": "All", "value": "all"},
+                    {"name": "Pending", "value": "pending"},
+                    {"name": "Accepted", "value": "accepted"},
+                    {"name": "Declined", "value": "declined"},
+                ],
+            },
+        ],
+    },
 ]
 
 
