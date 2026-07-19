@@ -953,6 +953,8 @@ async def _discord_followup_patch(token: str, data: dict) -> None:
                 f"{DISCORD_API}/webhooks/{settings.discord_client_id}/{token}/messages/@original",
                 json=data,
             )
+            if res.status_code >= 400:
+                logger.error("Discord follow-up rejected: %s %s", res.status_code, res.text)
             res.raise_for_status()
     except (httpx.HTTPError, KeyError, ValueError):
         logger.exception("Discord follow-up failed for /history interaction")
