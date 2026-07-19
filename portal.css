@@ -424,8 +424,8 @@
 .pin-chip{display:flex;align-items:center;gap:10px;padding:12px 14px;border-radius:12px;border:1px solid var(--border2);background:rgba(255,255,255,.03);cursor:pointer;transition:all .2s}
 .pin-chip:hover{border-color:rgba(77,114,255,.5)}
 /* 6b. nft watchlist */
-.nft-tabs{display:flex;gap:8px;flex-wrap:wrap}
-.nft-tab{font-family:var(--body);font-size:13px;font-weight:600;color:var(--muted2);background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:20px;padding:8px 15px;cursor:pointer;display:flex;align-items:center;gap:7px;transition:all .15s}
+.nft-tabs{display:flex;gap:8px}
+.nft-tab{flex:1 1 0;font-family:var(--body);font-size:13px;font-weight:600;color:var(--muted2);background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:20px;padding:8px 15px;cursor:pointer;display:flex;align-items:center;justify-content:center;gap:7px;white-space:nowrap;transition:all .15s}
 .nft-tab:hover{color:var(--sky);border-color:rgba(93,140,255,.4)}
 .nft-tab.active{background:linear-gradient(135deg,rgba(77,114,255,.28),rgba(34,211,238,.14));color:#fff;border-color:rgba(93,140,255,.55)}
 .nft-tab-count{font-family:var(--mono);font-size:10.5px;background:rgba(255,255,255,.1);border-radius:10px;padding:1px 7px;color:var(--muted2)}
