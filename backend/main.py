@@ -1246,8 +1246,10 @@ async def discord_history_worker(request: Request):
 
     try:
         if action == "list":
+            # No "flags" here - the edit-message endpoint doesn't accept it
+            # (ephemeral was already locked in by the original deferred
+            # response), and Discord 400s the whole request if it's present.
             resp = await _history_list_response(body.get("status_filter") or "all", body.get("offset") or 0)
-            resp["flags"] = 64
             await _discord_followup_patch(token, resp)
         elif action == "select":
             async with httpx.AsyncClient(timeout=15) as client:
