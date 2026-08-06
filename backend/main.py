@@ -569,7 +569,7 @@ async def _create_one_time_invite(client: httpx.AsyncClient) -> str | None:
         res = await client.post(
             f"{DISCORD_API}/channels/{settings.discord_invite_channel_id}/invites",
             headers={"Authorization": f"Bot {settings.discord_bot_token}"},
-            json={"max_age": 604800, "max_uses": 1, "unique": True},  # 7-day window, one use
+            json={"max_age": 0, "max_uses": 1, "unique": True},  # never expires by time, one use
         )
         res.raise_for_status()
         code = res.json()["code"]
