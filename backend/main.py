@@ -1766,16 +1766,21 @@ async def _supabase_write_opensea_key(client: httpx.AsyncClient, api_key: str, e
         logger.exception("Failed to persist OpenSea key to Supabase")
 
 
-async def _get_opensea_key(client: httpx.AsyncClient) -> str | None:
+async def _get_opensea_key(client: httpx.AsyncClient, force_refresh: bool = False) -> str | None:
     global _opensea_key, _opensea_key_expiry
-    if _opensea_key and time.time() < _opensea_key_expiry - 3600:
+    if not force_refresh and _opensea_key and time.time() < _opensea_key_expiry - 3600:
         return _opensea_key
 
-    shared = await _supabase_read_opensea_key(client)
-    if shared:
-        _opensea_key, _opensea_key_expiry = shared
-        return _opensea_key
+    if not force_refresh:
+        shared = await _supabase_read_opensea_key(client)
+        if shared:
+            _opensea_key, _opensea_key_expiry = shared
+            return _opensea_key
 
+    # force_refresh skips both caches on purpose - a caller only sets it
+    # after OpenSea itself has just 401'd the "current" key, so re-reading
+    # the same shared Supabase row here would hand back that identical
+    # known-bad key and guarantee a second 401 on the retry.
     try:
         res = await client.post("https://api.opensea.io/api/v2/auth/keys")
         res.raise_for_status()
@@ -1808,10 +1813,12 @@ async def _opensea_get(client: httpx.AsyncClient, path: str, params: dict | None
             headers={"X-API-KEY": key},
         )
         if res.status_code == 401:
-            # Key was revoked/expired early — force a fresh one and retry once.
+            # Key was revoked/expired early — force a genuinely fresh one
+            # (bypassing the shared cache, which still holds this same bad
+            # key) and retry once.
             global _opensea_key
             _opensea_key = None
-            key = await _get_opensea_key(client)
+            key = await _get_opensea_key(client, force_refresh=True)
             if not key:
                 return None
             res = await client.get(
