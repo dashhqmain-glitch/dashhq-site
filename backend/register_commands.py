@@ -75,7 +75,7 @@ COMMANDS = [
     },
     {
         "name": "nft",
-        "description": "Look up an NFT collection: floor, volume, verified status",
+        "description": "Look up an NFT collection: floor, top offer, ATH, volume, owners, contract",
         "options": [{"name": "collection", "description": "Collection name", "type": 3, "required": True}],
     },
     {

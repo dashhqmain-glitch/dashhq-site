@@ -112,3 +112,47 @@ create index if not exists discord_nft_watchlist_user_idx on discord_nft_watchli
 
 alter table discord_nft_watchlist enable row level security;
 
+-- Periodic snapshots of every watchlisted collection's stats, written by the
+-- /cron/nft-poll worker. This is the only source of "history" this app has
+-- (OpenSea's free tier gives none) - it's what powers the /nft chart, the
+-- all-time-high floor, and the supply-cut/volume-spike alert comparisons.
+create table if not exists nft_snapshot_history (
+  id            bigint generated always as identity primary key,
+  slug          text not null,
+  chain         text,
+  floor         numeric,
+  symbol        text,
+  volume_1d     numeric,
+  sales_1d      int,
+  volume_total  numeric,
+  owners        int,
+  total_supply  int,
+  captured_at   timestamptz not null default now()
+);
+
+create index if not exists nft_snapshot_history_slug_captured_idx on nft_snapshot_history (slug, captured_at desc);
+
+alter table nft_snapshot_history enable row level security;
+
+-- One row per (collection, alert type) so the poller can compare against the
+-- last alerted value and cooldown instead of re-posting every 5-minute cycle
+-- for the same ongoing spike.
+create table if not exists nft_alert_state (
+  slug             text not null,
+  alert_type       text not null,  -- 'supply_cut' | 'volume_spike' | 'sweep'
+  last_alerted_at  timestamptz,
+  last_value       numeric,
+  primary key (slug, alert_type)
+);
+
+alter table nft_alert_state enable row level security;
+
+-- Newly-discovered collections the mint-radar has already posted about, so
+-- the same mint doesn't get re-posted on every poll cycle.
+create table if not exists nft_mint_radar_seen (
+  slug       text primary key,
+  posted_at  timestamptz not null default now()
+);
+
+alter table nft_mint_radar_seen enable row level security;
+

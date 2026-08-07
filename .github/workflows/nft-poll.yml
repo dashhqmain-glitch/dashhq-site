@@ -1,0 +1,27 @@
+name: NFT Poll (alerts & mint radar)
+
+# Free stand-in for a real cron: Vercel's own cron on this project's plan
+# only fires once a day, but supply-cut/sweep/volume-spike detection and the
+# mint radar need much tighter polling. This hits the backend's
+# /cron/nft-poll endpoint every 5 minutes at no cost, using only GitHub
+# Actions minutes this repo already has for free.
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger NFT poll cron endpoint
+        run: |
+          status=$(curl -s -o response.json -w "%{http_code}" \
+            -X GET "https://www.dashhq.site/cron/nft-poll" \
+            -H "Authorization: Bearer ${{ secrets.NFT_CRON_SECRET }}")
+          echo "HTTP $status"
+          cat response.json
+          if [ "$status" -ge 400 ]; then
+            exit 1
+          fi

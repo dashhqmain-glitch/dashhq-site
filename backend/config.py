@@ -20,6 +20,14 @@ class Settings(BaseSettings):
     discord_public_key: str = ""
     discord_applications_channel_id: str = ""
     discord_invite_channel_id: str = ""  # channel accepted citizens land in
+    discord_nft_alerts_channel_id: str = ""  # supply cut / sweep / volume spike alerts
+    discord_nft_mint_channel_id: str = ""  # new-mint radar posts
+
+    # Separate from cron_secret on purpose: this one only guards the NFT
+    # poller, which is reachable from a public GitHub Actions workflow log
+    # surface far more often than the other cron endpoints - keeping it
+    # distinct limits the blast radius if it ever leaks.
+    nft_cron_secret: str = ""
 
     x_client_id: str = ""
     x_client_secret: str = ""

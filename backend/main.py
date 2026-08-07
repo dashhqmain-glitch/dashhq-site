@@ -1846,6 +1846,9 @@ def _nft_collection_shape(c: dict, stats: dict | None) -> dict:
     contract = contracts[0] if contracts else {}
     description = (c.get("description") or "").strip()
     slug = c.get("collection") or c.get("slug")
+    pricing = c.get("pricing_currencies") or {}
+    listing_currency = pricing.get("listing_currency") or {}
+    offer_currency = pricing.get("offer_currency") or {}
     # Present only in the full single-collection/listing shape, never in
     # the lean search shape - require all three so a partially-lean object
     # can't be mistaken for a full one.
@@ -1863,8 +1866,10 @@ def _nft_collection_shape(c: dict, stats: dict | None) -> dict:
         "vol1d": (intervals.get("one_day") or {}).get("volume"),
         "vol7d": (intervals.get("seven_day") or {}).get("volume"),
         "vol30d": (intervals.get("thirty_day") or {}).get("volume"),
+        "volTotal": total.get("volume"),
         "sales24h": (intervals.get("one_day") or {}).get("sales"),
         "owners": total.get("num_owners"),
+        "totalSupply": c.get("total_supply"),
         "openseaUrl": "https://opensea.io/collection/" + (slug or ""),
         # OpenSea's own safelist tiers: not_requested < requested < approved
         # < verified. Only "verified" gets the checkmark - that's OpenSea's
@@ -1878,11 +1883,33 @@ def _nft_collection_shape(c: dict, stats: dict | None) -> dict:
         "chain": contract.get("chain"),
         "contractAddress": contract.get("address"),
         "createdDate": c.get("created_date"),
+        # OpenSea reports the live USD rate for whatever currency each figure
+        # is actually denominated in - real conversion, not an ETH assumption.
+        "floorUsd": (total.get("floor_price") * float(listing_currency["usd_price"]))
+        if total.get("floor_price") is not None and listing_currency.get("usd_price") else None,
+        "listingUsdRate": float(listing_currency["usd_price"]) if listing_currency.get("usd_price") else None,
+        "offerSymbol": offer_currency.get("symbol"),
+        "offerUsdRate": float(offer_currency["usd_price"]) if offer_currency.get("usd_price") else None,
+        "offerDecimals": offer_currency.get("decimals"),
     }
     if is_full_source and slug:
         _collection_meta_cache[slug] = (time.time(), shaped)
         _cap_cache(_collection_meta_cache)
     return shaped
+
+
+async def _opensea_get_top_offer(client: httpx.AsyncClient, slug: str) -> int | None:
+    # Returns the top offer's raw integer amount, in the offer currency's
+    # smallest unit (matches offerDecimals from _nft_collection_shape) -
+    # OpenSea returns offers already sorted highest-first.
+    data = await _opensea_get(client, f"/offers/collection/{slug}")
+    offers = (data or {}).get("offers") or []
+    if not offers:
+        return None
+    try:
+        return int(offers[0]["protocol_data"]["parameters"]["offer"][0]["startAmount"])
+    except (KeyError, IndexError, ValueError, TypeError):
+        return None
 
 
 def _enrich_with_cached_meta(shaped: dict) -> dict:
@@ -1982,6 +2009,433 @@ async def _discord_watchlist_list(discord_user_id: str) -> list[dict]:
             return []
         results = await asyncio.gather(*[_nft_collection_core(s) for s in slugs], return_exceptions=True)
         return [r for r in results if not isinstance(r, Exception)]
+
+
+# ── NFT alerts & mint radar (Discord notification bot) ─────────────────────
+# Powers /cron/nft-poll, hit every 5 minutes by a free GitHub Actions
+# schedule (Vercel's own cron is once-a-day on this project's plan). Two
+# jobs share one poll cycle: (1) diff each watchlisted collection's latest
+# stats against its own snapshot history to catch supply cuts, volume
+# spikes and sweeps, and (2) scan recently-created collections for new
+# mints, scored by an explicit on-chain-only checklist so citizens can see
+# exactly why something was flagged - not a black-box number. Everything
+# here runs on the same free OpenSea "instant" key and Supabase project
+# already used by the rest of the toolkit; no paid API involved.
+_NFT_ALERT_COOLDOWN_SECONDS = 3600  # don't re-alert the same collection/type within an hour
+_MINT_RADAR_CHAINS = ["ethereum", "base", "polygon", "robinhood"]
+
+
+async def _nft_store_snapshot(client: httpx.AsyncClient, c: dict) -> None:
+    await client.post(
+        f"{settings.supabase_url}/rest/v1/nft_snapshot_history",
+        headers=_supabase_headers(prefer="return=minimal"),
+        json=[{
+            "slug": c["slug"],
+            "chain": c.get("chain"),
+            "floor": c.get("floor"),
+            "symbol": c.get("symbol"),
+            "volume_1d": c.get("vol1d"),
+            "sales_1d": c.get("sales24h"),
+            "volume_total": c.get("volTotal"),
+            "owners": c.get("owners"),
+            "total_supply": c.get("totalSupply"),
+        }],
+    )
+
+
+async def _nft_recent_snapshots(client: httpx.AsyncClient, slug: str, limit: int = 50) -> list[dict]:
+    res = await client.get(
+        f"{settings.supabase_url}/rest/v1/nft_snapshot_history",
+        headers=_supabase_headers(),
+        params={"slug": f"eq.{slug}", "select": "*", "order": "captured_at.desc", "limit": str(limit)},
+    )
+    res.raise_for_status()
+    return res.json()
+
+
+async def _nft_alert_state_get(client: httpx.AsyncClient, slug: str, alert_type: str) -> dict | None:
+    res = await client.get(
+        f"{settings.supabase_url}/rest/v1/nft_alert_state",
+        headers=_supabase_headers(),
+        params={"slug": f"eq.{slug}", "alert_type": f"eq.{alert_type}", "select": "*", "limit": "1"},
+    )
+    res.raise_for_status()
+    rows = res.json()
+    return rows[0] if rows else None
+
+
+async def _nft_alert_state_set(client: httpx.AsyncClient, slug: str, alert_type: str, value: float) -> None:
+    await client.post(
+        f"{settings.supabase_url}/rest/v1/nft_alert_state",
+        headers=_supabase_headers(prefer="resolution=merge-duplicates,return=minimal"),
+        json=[{
+            "slug": slug,
+            "alert_type": alert_type,
+            "last_alerted_at": datetime.now(timezone.utc).isoformat(),
+            "last_value": value,
+        }],
+    )
+
+
+def _nft_alert_cooled_down(state: dict | None) -> bool:
+    if not state or not state.get("last_alerted_at"):
+        return True
+    last = datetime.fromisoformat(state["last_alerted_at"].replace("Z", "+00:00"))
+    return (datetime.now(timezone.utc) - last).total_seconds() > _NFT_ALERT_COOLDOWN_SECONDS
+
+
+async def _post_nft_alert(client: httpx.AsyncClient, channel_id: str, embed: dict) -> bool:
+    # Callers use this return value to decide whether to record alert state /
+    # mark a mint as seen - a failed post (bad channel id, missing bot
+    # permission, etc.) must not be treated as delivered, or that alert is
+    # silently lost forever instead of retried next cycle.
+    if not channel_id or not settings.discord_bot_token:
+        return False
+    try:
+        res = await _discord_post_with_retry(
+            client,
+            f"{DISCORD_API}/channels/{channel_id}/messages",
+            {"Authorization": f"Bot {settings.discord_bot_token}"},
+            {"embeds": [embed]},
+        )
+        if res.status_code >= 300:
+            logger.error("NFT alert post to channel %s failed: %s %s", channel_id, res.status_code, res.text[:300])
+            return False
+        return True
+    except httpx.HTTPError:
+        logger.exception("Failed to post NFT alert to Discord")
+        return False
+
+
+def _nft_alert_footer(c: dict) -> dict:
+    return {"text": f"{TOOLKIT_FOOTER['text']} · {c.get('chain', '').title() or 'NFT'} Alert"}
+
+
+def _supply_cut_embed(c: dict, prev_supply: int) -> dict:
+    return {
+        "title": f"✂️ Supply Cut — {c['name']}",
+        "url": c.get("openseaUrl"),
+        "description": f"Total supply dropped from **{prev_supply:,}** to **{c['totalSupply']:,}**.",
+        "color": EMBED_COLOR_GOOD,
+        "thumbnail": {"url": c["image"]} if c.get("image") else None,
+        "footer": _nft_alert_footer(c),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _volume_spike_embed(c: dict, avg: float) -> dict:
+    return {
+        "title": f"📈 Volume Spike — {c['name']}",
+        "url": c.get("openseaUrl"),
+        "description": (
+            f"24h volume is **{c['vol1d']:.2f} {c['symbol']}**, "
+            f"vs a recent average of **{avg:.2f} {c['symbol']}**."
+        ),
+        "color": EMBED_COLOR_WARN,
+        "thumbnail": {"url": c["image"]} if c.get("image") else None,
+        "footer": _nft_alert_footer(c),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _sweep_embed(c: dict, sweep: dict) -> dict:
+    return {
+        "title": f"🧹 Possible Sweep — {c['name']}",
+        "url": c.get("openseaUrl"),
+        "description": (
+            f"**{sweep['count']}** sales in the last {sweep['windowMinutes']} min, "
+            f"by only **{sweep['uniqueBuyers']}** unique wallet(s) — "
+            f"**{sweep['totalPaid']:.2f} {sweep['symbol']}** total."
+        ),
+        "color": EMBED_COLOR_BAD,
+        "thumbnail": {"url": c["image"]} if c.get("image") else None,
+        "footer": _nft_alert_footer(c),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def _detect_sweep(
+    client: httpx.AsyncClient, slug: str, window_seconds: int = 900, min_sales: int = 5, max_buyer_ratio: float = 0.4
+) -> dict | None:
+    # A "sweep": several sales in a short window concentrated in very few
+    # buyer wallets - the signal that separates a sweep from ordinary
+    # organic sales activity (many different buyers) at the same volume.
+    data = await _opensea_get(client, f"/events/collection/{slug}", {"event_type": "sale", "limit": 50})
+    events = (data or {}).get("asset_events") or []
+    if not events:
+        return None
+    now = time.time()
+    recent = [e for e in events if now - (e.get("event_timestamp") or 0) <= window_seconds]
+    if len(recent) < min_sales:
+        return None
+    buyers = {e["buyer"] for e in recent if e.get("buyer")}
+    if not buyers or len(buyers) / len(recent) > max_buyer_ratio:
+        return None
+    payments = [e["payment"] for e in recent if e.get("payment")]
+    if not payments:
+        return None
+    decimals = payments[0].get("decimals", 18)
+    total_paid = sum(int(p["quantity"]) for p in payments) / (10 ** decimals)
+    return {
+        "count": len(recent),
+        "uniqueBuyers": len(buyers),
+        "totalPaid": total_paid,
+        "symbol": payments[0].get("symbol", "ETH"),
+        "windowMinutes": window_seconds // 60,
+    }
+
+
+async def _nft_poll_tracked_slugs(client: httpx.AsyncClient) -> list[str]:
+    # The tracked set is simply the union of every citizen's personal
+    # /watchlist - no separate curation table to maintain for MVP.
+    res = await client.get(
+        f"{settings.supabase_url}/rest/v1/discord_nft_watchlist",
+        headers=_supabase_headers(),
+        params={"select": "slug"},
+    )
+    res.raise_for_status()
+    return sorted({row["slug"] for row in res.json()})
+
+
+async def _nft_poll_watchlist_alerts(client: httpx.AsyncClient) -> list[str]:
+    slugs = await _nft_poll_tracked_slugs(client)
+    alerted = []
+    for slug in slugs:
+        try:
+            c = await _nft_collection_core(slug)
+        except HTTPException:
+            continue
+        try:
+            history = await _nft_recent_snapshots(client, slug, limit=50)
+            await _nft_store_snapshot(client, c)
+
+            if history:
+                prev = history[0]
+                if (
+                    c.get("totalSupply") is not None
+                    and prev.get("total_supply") is not None
+                    and c["totalSupply"] < prev["total_supply"]
+                ):
+                    state = await _nft_alert_state_get(client, slug, "supply_cut")
+                    if not state or state.get("last_value") != c["totalSupply"]:
+                        delivered = await _post_nft_alert(client, settings.discord_nft_alerts_channel_id, _supply_cut_embed(c, prev["total_supply"]))
+                        if delivered:
+                            await _nft_alert_state_set(client, slug, "supply_cut", c["totalSupply"])
+                            alerted.append(f"{slug}:supply_cut")
+
+                baseline = [h["volume_1d"] for h in history if h.get("volume_1d") is not None]
+                if baseline and c.get("vol1d") is not None:
+                    avg = sum(baseline) / len(baseline)
+                    if avg > 0 and c["vol1d"] >= avg * 2.5:
+                        state = await _nft_alert_state_get(client, slug, "volume_spike")
+                        if _nft_alert_cooled_down(state):
+                            delivered = await _post_nft_alert(client, settings.discord_nft_alerts_channel_id, _volume_spike_embed(c, avg))
+                            if delivered:
+                                await _nft_alert_state_set(client, slug, "volume_spike", c["vol1d"])
+                                alerted.append(f"{slug}:volume_spike")
+
+            sweep = await _detect_sweep(client, slug)
+            if sweep:
+                state = await _nft_alert_state_get(client, slug, "sweep")
+                if _nft_alert_cooled_down(state):
+                    delivered = await _post_nft_alert(client, settings.discord_nft_alerts_channel_id, _sweep_embed(c, sweep))
+                    if delivered:
+                        await _nft_alert_state_set(client, slug, "sweep", sweep["count"])
+                        alerted.append(f"{slug}:sweep")
+        except (httpx.HTTPError, KeyError, ZeroDivisionError):
+            logger.exception("nft-poll: alert check failed for %s", slug)
+            continue
+    return alerted
+
+
+def _score_mint_quality(c: dict) -> dict:
+    # Explicit, on-chain/OpenSea-only checklist - no socials, no paid data.
+    # Every check is labeled so citizens see exactly why a mint was flagged,
+    # same philosophy as the /rug checklist. Thresholds are a starting
+    # point, not a guarantee - tune freely once real mints have run through it.
+    supply = c.get("totalSupply")
+    owners = c.get("owners")
+    checks = [
+        {"label": "Has a website, X, or Discord link", "pass": bool(c.get("twitter") or c.get("discord") or c.get("website"))},
+        {"label": "Has a real description", "pass": len(c.get("description") or "") >= 40},
+        {"label": "Has recorded sales", "pass": (c.get("sales24h") or 0) > 0},
+        {"label": "Floor price is set", "pass": (c.get("floor") or 0) > 0},
+        {"label": "At least 5 unique owners", "pass": (owners or 0) >= 5},
+        {"label": "Plausible supply size (2-100k)", "pass": supply is not None and 1 < supply <= 100_000},
+        {"label": "Not single-wallet concentrated", "pass": bool(supply and owners and owners / supply >= 0.1)},
+        {"label": "OpenSea category assigned", "pass": bool(c.get("category"))},
+    ]
+    passed = sum(1 for ch in checks if ch["pass"])
+    if passed >= 6:
+        verdict, color = "🔥 High Potential", EMBED_COLOR_GOOD
+    elif passed >= 3:
+        verdict, color = "👀 Worth Watching", EMBED_COLOR_WARN
+    else:
+        verdict, color = "🚮 Likely Junk", EMBED_COLOR_BAD
+    return {"checks": checks, "passed": passed, "total": len(checks), "verdict": verdict, "color": color}
+
+
+def _mint_radar_embed(c: dict, score: dict) -> dict:
+    checklist = "\n".join(f"{'✅' if ch['pass'] else '❌'} {ch['label']}" for ch in score["checks"])
+    fields = [
+        {"name": "Floor", "value": f"{c['floor']:.3f} {c['symbol']}" if c.get("floor") is not None else "-", "inline": True},
+        {"name": "Supply", "value": f"{c['totalSupply']:,}" if c.get("totalSupply") is not None else "-", "inline": True},
+        {"name": "Owners", "value": f"{c['owners']:,}" if c.get("owners") is not None else "-", "inline": True},
+        {"name": "Chain", "value": (c.get("chain") or "-").title(), "inline": True},
+    ]
+    return {
+        "title": f"{score['verdict']} — {c['name']}",
+        "url": c.get("openseaUrl"),
+        "description": f"{checklist}\n\n**{score['passed']}/{score['total']} checks passed**",
+        "color": score["color"],
+        "fields": fields,
+        "thumbnail": {"url": c["image"]} if c.get("image") else None,
+        "footer": {"text": f"{TOOLKIT_FOOTER['text']} · Mint Radar"},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def _nft_mint_radar_seen_has(client: httpx.AsyncClient, slug: str) -> bool:
+    res = await client.get(
+        f"{settings.supabase_url}/rest/v1/nft_mint_radar_seen",
+        headers=_supabase_headers(),
+        params={"slug": f"eq.{slug}", "select": "slug", "limit": "1"},
+    )
+    res.raise_for_status()
+    return bool(res.json())
+
+
+async def _nft_mint_radar_mark_seen(client: httpx.AsyncClient, slug: str) -> None:
+    await client.post(
+        f"{settings.supabase_url}/rest/v1/nft_mint_radar_seen",
+        headers=_supabase_headers(prefer="resolution=merge-duplicates,return=minimal"),
+        json=[{"slug": slug}],
+    )
+
+
+async def _nft_mint_radar_scan(client: httpx.AsyncClient, per_chain_limit: int = 15) -> list[str]:
+    posted = []
+    for chain in _MINT_RADAR_CHAINS:
+        data = await _opensea_get(client, "/collections", {"order_by": "created_date", "limit": per_chain_limit, "chain": chain})
+        collections = (data or {}).get("collections") or []
+        for raw in collections:
+            slug = raw.get("collection")
+            if not slug:
+                continue
+            try:
+                if await _nft_mint_radar_seen_has(client, slug):
+                    continue
+                c = await _nft_collection_core(slug)
+                score = _score_mint_quality(c)
+                delivered = await _post_nft_alert(client, settings.discord_nft_mint_channel_id, _mint_radar_embed(c, score))
+                if delivered:
+                    await _nft_mint_radar_mark_seen(client, slug)
+                    posted.append(slug)
+            except HTTPException:
+                continue
+            except httpx.HTTPError:
+                logger.exception("nft-poll: mint radar failed for %s", slug)
+                continue
+    return posted
+
+
+def _nft_alerts_explainer_embed() -> dict:
+    return {
+        "title": "📌 How #nft-watchlist-alerts works",
+        "description": (
+            "Every ~5 minutes, every collection on anyone's `/watchlist` gets checked. "
+            "You'll see three kinds of posts here:\n\n"
+            "✂️ **Supply Cut** — the collection's total supply just went down (burn, reveal, etc).\n"
+            "📈 **Volume Spike** — 24h volume is running well above its recent average.\n"
+            "🧹 **Possible Sweep** — several sales in a short window, concentrated in very few wallets.\n\n"
+            "Don't see a collection here? Add it with `/watchlist add`. Nothing is financial advice — "
+            "these are automated, on-chain signals only."
+        ),
+        "color": EMBED_COLOR,
+        "footer": TOOLKIT_FOOTER,
+    }
+
+
+def _nft_mint_radar_explainer_embed() -> dict:
+    return {
+        "title": "📌 How #nft-mint-radar works",
+        "description": (
+            "Every ~5 minutes, newly-created collections on Ethereum, Base, Polygon and Robinhood Chain "
+            "get scanned and run through an 8-point on-chain checklist (real links, real sales, floor set, "
+            "healthy owner spread, plausible supply, etc). Each post shows exactly which checks passed:\n\n"
+            "🔥 **High Potential** — 6+/8 checks passed.\n"
+            "👀 **Worth Watching** — 3-5/8 checks passed.\n"
+            "🚮 **Likely Junk** — 2 or fewer checks passed.\n\n"
+            "This is a heuristic, not a guarantee — always do your own research before minting or buying."
+        ),
+        "color": EMBED_COLOR,
+        "footer": TOOLKIT_FOOTER,
+    }
+
+
+async def _channel_already_pinned(client: httpx.AsyncClient, channel_id: str) -> bool:
+    res = await client.get(f"{DISCORD_API}/channels/{channel_id}/pins", headers={"Authorization": f"Bot {settings.discord_bot_token}"})
+    return res.status_code < 300 and len(res.json()) > 0
+
+
+async def _post_and_pin(client: httpx.AsyncClient, channel_id: str, embed: dict) -> str:
+    if not channel_id or not settings.discord_bot_token:
+        return "skipped: no channel/token configured"
+    if await _channel_already_pinned(client, channel_id):
+        return "skipped: already has a pinned message"
+    res = await _discord_post_with_retry(
+        client, f"{DISCORD_API}/channels/{channel_id}/messages",
+        {"Authorization": f"Bot {settings.discord_bot_token}"}, {"embeds": [embed]},
+    )
+    if res.status_code >= 300:
+        return f"failed to post: {res.status_code} {res.text[:200]}"
+    message_id = res.json()["id"]
+    pin_res = await client.put(
+        f"{DISCORD_API}/channels/{channel_id}/messages/{message_id}/pin",
+        headers={"Authorization": f"Bot {settings.discord_bot_token}"},
+    )
+    return "posted and pinned" if pin_res.status_code < 300 else f"posted but pin failed: {pin_res.status_code}"
+
+
+@app.get("/cron/nft-init-channels")
+async def nft_init_channels(request: Request):
+    # One-time (idempotent - skips a channel that already has a pin) setup
+    # action, not a real schedule - same cron-secret pattern as
+    # /cron/register-discord-commands. Run once by hand after the two NFT
+    # channels are created, so each is self-documenting for new members
+    # instead of them wondering what an unexplained embed means.
+    expected = f"Bearer {settings.nft_cron_secret}"
+    if not settings.nft_cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    async with httpx.AsyncClient(timeout=15) as client:
+        alerts_result = await _post_and_pin(client, settings.discord_nft_alerts_channel_id, _nft_alerts_explainer_embed())
+        mint_result = await _post_and_pin(client, settings.discord_nft_mint_channel_id, _nft_mint_radar_explainer_embed())
+    return {"nft_watchlist_alerts_channel": alerts_result, "nft_mint_radar_channel": mint_result}
+
+
+@app.get("/cron/nft-poll")
+async def nft_poll(request: Request):
+    expected = f"Bearer {settings.nft_cron_secret}"
+    if not settings.nft_cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    # Each phase isolated - if the schema.sql migration hasn't been run yet
+    # (a separate manual step from deploying this code) or OpenSea hiccups
+    # mid-cycle, one phase failing shouldn't take the other down with it.
+    errors = []
+    async with httpx.AsyncClient(timeout=20) as client:
+        try:
+            alerted = await _nft_poll_watchlist_alerts(client)
+        except (httpx.HTTPError, KeyError) as e:
+            logger.exception("nft-poll: watchlist alert phase failed")
+            alerted, errors = [], errors + [f"watchlist_alerts: {e}"]
+        try:
+            minted = await _nft_mint_radar_scan(client)
+        except (httpx.HTTPError, KeyError) as e:
+            logger.exception("nft-poll: mint radar phase failed")
+            minted, errors = [], errors + [f"mint_radar: {e}"]
+
+    return {"watchlist_alerts": alerted, "mint_radar_posts": minted, "errors": errors}
 
 
 @app.get("/toolkit/nft-discover")
@@ -2431,23 +2885,72 @@ async def _cmd_nft(query: str) -> dict:
     results = await _nft_search_core(query)
     if not results:
         return {"title": "No collections found", "description": f'No OpenSea results for "{query}".', "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
-    c = results[0]
+    slug = results[0]["slug"]
+    # The search result is lean (no CA/pricing/total_supply) - fetch the full
+    # single-collection shape for the one result we're actually displaying,
+    # rather than the wasteful old behaviour of statting all 12 matches.
+    try:
+        c = await _nft_collection_core(slug)
+    except HTTPException:
+        c = results[0]
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        top_offer_raw = await _opensea_get_top_offer(client, slug)
+        try:
+            history = await _nft_recent_snapshots(client, slug, limit=200)
+        except httpx.HTTPError:
+            # nft_snapshot_history may not exist yet if the schema.sql
+            # migration hasn't been run - degrade to "no chart data" rather
+            # than breaking the whole command.
+            history = []
+
     check = "✅ " if c.get("verified") else ""
+    floor = f"{c['floor']:.3f} {c['symbol']}" if c.get("floor") is not None else "-"
+    if c.get("floorUsd") is not None:
+        floor += f" ({_fmt_price(c['floorUsd'])})"
+
+    if top_offer_raw is not None and c.get("offerDecimals") is not None:
+        offer_amount = top_offer_raw / (10 ** c["offerDecimals"])
+        top_offer = f"{offer_amount:.4f} {c.get('offerSymbol') or ''}".strip()
+        if c.get("offerUsdRate"):
+            top_offer += f" ({_fmt_price(offer_amount * c['offerUsdRate'])})"
+    else:
+        top_offer = "N/A"
+
+    ath_floors = [h["floor"] for h in history if h.get("floor") is not None]
+    if c.get("floor") is not None:
+        ath_floors.append(c["floor"])
+    ath = f"{max(ath_floors):.4f} {c['symbol']}" if ath_floors else "N/A"
+    chart = "📉 Not enough history yet — check back after a few more polling cycles." if len(history) < 3 else \
+        f"{len(history)} snapshots recorded so far."
+
     fields = [
-        {"name": "Floor", "value": f"{c['floor']:.3f} {c['symbol']}" if c.get("floor") is not None else "-", "inline": True},
-        {"name": "24h Volume", "value": f"{c['vol1d']:.2f} {c['symbol']}" if c.get("vol1d") is not None else "-", "inline": True},
+        {"name": "Floor Price", "value": floor, "inline": True},
+        {"name": "Top Offer", "value": top_offer, "inline": True},
+        {"name": "ATH Floor", "value": ath, "inline": True},
+        {"name": "Total Volume", "value": f"{c['volTotal']:,.2f} {c['symbol']}" if c.get("volTotal") is not None else "-", "inline": True},
         {"name": "Owners", "value": f"{c['owners']:,}" if c.get("owners") is not None else "-", "inline": True},
+        {"name": "24h Volume", "value": f"{c['vol1d']:.2f} {c['symbol']}" if c.get("vol1d") is not None else "-", "inline": True},
     ]
     if c.get("category"):
         fields.append({"name": "Category", "value": c["category"], "inline": True})
+    if c.get("contractAddress"):
+        fields.append({"name": "Contract Address", "value": f"`{c['contractAddress']}`", "inline": False})
+    fields.append({"name": "Chart", "value": chart, "inline": False})
+
+    footer_text = TOOLKIT_FOOTER["text"]
+    if c.get("listingUsdRate") and c.get("symbol") in ("ETH", "WETH"):
+        footer_text += f" · ETH/USD: {_fmt_price(c['listingUsdRate'])}"
+
     return {
         "title": f"{check}{c['name']}",
         "url": c.get("openseaUrl"),
         "description": c.get("description"),
         "color": EMBED_COLOR,
         "fields": fields,
-        "thumbnail": {"url": c["image"]} if c.get("image") else None,
-        "footer": TOOLKIT_FOOTER,
+        "image": {"url": c["image"]} if c.get("image") else None,
+        "footer": {"text": footer_text},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -2577,7 +3080,7 @@ TOOLKIT_TOOLS = {
     },
     "nft": {
         "emoji": "🖼️", "label": "NFT Lookup",
-        "short": "Floor price, volume & verified status for any collection",
+        "short": "Floor, top offer, ATH, total volume, owners, contract address & more for any collection",
         "usage": "/nft collection:<collection name>",
         "example": "/nft collection:Pudgy Penguins",
     },
