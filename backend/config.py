@@ -20,8 +20,12 @@ class Settings(BaseSettings):
     discord_public_key: str = ""
     discord_applications_channel_id: str = ""
     discord_invite_channel_id: str = ""  # channel accepted citizens land in
-    discord_nft_alerts_channel_id: str = ""  # supply cut / sweep / volume spike alerts
-    discord_nft_mint_channel_id: str = ""  # new-mint radar posts
+    # One shared channel for everything NFT-automated: supply cut / sweep /
+    # volume spike alerts AND new-mint radar posts. Kept as a single
+    # channel on purpose - fewer channels to manage in the server, and the
+    # embeds are already visually distinct (different emoji/colors) so
+    # interleaving them reads fine.
+    discord_nft_channel_id: str = ""
 
     # Separate from cron_secret on purpose: this one only guards the NFT
     # poller, which is reachable from a public GitHub Actions workflow log

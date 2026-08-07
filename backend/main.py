@@ -2225,7 +2225,7 @@ async def _nft_poll_watchlist_alerts(client: httpx.AsyncClient) -> list[str]:
                 ):
                     state = await _nft_alert_state_get(client, slug, "supply_cut")
                     if not state or state.get("last_value") != c["totalSupply"]:
-                        delivered = await _post_nft_alert(client, settings.discord_nft_alerts_channel_id, _supply_cut_embed(c, prev["total_supply"]))
+                        delivered = await _post_nft_alert(client, settings.discord_nft_channel_id, _supply_cut_embed(c, prev["total_supply"]))
                         if delivered:
                             await _nft_alert_state_set(client, slug, "supply_cut", c["totalSupply"])
                             alerted.append(f"{slug}:supply_cut")
@@ -2236,7 +2236,7 @@ async def _nft_poll_watchlist_alerts(client: httpx.AsyncClient) -> list[str]:
                     if avg > 0 and c["vol1d"] >= avg * 2.5:
                         state = await _nft_alert_state_get(client, slug, "volume_spike")
                         if _nft_alert_cooled_down(state):
-                            delivered = await _post_nft_alert(client, settings.discord_nft_alerts_channel_id, _volume_spike_embed(c, avg))
+                            delivered = await _post_nft_alert(client, settings.discord_nft_channel_id, _volume_spike_embed(c, avg))
                             if delivered:
                                 await _nft_alert_state_set(client, slug, "volume_spike", c["vol1d"])
                                 alerted.append(f"{slug}:volume_spike")
@@ -2245,7 +2245,7 @@ async def _nft_poll_watchlist_alerts(client: httpx.AsyncClient) -> list[str]:
             if sweep:
                 state = await _nft_alert_state_get(client, slug, "sweep")
                 if _nft_alert_cooled_down(state):
-                    delivered = await _post_nft_alert(client, settings.discord_nft_alerts_channel_id, _sweep_embed(c, sweep))
+                    delivered = await _post_nft_alert(client, settings.discord_nft_channel_id, _sweep_embed(c, sweep))
                     if delivered:
                         await _nft_alert_state_set(client, slug, "sweep", sweep["count"])
                         alerted.append(f"{slug}:sweep")
@@ -2334,7 +2334,7 @@ async def _nft_mint_radar_scan(client: httpx.AsyncClient, per_chain_limit: int =
                     continue
                 c = await _nft_collection_core(slug)
                 score = _score_mint_quality(c)
-                delivered = await _post_nft_alert(client, settings.discord_nft_mint_channel_id, _mint_radar_embed(c, score))
+                delivered = await _post_nft_alert(client, settings.discord_nft_channel_id, _mint_radar_embed(c, score))
                 if delivered:
                     await _nft_mint_radar_mark_seen(client, slug)
                     posted.append(slug)
@@ -2346,34 +2346,24 @@ async def _nft_mint_radar_scan(client: httpx.AsyncClient, per_chain_limit: int =
     return posted
 
 
-def _nft_alerts_explainer_embed() -> dict:
+def _nft_channel_explainer_embed() -> dict:
     return {
-        "title": "📌 How #nft-watchlist-alerts works",
+        "title": "📌 How this channel works",
         "description": (
-            "Every ~5 minutes, every collection on anyone's `/watchlist` gets checked. "
-            "You'll see three kinds of posts here:\n\n"
-            "✂️ **Supply Cut** — the collection's total supply just went down (burn, reveal, etc).\n"
+            "Everything here is automated, posted every ~5 minutes. Two kinds of posts:\n\n"
+            "**Watchlist alerts** (for anything on anyone's `/watchlist`):\n"
+            "✂️ **Supply Cut** — total supply just went down (burn, reveal, etc).\n"
             "📈 **Volume Spike** — 24h volume is running well above its recent average.\n"
-            "🧹 **Possible Sweep** — several sales in a short window, concentrated in very few wallets.\n\n"
-            "Don't see a collection here? Add it with `/watchlist add`. Nothing is financial advice — "
-            "these are automated, on-chain signals only."
-        ),
-        "color": EMBED_COLOR,
-        "footer": TOOLKIT_FOOTER,
-    }
-
-
-def _nft_mint_radar_explainer_embed() -> dict:
-    return {
-        "title": "📌 How #nft-mint-radar works",
-        "description": (
-            "Every ~5 minutes, newly-created collections on Ethereum, Base, Polygon and Robinhood Chain "
-            "get scanned and run through an 8-point on-chain checklist (real links, real sales, floor set, "
-            "healthy owner spread, plausible supply, etc). Each post shows exactly which checks passed:\n\n"
-            "🔥 **High Potential** — 6+/8 checks passed.\n"
+            "🧹 **Possible Sweep** — several sales in a short window, concentrated in very few wallets.\n"
+            "Don't see a collection here? Add it with `/watchlist add`.\n\n"
+            "**Mint radar** (fully automatic, no opt-in needed):\n"
+            "New collections on Ethereum, Base, Polygon and Robinhood Chain are scored against an "
+            "8-point on-chain checklist (real links, real sales, floor set, healthy owner spread, "
+            "plausible supply, etc):\n"
+            "🔥 **High Potential** — 6-8/8 checks passed.\n"
             "👀 **Worth Watching** — 3-5/8 checks passed.\n"
-            "🚮 **Likely Junk** — 2 or fewer checks passed.\n\n"
-            "This is a heuristic, not a guarantee — always do your own research before minting or buying."
+            "🚮 **Likely Junk** — 0-2/8 checks passed.\n\n"
+            "Nothing here is financial advice — these are automated, on-chain signals only."
         ),
         "color": EMBED_COLOR,
         "footer": TOOLKIT_FOOTER,
@@ -2408,16 +2398,15 @@ async def _post_and_pin(client: httpx.AsyncClient, channel_id: str, embed: dict)
 async def nft_init_channels(request: Request):
     # One-time (idempotent - skips a channel that already has a pin) setup
     # action, not a real schedule - same cron-secret pattern as
-    # /cron/register-discord-commands. Run once by hand after the two NFT
-    # channels are created, so each is self-documenting for new members
-    # instead of them wondering what an unexplained embed means.
+    # /cron/register-discord-commands. Run once by hand after the NFT
+    # channel is created, so it's self-documenting for new members instead
+    # of them wondering what an unexplained embed means.
     expected = f"Bearer {settings.nft_cron_secret}"
     if not settings.nft_cron_secret or request.headers.get("authorization") != expected:
         raise HTTPException(status_code=401, detail="Unauthorized")
     async with httpx.AsyncClient(timeout=15) as client:
-        alerts_result = await _post_and_pin(client, settings.discord_nft_alerts_channel_id, _nft_alerts_explainer_embed())
-        mint_result = await _post_and_pin(client, settings.discord_nft_mint_channel_id, _nft_mint_radar_explainer_embed())
-    return {"nft_watchlist_alerts_channel": alerts_result, "nft_mint_radar_channel": mint_result}
+        result = await _post_and_pin(client, settings.discord_nft_channel_id, _nft_channel_explainer_embed())
+    return {"nft_channel": result}
 
 
 @app.get("/cron/nft-poll")

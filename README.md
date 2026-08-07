@@ -56,14 +56,16 @@ all in one embed. Floor/offer USD conversion and ATH both come straight
 from data this backend already had access to (OpenSea's own live pricing
 and a new self-collected snapshot history) rather than a new paid API.
 
-**Proactive alerts**, posted automatically to two new Discord channels
-via `/cron/nft-poll`:
-- `#nft-watchlist-alerts` - every collection on anyone's `/watchlist` is
+**Proactive alerts**, posted automatically to one shared Discord channel
+via `/cron/nft-poll` (deliberately one channel, not several, to keep the
+server's channel list lean - the two alert types are visually distinct
+by emoji/color, so interleaving them reads fine):
+- **Watchlist alerts** - every collection on anyone's `/watchlist` is
   checked every ~5 minutes for a **supply cut** (total supply dropped),
   a **volume spike** (24h volume well above its recent average), or a
   **sweep** (several sales in a short window concentrated in very few
   buyer wallets).
-- `#nft-mint-radar` - newly-created collections on Ethereum, Base,
+- **Mint radar** - newly-created collections on Ethereum, Base,
   Polygon and Robinhood Chain are scanned and scored against an explicit
   8-point on-chain checklist (real social/website link, real description,
   recorded sales, floor set, healthy owner spread, plausible supply size,
@@ -72,8 +74,8 @@ via `/cron/nft-poll`:
   Junk (0-2) - every check is shown, not just the verdict, so it's never
   a black box.
 
-Both channels get a pinned "how this works" explainer the first time
-`/cron/nft-init-channels` is run, so new members don't have to ask.
+The channel gets a single pinned "how this works" explainer the first
+time `/cron/nft-init-channels` is run, so new members don't have to ask.
 
 **Architecture** - polling, not a persistent worker or websocket:
 ```
@@ -100,19 +102,19 @@ Supabase SQL Editor): `nft_snapshot_history`, `nft_alert_state`,
 `nft_mint_radar_seen`. The "tracked collections" list isn't a separate
 table - it's just the distinct slugs across everyone's `/watchlist`.
 
-**New env vars** (`backend/config.py`): `discord_nft_alerts_channel_id`,
-`discord_nft_mint_channel_id`, `nft_cron_secret` (deliberately separate
-from the existing `cron_secret` - this one is reachable from a public
-GitHub Actions workflow far more often than the other cron endpoints, so
-keeping it distinct limits the blast radius if it ever leaks).
+**New env vars** (`backend/config.py`): `discord_nft_channel_id`,
+`nft_cron_secret` (deliberately separate from the existing `cron_secret`
+- this one is reachable from a public GitHub Actions workflow far more
+often than the other cron endpoints, so keeping it distinct limits the
+blast radius if it ever leaks).
 
 **Setup steps this required** (all already done for the live deployment):
 1. Run the new tables from `backend/schema.sql` in the Supabase SQL Editor.
-2. Set `DISCORD_NFT_ALERTS_CHANNEL_ID`, `DISCORD_NFT_MINT_CHANNEL_ID`, and
-   `NFT_CRON_SECRET` in Vercel's Production environment.
+2. Set `DISCORD_NFT_CHANNEL_ID` and `NFT_CRON_SECRET` in Vercel's
+   Production environment.
 3. Set the same `NFT_CRON_SECRET` as a GitHub Actions repo secret
    (`gh secret set NFT_CRON_SECRET`) so `.github/workflows/nft-poll.yml`
    can authenticate to the cron endpoint.
-4. Create the two Discord channels, give the bot Send Messages + Embed
-   Links there, then hit `/cron/nft-init-channels` once (same
-   `NFT_CRON_SECRET`) to post and pin the explainer in each.
+4. Give the bot Send Messages + Embed Links in that channel, then hit
+   `/cron/nft-init-channels` once (same `NFT_CRON_SECRET`) to post and
+   pin the explainer.
