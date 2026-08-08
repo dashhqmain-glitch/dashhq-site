@@ -234,13 +234,18 @@ def render_pnl_card(data: dict, project_thumb_bytes: bytes | None = None) -> byt
     multiplier = (fp / mint_price) if mint_price > 0 else 0.0
     pnl_usd = pnl_eth * eth_usd
 
-    if pnl_eth > 0:
+    # Floor prices arrive from OpenSea as floats, so a genuine tie can land
+    # a hair off zero (e.g. 8.000000001e-2 - 8e-2) purely from float
+    # representation, not a real price difference. A tiny epsilon keeps
+    # true ties labeled BREAK EVEN instead of flipping on noise.
+    _EPS = 1e-9
+    if pnl_eth > _EPS:
         accent, verdict = GREEN, "REALIZED PROFIT"
-    elif pnl_eth < 0:
+    elif pnl_eth < -_EPS:
         accent, verdict = RED, "REALIZED LOSS"
     else:
         accent, verdict = BLUE, "BREAK EVEN"
-    sign = "+" if pnl_eth > 0 else ("-" if pnl_eth < 0 else "")
+    sign = "+" if pnl_eth > _EPS else ("-" if pnl_eth < -_EPS else "")
 
     # ── Background: radial gradient + dot grid + center glow ─────────
     img = _radial_gradient((W, H), [(0.0, BG_TOP), (0.42, BG_MID), (1.0, BG_BOTTOM)]).convert("RGBA")
