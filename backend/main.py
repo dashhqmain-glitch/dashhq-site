@@ -528,7 +528,21 @@ async def setup_pidgin_automod(request: Request):
         # how enforcement stays scoped to just that one channel (so
         # #lifestyle-chat and everywhere else is unaffected).
         exempt_channels = [cid for cid in all_channel_ids if cid != settings.discord_general_channel_id]
-        exempt_role_id = await _get_or_create_pidgin_exempt_role(client, headers)
+        # Creating a role needs Manage Roles specifically (separate from
+        # Manage Server, which is all AutoMod rule management itself
+        # needs) - the bot may not have that yet. Don't let the whole
+        # rule setup fail just because this one bonus feature isn't
+        # grantable right now; the core English-only enforcement matters
+        # more than the mod-exemption toggle, and this can be retried
+        # (re-running this endpoint is always safe) once Manage Roles is
+        # added.
+        try:
+            exempt_role_id = await _get_or_create_pidgin_exempt_role(client, headers)
+            exempt_role_warning = None
+        except httpx.HTTPStatusError as e:
+            logger.warning("Could not create/find Pidgin Exempt role (bot likely missing Manage Roles): %s", e)
+            exempt_role_id = None
+            exempt_role_warning = "Could not create the 'Pidgin Exempt' role - give the bot Manage Roles permission, then re-run this endpoint to enable /pidgin-exempt."
 
         actions = [
             {"type": 1, "metadata": {"custom_message": "English only in #general — you've been timed out for 10 minutes. Other languages are welcome in the lifestyle chat!"}},
@@ -545,7 +559,7 @@ async def setup_pidgin_automod(request: Request):
             "actions": actions,
             "enabled": True,
             "exempt_channels": exempt_channels,
-            "exempt_roles": [exempt_role_id],
+            "exempt_roles": [exempt_role_id] if exempt_role_id else [],
         }
 
         existing_res = await client.get(f"{DISCORD_API}/guilds/{settings.discord_guild_id}/auto-moderation/rules", headers=headers)
@@ -573,6 +587,7 @@ async def setup_pidgin_automod(request: Request):
         "exempt_channels": len(exempt_channels),
         "exempt_role_id": exempt_role_id,
         "exempt_role_name": _PIDGIN_EXEMPT_ROLE_NAME,
+        "warning": exempt_role_warning,
     }
 
 
