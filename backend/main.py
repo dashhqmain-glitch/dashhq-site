@@ -646,8 +646,18 @@ async def _handle_pidgin_exempt_command(payload: dict) -> dict:
         try:
             role_id = await _get_or_create_pidgin_exempt_role(client, headers)
             url = f"{DISCORD_API}/guilds/{settings.discord_guild_id}/members/{target_user_id}/roles/{role_id}"
+            cleared_timeout = False
             if sub_name == "add":
                 res = await client.put(url, headers=headers)
+                if res.status_code < 300:
+                    # A mod reaching for /pidgin-exempt add is almost always
+                    # doing it to rescue someone currently timed out, not
+                    # just to pre-approve them for later - so lift any
+                    # active timeout in the same step instead of making
+                    # them also go find the member and remove it manually.
+                    member_url = f"{DISCORD_API}/guilds/{settings.discord_guild_id}/members/{target_user_id}"
+                    clear_res = await client.patch(member_url, headers=headers, json={"communication_disabled_until": None})
+                    cleared_timeout = clear_res.status_code < 300
             elif sub_name == "remove":
                 res = await client.delete(url, headers=headers)
             else:
@@ -658,8 +668,12 @@ async def _handle_pidgin_exempt_command(payload: dict) -> dict:
             logger.exception("pidgin-exempt role update failed")
             return {"type": 4, "data": {"content": "Something went wrong talking to Discord.", "flags": 64}}
 
-    verb = "now exempt from" if sub_name == "add" else "no longer exempt from"
-    return {"type": 4, "data": {"content": f"✅ <@{target_user_id}> is {verb} the English-only #general timeout.", "flags": 64}}
+    if sub_name == "add":
+        suffix = " and their active timeout was lifted." if cleared_timeout else " (no active timeout to lift)."
+        content = f"✅ <@{target_user_id}> is now exempt from the English-only #general timeout{suffix}"
+    else:
+        content = f"✅ <@{target_user_id}> is no longer exempt from the English-only #general timeout."
+    return {"type": 4, "data": {"content": content, "flags": 64}}
 
 
 # ── Citizenship applications ─────────────────────────────────────────────────
