@@ -7,7 +7,7 @@ import re
 import secrets
 import time
 import urllib.parse
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import jwt
@@ -484,6 +484,27 @@ PIDGIN_KEYWORDS = [
     "wetin be", "na him", "no vex", "abeg no", "e don do",
 ]
 _PIDGIN_RULE_NAME = "English-only #general (Pidgin filter)"
+_PIDGIN_EXEMPT_ROLE_NAME = "Pidgin Exempt"
+
+
+async def _get_or_create_pidgin_exempt_role(client: httpx.AsyncClient, headers: dict) -> str:
+    # A citizen holding this role is skipped by the AutoMod rule entirely
+    # (Discord AutoMod supports exempt_roles same as exempt_channels) - the
+    # mechanism mods use to turn the timeout off for one specific person
+    # without touching the rule itself. Looked up by name and created if
+    # missing, so no extra env var/manual setup step is needed.
+    roles_res = await client.get(f"{DISCORD_API}/guilds/{settings.discord_guild_id}/roles", headers=headers)
+    roles_res.raise_for_status()
+    existing = next((r for r in roles_res.json() if r["name"] == _PIDGIN_EXEMPT_ROLE_NAME), None)
+    if existing:
+        return existing["id"]
+    create_res = await client.post(
+        f"{DISCORD_API}/guilds/{settings.discord_guild_id}/roles",
+        headers=headers,
+        json={"name": _PIDGIN_EXEMPT_ROLE_NAME, "mentionable": False, "hoist": False},
+    )
+    create_res.raise_for_status()
+    return create_res.json()["id"]
 
 
 @app.get("/cron/setup-pidgin-automod")
@@ -507,6 +528,7 @@ async def setup_pidgin_automod(request: Request):
         # how enforcement stays scoped to just that one channel (so
         # #lifestyle-chat and everywhere else is unaffected).
         exempt_channels = [cid for cid in all_channel_ids if cid != settings.discord_general_channel_id]
+        exempt_role_id = await _get_or_create_pidgin_exempt_role(client, headers)
 
         actions = [
             {"type": 1, "metadata": {"custom_message": "English only in #general — you've been timed out for 10 minutes. Other languages are welcome in the lifestyle chat!"}},
@@ -523,6 +545,7 @@ async def setup_pidgin_automod(request: Request):
             "actions": actions,
             "enabled": True,
             "exempt_channels": exempt_channels,
+            "exempt_roles": [exempt_role_id],
         }
 
         existing_res = await client.get(f"{DISCORD_API}/guilds/{settings.discord_guild_id}/auto-moderation/rules", headers=headers)
@@ -543,7 +566,52 @@ async def setup_pidgin_automod(request: Request):
             raise HTTPException(status_code=502, detail=f"Discord AutoMod setup failed: {res.status_code} {res.text[:300]}")
         rule = res.json()
 
-    return {"rule_id": rule["id"], "action": "updated" if existing else "created", "keywords": len(PIDGIN_KEYWORDS), "exempt_channels": len(exempt_channels)}
+    return {
+        "rule_id": rule["id"],
+        "action": "updated" if existing else "created",
+        "keywords": len(PIDGIN_KEYWORDS),
+        "exempt_channels": len(exempt_channels),
+        "exempt_role_id": exempt_role_id,
+        "exempt_role_name": _PIDGIN_EXEMPT_ROLE_NAME,
+    }
+
+
+async def _handle_pidgin_exempt_command(payload: dict) -> dict:
+    # Hidden from regular members via default_member_permissions on the
+    # command itself (same mechanism /history uses) - Discord never even
+    # shows this command to anyone without Manage Server, so there's no
+    # separate permission check needed here.
+    sub_options = (payload.get("data") or {}).get("options") or []
+    if not sub_options:
+        return {"type": 4, "data": {"content": "Use `/pidgin-exempt add` or `/pidgin-exempt remove`.", "flags": 64}}
+    sub = sub_options[0]
+    sub_name = sub.get("name")
+    sub_opts = {o["name"]: o.get("value") for o in (sub.get("options") or [])}
+    target_user_id = sub_opts.get("user")
+    if not target_user_id:
+        return {"type": 4, "data": {"content": "Specify a user.", "flags": 64}}
+    if not (settings.discord_bot_token and settings.discord_guild_id):
+        return {"type": 4, "data": {"content": "Discord bot env vars not fully configured.", "flags": 64}}
+
+    headers = {"Authorization": f"Bot {settings.discord_bot_token}"}
+    async with httpx.AsyncClient(timeout=10) as client:
+        try:
+            role_id = await _get_or_create_pidgin_exempt_role(client, headers)
+            url = f"{DISCORD_API}/guilds/{settings.discord_guild_id}/members/{target_user_id}/roles/{role_id}"
+            if sub_name == "add":
+                res = await client.put(url, headers=headers)
+            elif sub_name == "remove":
+                res = await client.delete(url, headers=headers)
+            else:
+                return {"type": 4, "data": {"content": "Unknown subcommand.", "flags": 64}}
+            if res.status_code >= 300:
+                return {"type": 4, "data": {"content": f"Discord API error: {res.status_code} {res.text[:200]}", "flags": 64}}
+        except httpx.HTTPError:
+            logger.exception("pidgin-exempt role update failed")
+            return {"type": 4, "data": {"content": "Something went wrong talking to Discord.", "flags": 64}}
+
+    verb = "now exempt from" if sub_name == "add" else "no longer exempt from"
+    return {"type": 4, "data": {"content": f"✅ <@{target_user_id}> is {verb} the English-only #general timeout.", "flags": 64}}
 
 
 # ── Citizenship applications ─────────────────────────────────────────────────
@@ -841,8 +909,11 @@ async def discord_interactions(request: Request):
         return {"type": 1}
 
     if itype == 2:  # APPLICATION_COMMAND — a /slash command
-        if (payload.get("data") or {}).get("name") == "history":
+        cmd_name = (payload.get("data") or {}).get("name")
+        if cmd_name == "history":
             return await _handle_history_command(payload)
+        if cmd_name == "pidgin-exempt":
+            return await _handle_pidgin_exempt_command(payload)
         return await _handle_toolkit_command(payload)
 
     member_user = payload.get("member", {}).get("user", {})
@@ -2753,6 +2824,30 @@ async def nft_init_channels(request: Request):
     return {"nft_channel": result}
 
 
+_SNAPSHOT_RETENTION_DAYS = 30
+
+
+async def _prune_old_snapshots(client: httpx.AsyncClient) -> bool:
+    # nft_snapshot_history gets a new row every ~5 minutes per tracked
+    # collection, forever, with no other cleanup - on a long enough
+    # timeline that's the one thing in this whole system that grows
+    # unbounded regardless of how many people use the bot, and could
+    # eventually threaten Supabase's free-tier storage cap. 30 days is
+    # far more history than any current feature (chart note, ATH, spike
+    # baseline) actually looks back through.
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=_SNAPSHOT_RETENTION_DAYS)).isoformat()
+    try:
+        res = await client.delete(
+            f"{settings.supabase_url}/rest/v1/nft_snapshot_history",
+            headers=_supabase_headers(prefer="return=minimal"),
+            params={"captured_at": f"lt.{cutoff}"},
+        )
+        return res.status_code < 300
+    except httpx.HTTPError:
+        logger.exception("nft-poll: snapshot pruning failed")
+        return False
+
+
 @app.get("/cron/nft-poll")
 async def nft_poll(request: Request):
     expected = f"Bearer {settings.nft_cron_secret}"
@@ -2774,8 +2869,9 @@ async def nft_poll(request: Request):
         except (httpx.HTTPError, KeyError) as e:
             logger.exception("nft-poll: mint radar phase failed")
             minted, errors = [], errors + [f"mint_radar: {e}"]
+        pruned = await _prune_old_snapshots(client)
 
-    return {"watchlist_alerts": alerted, "mint_radar_posts": minted, "errors": errors}
+    return {"watchlist_alerts": alerted, "mint_radar_posts": minted, "pruned_old_snapshots": pruned, "errors": errors}
 
 
 @app.get("/toolkit/nft-discover")
@@ -3511,6 +3607,12 @@ TOOLKIT_TOOLS = {
         "usage": "/monitor set|clear collection:<name> · /monitor list",
         "example": "/monitor set collection:Pudgy Penguins",
     },
+    "pnl": {
+        "emoji": "📊", "label": "PnL Card",
+        "short": "Generate a shareable branded card showing your realized profit/loss on a mint",
+        "usage": "/pnl collection:<name> mint_price:<ETH> amount_minted:<count> x_username:<optional>",
+        "example": "/pnl collection:Pudgy Penguins mint_price:0.03 amount_minted:2",
+    },
 }
 
 
@@ -3600,6 +3702,27 @@ async def _handle_toolkit_command(payload: dict) -> dict:
         except Exception as exc:
             embed = _error_embed(exc)
         await _discord_edit_original(token, _clean_embed(embed))
+        return {"type": 5}
+
+    # /pnl: collection search + live floor/ATH lookup + thumbnail download +
+    # Pillow rendering routinely exceeds Discord's 3-second ack window -
+    # same deferred pattern as /xray, but the followup carries a PNG
+    # attachment instead of an embed.
+    if name == "pnl":
+        interaction_id = payload.get("id")
+        token = payload.get("token")
+        await _discord_deferred_ack(interaction_id, token, ephemeral=False)
+        try:
+            collection = opts.get("collection", "")
+            mint_price = float(opts.get("mint_price", 0))
+            amount_minted = int(opts.get("amount_minted", 1))
+            x_username = (opts.get("x_username") or member_user.get("global_name") or member_user.get("username") or "citizen").strip()
+            png_bytes = await _pnl_render_core(collection, mint_price, amount_minted, x_username)
+            await _discord_edit_original_with_file(token, "pnl.png", png_bytes)
+        except Exception as exc:
+            if not isinstance(exc, HTTPException):
+                logger.exception("/pnl command failed")
+            await _discord_edit_original(token, _clean_embed(_error_embed(exc)))
         return {"type": 5}
 
     try:

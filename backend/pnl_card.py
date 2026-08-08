@@ -1,10 +1,12 @@
 """Dash HQ PnL card renderer.
 
-Pure image compositing (Pillow), no AI generation involved - a fixed
-Dash HQ-branded template with dynamic text/numbers overlaid, so every
-card costs nothing to render beyond CPU time. Layout matches the
-approved Figma reference (Dash HQ file, frames 125-4 / 127-6 / 127-63)
-pixel-for-pixel where practical; colors otherwise come from styles.css.
+Pure image compositing (Pillow), no AI generation involved. Layout,
+spacing, colors, and fonts are ported directly from the official design
+handoff (design_handoff_pnl_card/: README.md, design-elements-spec.md,
+stat-grid-spec.md, Dash HQ PNL Card.dc.html) at 2x scale. Sora has no
+real italic face on Google Fonts, so the headline number's italic is a
+synthetic shear transform, same as what a browser does when you set
+font-style:italic on a font without one.
 """
 
 import io
@@ -15,27 +17,26 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 _HERE = os.path.dirname(__file__)
 _FONTS = os.path.join(_HERE, "assets", "fonts")
-_LOGO_PATH = os.path.join(_HERE, "assets", "logo.png")
+_LOGO_PATH = os.path.join(_HERE, "assets", "logo_hq.png")
 
-BG_TOP = (0, 0, 0)
-BG_BOTTOM = (5, 5, 8)
-GHOST = (245, 248, 255)
-MUTED2 = (150, 165, 199)
-MUTED = (98, 113, 145)
-ELECTRIC = (77, 114, 255)
-TEAL = (34, 211, 238)
-# Exact brand accents (user-specified hex): profit/loss/breakeven.
-GREEN_LO = (0, 255, 47)
-GREEN_HI = (140, 255, 161)
-RED_LO = (255, 0, 4)
-RED_HI = (255, 140, 142)
-BLUE_LO = (0, 4, 255)
-BLUE_HI = (140, 142, 255)
+# Exact colors from the design handoff.
+BG_TOP = (11, 18, 36)      # #0B1224
+BG_MID = (5, 8, 15)        # #05080F
+BG_BOTTOM = (4, 5, 9)      # #040509
+GHOST = (246, 248, 252)    # #f6f8fc
+VALUE_WHITE = (240, 242, 248)  # #f0f2f8
+ETH_WHITE = (238, 240, 246)    # #eef0f6
+MUTED2 = (90, 106, 138)    # #5A6A8A
+USD_MUTED = (138, 155, 191)  # #8A9BBF
+DATE_MUTED = (61, 69, 96)  # #3d4560
 
-# 2x the original 1200x800 canvas - matches the Figma export resolution
-# and gives Discord's image preview real sharpness instead of upscaling.
-W, H = 2400, 1600
-PAD = 130
+GREEN = (0, 255, 31)   # #00FF1F profit
+RED = (255, 31, 31)    # #FF1F1F loss
+BLUE = (31, 111, 255)  # #1F6FFF breakeven
+
+# 2x the 800px design width from the handoff spec.
+W, H = 1600, 934
+PAD_TOP, PAD_SIDES = 72, 80
 
 _font_cache: dict[tuple[str, int], ImageFont.FreeTypeFont] = {}
 
@@ -51,42 +52,9 @@ def _tw(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont) -> f
     return draw.textlength(text, font=font)
 
 
-def _linear_gradient(size, color1, color2, angle=135) -> Image.Image:
-    w, h = size
-    diag = int((w**2 + h**2) ** 0.5) + 4
-    grad = Image.linear_gradient("L").resize((diag, diag), Image.BICUBIC)
-    grad = grad.rotate(angle, resample=Image.BICUBIC)
-    gw, gh = grad.size
-    left, top = (gw - w) // 2, (gh - h) // 2
-    grad = grad.crop((left, top, left + w, top + h))
-    c1 = Image.new("RGB", size, color1)
-    c2 = Image.new("RGB", size, color2)
-    return Image.composite(c2, c1, grad)
-
-
 def _text_size(text: str, font: ImageFont.FreeTypeFont) -> tuple[int, int, int, int]:
     tmp = Image.new("L", (10, 10))
     return ImageDraw.Draw(tmp).textbbox((0, 0), text, font=font)
-
-
-def _gradient_text(base: Image.Image, xy, text: str, font, color1, color2, angle=90):
-    # xy[1] must mean the same thing here as it does for a plain
-    # draw.text() call (the font's ascender line), or this text silently
-    # sits at a different baseline than anything drawn normally next to
-    # it. Sizing the mask off the *tight* glyph bbox (as this used to do)
-    # broke that: the tight bbox top rarely equals the ascender line, so
-    # gradient text and normal text never actually shared a baseline.
-    ascent, descent = font.getmetrics()
-    bbox = _text_size(text, font)
-    tw = bbox[2] - bbox[0]
-    pad = 10
-    mask_w, mask_h = int(tw) + pad * 2, ascent + descent + pad * 2
-    mask = Image.new("L", (mask_w, mask_h), 0)
-    ImageDraw.Draw(mask).text((pad - bbox[0], pad), text, font=font, fill=255)
-    grad = _linear_gradient((mask_w, mask_h), color1, color2, angle).convert("RGBA")
-    grad.putalpha(mask)
-    base.alpha_composite(grad, (int(xy[0]) - pad, int(xy[1]) - pad))
-    return tw
 
 
 def _text_spaced_w(draw, text, font, tracking) -> float:
@@ -107,127 +75,135 @@ def _text_spaced(base: Image.Image, xy, text: str, font, fill, tracking: float, 
         x += w + tracking
 
 
-def _gradient_panel(base: Image.Image, box, radius, color1, color2, angle=135, alpha=255):
-    x0, y0, x1, y1 = box
-    w, h = int(x1 - x0), int(y1 - y0)
-    grad = _linear_gradient((w, h), color1, color2, angle).convert("RGBA")
-    mask = Image.new("L", (w, h), 0)
-    ImageDraw.Draw(mask).rounded_rectangle((0, 0, w, h), radius=radius, fill=alpha)
-    grad.putalpha(mask)
-    base.alpha_composite(grad, (int(x0), int(y0)))
+def _radial_gradient(size, stops, center=(0.5, -0.1), size_frac=(1.3, 1.3)) -> Image.Image:
+    # Approximates radial-gradient(120% 90% at 50% -10%, ...) using
+    # Pillow's built-in radial_gradient primitive (C-level, fast) scaled
+    # and positioned to match, then colorized via a per-channel LUT - no
+    # per-pixel Python loop.
+    w, h = size
+    base = Image.radial_gradient("L").resize((int(w * size_frac[0]), int(h * size_frac[1])), Image.BICUBIC)
+    bw, bh = base.size
+    cx, cy = w * center[0], h * center[1]
+    left, top = int(cx - bw / 2), int(cy - bh / 2)
+    canvas = Image.new("L", size, 255)
+    canvas.paste(base, (left, top))
+
+    stops = sorted(stops)
+    lut_r, lut_g, lut_b = [], [], []
+    for i in range(256):
+        d = i / 255
+        for j in range(len(stops) - 1):
+            o0, c0 = stops[j]
+            o1, c1 = stops[j + 1]
+            if d <= o1 or j == len(stops) - 2:
+                t = 0 if o1 == o0 else max(0, min(1, (d - o0) / (o1 - o0)))
+                lut_r.append(int(c0[0] + (c1[0] - c0[0]) * t))
+                lut_g.append(int(c0[1] + (c1[1] - c0[1]) * t))
+                lut_b.append(int(c0[2] + (c1[2] - c0[2]) * t))
+                break
+    return Image.merge("RGB", (canvas.point(lut_r), canvas.point(lut_g), canvas.point(lut_b)))
 
 
-def _glow(base: Image.Image, center, radius, color, alpha=90, blur=70):
+def _dot_grid(base: Image.Image, spacing: int = 56, radius: float = 2.2, alpha: int = 10):
     layer = Image.new("RGBA", base.size, (0, 0, 0, 0))
     d = ImageDraw.Draw(layer)
+    for y in range(0, base.size[1], spacing):
+        for x in range(0, base.size[0], spacing):
+            d.ellipse((x - radius, y - radius, x + radius, y + radius), fill=(255, 255, 255, alpha))
+    base.alpha_composite(layer)
+
+
+def _glow(base: Image.Image, center, radius, color, alpha=38, blur=28, fade_frac=0.7):
+    # A blurred *solid* circle still reads as a hard-edged blob at large
+    # radii - only the outer ~blur px actually soften. The source CSS
+    # glow is a radial-gradient that fades to transparent by 70% of its
+    # radius *before* any blur, which is what makes it read as ambient
+    # wash instead of a circle. Replicate the fade with a real alpha
+    # gradient, then blur that.
+    size = max(2, int(radius * 2))
+    g = Image.radial_gradient("L").resize((size, size), Image.BICUBIC)  # 0 center -> 255 edge
+    lut = [int(alpha * (1 - (i / 255) / fade_frac)) if (i / 255) < fade_frac else 0 for i in range(256)]
+    alpha_img = g.point(lut)
+    circle = Image.new("RGBA", (size, size), (*color, 255))
+    circle.putalpha(alpha_img)
+    if blur:
+        circle = circle.filter(ImageFilter.GaussianBlur(blur))
     x, y = center
-    d.ellipse((x - radius, y - radius, x + radius, y + radius), fill=(*color, alpha))
-    layer = layer.filter(ImageFilter.GaussianBlur(blur))
-    base.alpha_composite(layer)
+    base.alpha_composite(circle, (int(x - size / 2), int(y - size / 2)))
 
 
-def _corner_ribbon(base: Image.Image, color1, color2, text, font):
-    # Full-bleed diagonal seal in the top-right corner - stretched past
-    # both the top and right edges on purpose so it reads as a corner
-    # of the card itself, not a floating sticker.
-    band_w = 260
-    span = int(W * 0.62)
-    layer = Image.new("RGBA", (span, span), (0, 0, 0, 0))
-    grad = _linear_gradient((span, span), color1, color2, 135).convert("RGBA")
-    mask = Image.new("L", (span, span), 0)
-    cy = span * 0.5
-    ImageDraw.Draw(mask).rectangle((0, cy - band_w / 2, span, cy + band_w / 2), fill=255)
-    grad.putalpha(mask)
-    layer.alpha_composite(grad)
-    d = ImageDraw.Draw(layer)
-    tw = _tw(d, text, font)
-    d.text((span / 2 - tw / 2, cy - font.size / 1.6), text, font=font, fill=(10, 12, 20))
-    layer = layer.rotate(-45, resample=Image.BICUBIC, expand=False)
-    base.alpha_composite(layer, (int(W - span / 2 - span * 0.10), int(-span / 2 + span * 0.10)))
+def _corner_brackets(base: Image.Image, color, inset=52, arm=52, width=4, alpha=178):
+    _line_alpha(base, [(inset, inset + arm), (inset, inset), (inset + arm, inset)], (*color, alpha), width)
+    w, h = base.size
+    _line_alpha(base, [(w - inset - arm, inset), (w - inset, inset), (w - inset, inset + arm)], (*color, alpha), width)
+    _line_alpha(base, [(inset, h - inset - arm), (inset, h - inset), (inset + arm, h - inset)], (*color, alpha), width)
+    _line_alpha(base, [(w - inset - arm, h - inset), (w - inset, h - inset), (w - inset, h - inset - arm)], (*color, alpha), width)
 
 
-def _pill_badge(base: Image.Image, center_x, y, text, font, color, glow=True):
-    draw = ImageDraw.Draw(base)
-    tw = _tw(draw, text, font)
-    pad_x, pad_y = 46, 22
-    w, h = tw + pad_x * 2, font.size + pad_y * 2
-    box = (center_x - w / 2, y, center_x + w / 2, y + h)
+def _diamond(base: Image.Image, center, half, color, glow=True):
     if glow:
-        _glow(base, (center_x, y + h / 2), int(w * 0.62), color, alpha=48, blur=130)
+        # Matches the spec's tiny "box-shadow 0 0 6px" - a soft edge right
+        # at the diamond's own size, not a visible halo around it.
+        _glow(base, center, half * 1.6, color, alpha=130, blur=4, fade_frac=0.9)
+    x, y = center
+    ImageDraw.Draw(base).polygon([(x, y - half), (x + half, y), (x, y + half), (x - half, y)], fill=color)
+
+
+def _alpha_hex(color, frac: float) -> tuple:
+    return (*color, int(255 * frac))
+
+
+def _rounded_fill(base: Image.Image, box, radius, fill_rgba):
     layer = Image.new("RGBA", base.size, (0, 0, 0, 0))
-    ImageDraw.Draw(layer).rounded_rectangle(box, radius=h / 2, fill=(*color, 28))
+    ImageDraw.Draw(layer).rounded_rectangle(box, radius=radius, fill=fill_rgba)
     base.alpha_composite(layer)
-    ImageDraw.Draw(base).rounded_rectangle(box, radius=h / 2, outline=color, width=3)
-    draw = ImageDraw.Draw(base)
-    draw.text((center_x - tw / 2, y + pad_y - 2), text, font=font, fill=color)
-    return box[3]
 
 
-def _darken(color, factor=0.45):
-    return tuple(int(c * factor) for c in color)
+def _rounded_outline_alpha(base: Image.Image, box, radius, color_rgba, width):
+    # Same rule as _rounded_fill: a translucent stroke drawn straight onto
+    # an RGBA image doesn't blend, it just writes that alpha verbatim into
+    # the pixel buffer - the final .convert("RGB") on export then discards
+    # alpha and reveals it fully opaque. Compositing a transparent layer
+    # first is what actually makes it translucent.
+    layer = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    ImageDraw.Draw(layer).rounded_rectangle(box, radius=radius, outline=color_rgba, width=width)
+    base.alpha_composite(layer)
 
 
-def _icon(base: Image.Image, kind: str, box, color, width=3):
-    x0, y0, x1, y1 = box
-    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-    w, h = x1 - x0, y1 - y0
-    d = ImageDraw.Draw(base)
-    if kind == "image":
-        d.rounded_rectangle(box, radius=4, outline=color, width=width)
-        d.ellipse((x0 + w * 0.18, y0 + h * 0.18, x0 + w * 0.42, y0 + h * 0.42), outline=color, width=width)
-        d.line([(x0 + w * 0.14, y1 - h * 0.22), (x0 + w * 0.42, y0 + h * 0.55),
-                (x0 + w * 0.62, y0 + h * 0.72), (x1 - w * 0.12, y0 + h * 0.38)], fill=color, width=width, joint="curve")
-    elif kind == "person":
-        d.ellipse((cx - w * 0.2, y0 + h * 0.04, cx + w * 0.2, y0 + h * 0.44), outline=color, width=width)
-        d.arc((x0 + w * 0.04, y0 + h * 0.42, x1 - w * 0.04, y1 + h * 0.38), start=180, end=360, fill=color, width=width)
-    elif kind == "tag":
-        pts = [(x0 + w * 0.1, cy), (cx, y0), (x1 - w * 0.08, y0 + h * 0.14),
-               (x1 - w * 0.08, y1 - h * 0.14), (cx, y1), (x0 + w * 0.1, cy)]
-        d.line(pts, fill=color, width=width, joint="curve")
-        d.ellipse((cx - 3.5, y0 + h * 0.3, cx + 3.5, y0 + h * 0.3 + 7), fill=color)
-    elif kind == "layers":
-        for dy in (0, 0.32, 0.64):
-            yy = y0 + h * dy
-            d.line([(x0, yy + h * 0.18), (cx, yy), (x1, yy + h * 0.18)], fill=color, width=width, joint="curve")
-    elif kind == "trend":
-        d.line([(x0, y1 - h * 0.08), (x0 + w * 0.32, y0 + h * 0.5), (x0 + w * 0.56, y0 + h * 0.62),
-                (x1 - w * 0.06, y0 + h * 0.02)], fill=color, width=width, joint="curve")
-        d.line([(x1 - w * 0.3, y0), (x1 - w * 0.02, y0), (x1 - w * 0.02, y0 + h * 0.3)], fill=color, width=width, joint="curve")
-    elif kind == "check":
-        d.ellipse(box, outline=color, width=width)
-        d.line([(x0 + w * 0.24, cy), (x0 + w * 0.44, y1 - h * 0.26), (x1 - w * 0.2, y0 + h * 0.26)],
-               fill=color, width=width, joint="curve")
+def _line_alpha(base: Image.Image, xy, color_rgba, width):
+    layer = Image.new("RGBA", base.size, (0, 0, 0, 0))
+    ImageDraw.Draw(layer).line(xy, fill=color_rgba, width=width, joint="curve")
+    base.alpha_composite(layer)
 
 
-def _stat_panel(base: Image.Image, box, radius, stroke_color=(255, 255, 255), fill=(16, 19, 26, 235)):
-    # Plain solid panel - flat fill, clean rounded corners, a colored
-    # border. No blur/translucency tricks.
-    # Supersample the mask/outline at 4x then downscale - this is what
-    # actually makes the rounded corners look smooth instead of faceted;
-    # ImageDraw's own antialiasing on a rounded_rectangle stroke is weak
-    # at the exact radius sizes used here.
-    x0, y0, x1, y1 = [int(v) for v in box]
-    w, h = x1 - x0, y1 - y0
-    ss = 4
-
-    mask_big = Image.new("L", (w * ss, h * ss), 0)
-    ImageDraw.Draw(mask_big).rounded_rectangle((0, 0, w * ss, h * ss), radius=radius * ss, fill=255)
-    mask = mask_big.resize((w, h), Image.LANCZOS)
-    panel = Image.new("RGBA", (w, h), fill)
-    base.paste(panel, (x0, y0), mask)
-
-    edge_big = Image.new("RGBA", (w * ss, h * ss), (0, 0, 0, 0))
-    ImageDraw.Draw(edge_big).rounded_rectangle((0, 0, w * ss, h * ss), radius=radius * ss, outline=(*stroke_color, 220), width=3 * ss)
-    edge = edge_big.resize((w, h), Image.LANCZOS)
-    base.alpha_composite(edge, (x0, y0))
+def _skew_italic(im: Image.Image, shear: float = 0.22) -> Image.Image:
+    # Sora has no real italic face (confirmed against Google Fonts) - this
+    # is exactly what a browser does when font-style:italic is requested
+    # on a font without one: a synthetic shear of the upright glyphs.
+    w, h = im.size
+    new_w = w + int(abs(shear) * h)
+    coeffs = (1, shear, -shear * h, 0, 1, 0)
+    return im.transform((new_w, h), Image.AFFINE, coeffs, resample=Image.BICUBIC, fillcolor=(0, 0, 0, 0))
 
 
-def _grain(base: Image.Image, opacity: int = 7) -> Image.Image:
-    noise = Image.effect_noise(base.size, 28).convert("L")
-    noise_rgba = Image.merge("RGBA", (noise, noise, noise, Image.new("L", base.size, opacity)))
-    out = base.convert("RGBA")
-    out.alpha_composite(noise_rgba)
-    return out
+def _glow_text(base: Image.Image, xy, text: str, font, color, glow_alpha=100, glow_blur=30, italic=False):
+    ascent, descent = font.getmetrics()
+    bbox = _text_size(text, font)
+    pad = 24
+    tw = bbox[2] - bbox[0]
+    mask_w, mask_h = int(tw) + pad * 2, ascent + descent + pad * 2
+    mask = Image.new("L", (mask_w, mask_h), 0)
+    ImageDraw.Draw(mask).text((pad - bbox[0], pad), text, font=font, fill=255)
+    solid = Image.new("RGBA", (mask_w, mask_h), (*color, 255))
+    solid.putalpha(mask)
+    if italic:
+        solid = _skew_italic(solid)
+    glow = solid.filter(ImageFilter.GaussianBlur(glow_blur))
+    ga = glow.split()[3].point(lambda a: min(255, int(a * glow_alpha / 255)))
+    glow.putalpha(ga)
+    base.alpha_composite(glow, (int(xy[0]) - pad, int(xy[1]) - pad))
+    base.alpha_composite(solid, (int(xy[0]) - pad, int(xy[1]) - pad))
+    return tw
 
 
 def _circle_thumb(img_bytes: bytes, size: int) -> Image.Image | None:
@@ -259,142 +235,179 @@ def render_pnl_card(data: dict, project_thumb_bytes: bytes | None = None) -> byt
     pnl_usd = pnl_eth * eth_usd
 
     if pnl_eth > 0:
-        lo, hi, verdict, eyebrow = GREEN_LO, GREEN_HI, "PROFIT", "REALIZED PROFIT"
+        accent, verdict = GREEN, "REALIZED PROFIT"
     elif pnl_eth < 0:
-        lo, hi, verdict, eyebrow = RED_LO, RED_HI, "LOSS", "REALIZED LOSS"
+        accent, verdict = RED, "REALIZED LOSS"
     else:
-        lo, hi, verdict, eyebrow = BLUE_LO, BLUE_HI, "EVEN", "BREAK EVEN"
-    accent = lo
+        accent, verdict = BLUE, "BREAK EVEN"
     sign = "+" if pnl_eth > 0 else ("-" if pnl_eth < 0 else "")
 
-    # ── Background: diagonal base gradient + brand glow + outcome wash ──
-    img = _linear_gradient((W, H), BG_TOP, BG_BOTTOM, angle=115).convert("RGBA")
-    _glow(img, (W * 0.16, H * 0.28), 620, ELECTRIC, alpha=55, blur=200)
-    _glow(img, (W * 0.30, H * 0.55), 440, TEAL, alpha=30, blur=200)
-    _glow(img, (W * 0.5, H * 0.42), 620, accent, alpha=50, blur=260)
-    img = _grain(img, opacity=8)
-
+    # ── Background: radial gradient + dot grid + center glow ─────────
+    img = _radial_gradient((W, H), [(0.0, BG_TOP), (0.42, BG_MID), (1.0, BG_BOTTOM)]).convert("RGBA")
+    _dot_grid(img)
+    _glow(img, (W / 2, 88 + 620), 620, accent, alpha=38, blur=28)
     draw = ImageDraw.Draw(img)
 
-    # ── Top: logo lockup ─────────────────────────────────────────────
-    logo_size = 172
-    logo_y = 148
+    _corner_brackets(img, accent)
+    draw = ImageDraw.Draw(img)
+
+    # ── Header: logo + wordmark + status pill ─────────────────────────
+    logo_size = 72
+    header_y = PAD_TOP
     try:
         logo = Image.open(_LOGO_PATH).convert("RGBA").resize((logo_size, logo_size), Image.LANCZOS)
-        img.alpha_composite(logo, (PAD, logo_y))
+        mask = Image.new("L", (logo_size, logo_size), 0)
+        ImageDraw.Draw(mask).rounded_rectangle((0, 0, logo_size, logo_size), radius=20, fill=255)
+        rounded_logo = Image.new("RGBA", (logo_size, logo_size), (0, 0, 0, 0))
+        rounded_logo.paste(logo, (0, 0), mask)
+        img.alpha_composite(rounded_logo, (PAD_SIDES, header_y))
     except FileNotFoundError:
         pass
     draw = ImageDraw.Draw(img)
-    draw.text((PAD + logo_size + 44, logo_y + 24), "DASH HQ", font=_font("Geist-ExtraBold.ttf", 68), fill=GHOST)
-    _text_spaced(img, (PAD + logo_size + 44, logo_y + 110), "CITIZEN PNL CARD", _font("GeistMono-Bold.ttf", 27), MUTED2, tracking=4)
+
+    wordmark_x = PAD_SIDES + logo_size + 28
+    draw.text((wordmark_x, header_y + 2), "DASH HQ", font=_font("Sora-Bold.ttf", 32), fill=GHOST)
+    _text_spaced(img, (wordmark_x, header_y + 40), "CITIZEN PNL CARD", _font("Poppins-Regular.ttf", 16), MUTED2, tracking=2.2)
     draw = ImageDraw.Draw(img)
 
-    # ── Verdict ribbon, full-bleed top-right corner ─────────────────
-    _corner_ribbon(img, lo, hi, verdict, _font("Geist-ExtraBold.ttf", 60))
+    pill_font = _font("JetBrainsMono-Medium.ttf", 18)
+    pill_text_w = _text_spaced_w(draw, verdict, pill_font, 2.1)
+    dot_r = 6
+    pill_pad_x, pill_pad_y = 28, 12
+    pill_gap = 14
+    pill_h = pill_font.size + pill_pad_y * 2 + 6
+    pill_w = dot_r * 2 + pill_gap + pill_text_w + pill_pad_x * 2
+    pill_box = (W - PAD_SIDES - pill_w, header_y, W - PAD_SIDES, header_y + pill_h)
+    _rounded_fill(img, pill_box, pill_h / 2, _alpha_hex(accent, 0.12))
+    _rounded_outline_alpha(img, pill_box, pill_h / 2, _alpha_hex(accent, 0.30), 2)
+    draw = ImageDraw.Draw(img)
+    pcy = header_y + pill_h / 2
+    _glow(img, (pill_box[0] + pill_pad_x + dot_r, pcy), dot_r * 3, accent, alpha=140, blur=6)
+    draw = ImageDraw.Draw(img)
+    draw.ellipse((pill_box[0] + pill_pad_x, pcy - dot_r, pill_box[0] + pill_pad_x + dot_r * 2, pcy + dot_r), fill=accent)
+    _text_spaced(img, (pill_box[0] + pill_pad_x + dot_r * 2 + pill_gap, pcy - pill_font.size / 1.65), verdict, pill_font, accent, tracking=2.1)
     draw = ImageDraw.Draw(img)
 
-    # ── Hero: pill badge + giant number ──────────────────────────────
+    # ── Hero: synthetic-italic glowing number + upright ETH, USD line ──
     hero_cx = W / 2
-    pill_bottom = _pill_badge(img, hero_cx, 330, eyebrow, _font("Geist-ExtraBold.ttf", 34), accent)
-    draw = ImageDraw.Draw(img)
-
-    num_font = _font("GeistMono-ExtraBold.ttf", 156)
-    unit_font = _font("Geist-ExtraBold.ttf", 140)
+    body_top = header_y + logo_size + 44
+    num_font = _font("Sora-ExtraBold.ttf", 112)
+    unit_font = _font("Sora-Bold.ttf", 46)
     num_text = f"{sign}{abs(pnl_eth):.4f}"
-    gap = 40
+    hero_gap = 28
     num_bbox = _text_size(num_text, num_font)
     unit_bbox = _text_size(symbol, unit_font)
-    total_w = (num_bbox[2] - num_bbox[0]) + gap + (unit_bbox[2] - unit_bbox[0])
+    total_w = (num_bbox[2] - num_bbox[0]) + hero_gap + (unit_bbox[2] - unit_bbox[0])
     start_x = hero_cx - total_w / 2
-    hero_y = pill_bottom + 70
+    hero_y = body_top
 
-    # Align by baseline, not by the top of each font's bounding box - two
-    # different typefaces at two different sizes never share a cap-height,
-    # so a fixed pixel offset between them drifts out of alignment.
     num_ascent, _ = num_font.getmetrics()
     unit_ascent, _ = unit_font.getmetrics()
     baseline_y = hero_y + num_ascent
     unit_y = baseline_y - unit_ascent
 
-    num_w = _gradient_text(img, (start_x, hero_y), num_text, num_font, hi, lo, angle=90)
+    num_w = _glow_text(img, (start_x, hero_y), num_text, num_font, accent, italic=True)
     draw = ImageDraw.Draw(img)
-    draw.text((start_x + num_w + gap, unit_y), symbol, font=unit_font, fill=GHOST)
+    draw.text((start_x + num_w + hero_gap, unit_y), symbol, font=unit_font, fill=ETH_WHITE)
 
-    usd_font = _font("Geist-SemiBold.ttf", 44)
+    usd_font = _font("Poppins-Regular.ttf", 24)
     usd_text = f"≈ {sign}${abs(pnl_usd):,.2f} USD" if pnl_eth != 0 else "≈ $0.00 USD"
-    usd_y = hero_y + 210
-    draw.text((hero_cx - _tw(draw, usd_text, usd_font) / 2, usd_y), usd_text, font=usd_font, fill=GHOST)
+    usd_y = baseline_y + 18
+    draw.text((hero_cx - _tw(draw, usd_text, usd_font) / 2, usd_y), usd_text, font=usd_font, fill=USD_MUTED)
 
-    # ── Stat grid: 3 columns x 2 rows of glass chips ─────────────────
-    grid_top = usd_y + 140
-    grid_bottom = H - 220
-    cols, rows_n = 3, 2
-    gutter = 40
-    grid_x0, grid_x1 = PAD, W - PAD
-    cell_w = (grid_x1 - grid_x0 - gutter * (cols - 1)) / cols
-    cell_h = (grid_bottom - grid_top - gutter * (rows_n - 1)) / rows_n
+    # ── Divider ─────────────────────────────────────────────────────
+    divider_y = usd_y + 24 + 44
+    grad_w = W - PAD_SIDES * 2
+    fade = Image.new("L", (grad_w, 1), 0)
+    half = grad_w // 2
+    for x in range(grad_w):
+        d = 1 - abs(x - half) / half
+        fade.putpixel((x, 0), int(41 * max(0, d)))  # .16 alpha peak
+    fade_rgba = Image.merge("RGBA", (Image.new("L", (grad_w, 1), 255),) * 3 + (fade,))
+    img.alpha_composite(fade_rgba, (PAD_SIDES, int(divider_y)))
+    draw = ImageDraw.Draw(img)
+
+    # ── Stat panel: content-driven height, one bordered container ─────
+    grid_top = divider_y + 44
+    grid_x0, grid_x1 = PAD_SIDES, W - PAD_SIDES
+    cols = 3
+    cell_w = (grid_x1 - grid_x0) / cols
+    cell_pad_x, cell_pad_y = 36, 32
+    label_font = _font("Poppins-Regular.ttf", 20)
+    value_font = _font("Sora-SemiBold.ttf", 34)
+    mult_font = _font("Sora-Bold.ttf", 34)
+    label_h = 20
+    label_gap = 18
+    value_h = 34 * 1.2
+    cell_h = cell_pad_y * 2 + label_h + label_gap + value_h
+    grid_bottom = grid_top + cell_h * 2
+
+    panel_box = (grid_x0, grid_top, grid_x1, grid_bottom)
+    _rounded_fill(img, panel_box, 28, _alpha_hex((255, 255, 255), 0.015))
+    # Faint highlight on the middle column only (X Handle / Minted),
+    # exactly per stat-grid-spec.md's per-cell tint map.
+    mid_x0 = grid_x0 + cell_w
+    _rounded_fill(img, (mid_x0, grid_top, mid_x0 + cell_w, grid_bottom), 0, _alpha_hex((255, 255, 255), 0.012))
+    _rounded_outline_alpha(img, panel_box, 28, _alpha_hex((255, 255, 255), 0.09), 2)
+    draw = ImageDraw.Draw(img)
+    hairline = _alpha_hex((255, 255, 255), 0.09)
+    for col in (1, 2):
+        x = grid_x0 + cell_w * col
+        _line_alpha(img, (x, grid_top, x, grid_bottom), hairline, 2)
+    _line_alpha(img, (grid_x0, grid_top + cell_h, grid_x1, grid_top + cell_h), hairline, 2)
+    draw = ImageDraw.Draw(img)
 
     stats = [
-        ("PROJECT", data.get("project", "-"), True, False, "image"),
-        ("X HANDLE", f"@{data.get('x_username', '-').lstrip('@')}", False, False, "person"),
-        ("MULTIPLIER", f"{multiplier:.2f}x", False, True, "trend"),
-        ("MINT PRICE", f"{mint_price:.4f} {symbol}", False, False, "tag"),
-        ("MINTED", str(amount), False, False, "layers"),
-        ("FLOOR / ATH", f"{fp:.3f} / {ath:.3f}", False, False, "check"),
+        ("PROJECT", data.get("project", "-"), True, False),
+        ("X HANDLE", f"@{data.get('x_username', '-').lstrip('@')}", False, False),
+        ("MULTIPLIER", f"{multiplier:.2f}x", False, True),
+        ("MINT PRICE", f"{mint_price:.4f} {symbol}", False, False),
+        ("MINTED", str(amount), False, False),
+        ("FLOOR / ATH", f"{fp:.3f} / {ath:.3f}", False, False),
     ]
-    label_font = _font("GeistMono-Bold.ttf", 26)
-    value_font = _font("Geist-ExtraBold.ttf", 48)
-    icon_size = 30
-    for i, (label, value, show_thumb, colored, icon_kind) in enumerate(stats):
+    for i, (label, value, show_thumb, colored) in enumerate(stats):
         col, row = i % cols, i // cols
-        x0 = grid_x0 + col * (cell_w + gutter)
-        y0 = grid_top + row * (cell_h + gutter)
-        box = (x0, y0, x0 + cell_w, y0 + cell_h)
-        _stat_panel(img, box, 30, stroke_color=_darken(accent, 0.5))
+        x0 = grid_x0 + col * cell_w
+        y0 = grid_top + row * cell_h
+        lcx = x0 + cell_pad_x + 5
+        lcy = y0 + cell_pad_y + 7
+        _diamond(img, (lcx, lcy), 5, accent)
         draw = ImageDraw.Draw(img)
-        _icon(img, icon_kind, (x0 + 40, y0 + 32, x0 + 40 + icon_size, y0 + 32 + icon_size), MUTED2)
-        draw = ImageDraw.Draw(img)
-        _text_spaced(img, (x0 + 40 + icon_size + 16, y0 + 34), label, label_font, MUTED2, tracking=3)
+        _text_spaced(img, (x0 + cell_pad_x + 18, y0 + cell_pad_y), label, label_font, MUTED2, tracking=2)
         draw = ImageDraw.Draw(img)
 
-        max_w = cell_w - 80
+        vfont = mult_font if colored else value_font
+        max_w = cell_w - cell_pad_x * 2
         vtext = value
-        while _tw(draw, vtext, value_font) > max_w and len(vtext) > 4:
+        while _tw(draw, vtext, vfont) > max_w and len(vtext) > 4:
             vtext = vtext[:-2]
         if vtext != value:
             vtext = vtext[:-1] + "…"
         thumb_offset = 0
+        value_y = y0 + cell_pad_y + label_h + label_gap
         if show_thumb and project_thumb_bytes:
-            thumb = _circle_thumb(project_thumb_bytes, 48)
+            thumb = _circle_thumb(project_thumb_bytes, 30)
             if thumb:
-                img.alpha_composite(thumb, (int(x0 + 40), int(y0 + cell_h - 84)))
+                img.alpha_composite(thumb, (int(x0 + cell_pad_x), int(value_y - 3)))
                 draw = ImageDraw.Draw(img)
-                thumb_offset = 62
-        draw.text((x0 + 40 + thumb_offset, y0 + cell_h - 92), vtext, font=value_font, fill=(accent if colored else GHOST))
+                thumb_offset = 38
+        draw.text((x0 + cell_pad_x + thumb_offset, value_y), vtext, font=vfont, fill=(accent if colored else VALUE_WHITE))
 
-    # ── Footer stat line + date ───────────────────────────────────────
-    footer_font = _font("GeistMono-Regular.ttf", 26)
-    fx = PAD
-    fy = H - 106
-    draw.text((fx, fy), f"{mint_price:.4f} → {fp:.4f} {symbol}", font=footer_font, fill=MUTED)
-    fx += _tw(draw, f"{mint_price:.4f} → {fp:.4f} {symbol}", footer_font) + 26
-    draw.text((fx, fy), "|", font=footer_font, fill=(70, 82, 108))
-    fx += _tw(draw, "|", footer_font) + 26
-    pct_text = f"{pnl_pct:+.1f}%"
-    draw.text((fx, fy), pct_text, font=footer_font, fill=accent)
-    fx += _tw(draw, pct_text, footer_font) + 26
+    # ── Footer: two centered lines ─────────────────────────────────────
+    footer_font = _font("JetBrainsMono-Regular.ttf", 20)
+    sep = "   ·   "
+    parts = [(f"{mint_price:.4f} → {fp:.4f} {symbol}", MUTED2), (sep, MUTED2), (f"{pnl_pct:+.1f}%", accent)]
     if eth_usd:
-        draw.text((fx, fy), "|", font=footer_font, fill=(70, 82, 108))
-        fx += _tw(draw, "|", footer_font) + 26
-        draw.text((fx, fy), f"{symbol} ${eth_usd:,.2f}", font=footer_font, fill=MUTED)
+        parts += [(sep, MUTED2), (f"{symbol} ${eth_usd:,.2f}", MUTED2)]
+    total_fw = sum(_tw(draw, t, footer_font) for t, _ in parts)
+    fx = hero_cx - total_fw / 2
+    fy = grid_bottom + 28
+    for text, color in parts:
+        draw.text((fx, fy), text, font=footer_font, fill=color)
+        fx += _tw(draw, text, footer_font)
 
     date_text = datetime.now(timezone.utc).strftime("%b %-d, %Y") if os.name != "nt" else datetime.now(timezone.utc).strftime("%b %#d, %Y")
-    draw.text((W - PAD - _tw(draw, date_text, footer_font), fy), date_text, font=footer_font, fill=MUTED)
-
-    # No second grain pass here on purpose - the grain already baked into
-    # the backdrop (before the chips were drawn) is what makes each
-    # chip's blur step visibly smooth something. A uniform pass now would
-    # re-sharpen the chip interiors and erase that contrast.
+    draw.text((hero_cx - _tw(draw, date_text, footer_font) / 2, fy + 32), date_text, font=footer_font, fill=DATE_MUTED)
 
     out = io.BytesIO()
     img.convert("RGB").save(out, format="PNG", optimize=True)

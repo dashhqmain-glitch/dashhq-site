@@ -104,6 +104,16 @@ COMMANDS = [
         ],
     },
     {
+        "name": "pnl",
+        "description": "Generate a shareable PnL card for one of your mints",
+        "options": [
+            {"name": "collection", "description": "Collection name", "type": 3, "required": True},
+            {"name": "mint_price", "description": "What you paid per NFT, in ETH", "type": 10, "required": True},
+            {"name": "amount_minted", "description": "How many you minted", "type": 4, "required": True},
+            {"name": "x_username", "description": "Your X handle to show on the card (default: your Discord name)", "type": 3, "required": False},
+        ],
+    },
+    {
         "name": "monitor",
         "description": "Get personal DM pings for specific NFT collection events",
         "options": [
@@ -116,6 +126,23 @@ COMMANDS = [
                 "options": [{"name": "collection", "description": "Collection name", "type": 3, "required": True}],
             },
             {"name": "list", "description": "Show everything you're monitoring", "type": 1},
+        ],
+    },
+    {
+        "name": "pidgin-exempt",
+        "description": "Team only: exempt (or un-exempt) a member from the English-only #general timeout",
+        # Same hidden-unless-Manage-Server pattern as /history - regular
+        # members never see this command exists.
+        "default_member_permissions": "32",
+        "options": [
+            {
+                "name": "add", "description": "Exempt a member from the pidgin timeout", "type": 1,
+                "options": [{"name": "user", "description": "Member to exempt", "type": 6, "required": True}],
+            },
+            {
+                "name": "remove", "description": "Remove a member's exemption", "type": 1,
+                "options": [{"name": "user", "description": "Member to un-exempt", "type": 6, "required": True}],
+            },
         ],
     },
     {
