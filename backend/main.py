@@ -560,42 +560,58 @@ async def setup_pidgin_automod(request: Request):
             exempt_role_id = None
             exempt_role_warning = "Could not create the 'Pidgin Exempt' role - give the bot Manage Roles permission, then re-run this endpoint to enable /pidgin-exempt."
 
-        actions = [
+        base_actions = [
             {"type": 1, "metadata": {"custom_message": "English only in #general — you've been timed out for 10 minutes. Other languages are welcome in the lifestyle chat!"}},
             {"type": 3, "metadata": {"duration_seconds": 600}},
         ]
+        alert_action = None
         if settings.discord_automod_alert_channel_id:
-            actions.append({"type": 2, "metadata": {"channel_id": settings.discord_automod_alert_channel_id}})
-
-        rule_body = {
-            "name": _PIDGIN_RULE_NAME,
-            "event_type": 1,
-            "trigger_type": 1,
-            "trigger_metadata": {"keyword_filter": PIDGIN_KEYWORDS},
-            "actions": actions,
-            "enabled": True,
-            "exempt_channels": exempt_channels,
-            "exempt_roles": [exempt_role_id] if exempt_role_id else [],
-        }
+            alert_action = {"type": 2, "metadata": {"channel_id": settings.discord_automod_alert_channel_id}}
 
         existing_res = await client.get(f"{DISCORD_API}/guilds/{settings.discord_guild_id}/auto-moderation/rules", headers=headers)
         existing_res.raise_for_status()
         existing = next((r for r in existing_res.json() if r["name"] == _PIDGIN_RULE_NAME), None)
 
-        if existing:
-            res = await client.patch(
-                f"{DISCORD_API}/guilds/{settings.discord_guild_id}/auto-moderation/rules/{existing['id']}",
-                headers=headers, json=rule_body,
-            )
-        else:
-            res = await client.post(
+        def _build_body(actions: list) -> dict:
+            return {
+                "name": _PIDGIN_RULE_NAME,
+                "event_type": 1,
+                "trigger_type": 1,
+                "trigger_metadata": {"keyword_filter": PIDGIN_KEYWORDS},
+                "actions": actions,
+                "enabled": True,
+                "exempt_channels": exempt_channels,
+                "exempt_roles": [exempt_role_id] if exempt_role_id else [],
+            }
+
+        async def _submit(actions: list):
+            body = _build_body(actions)
+            if existing:
+                return await client.patch(
+                    f"{DISCORD_API}/guilds/{settings.discord_guild_id}/auto-moderation/rules/{existing['id']}",
+                    headers=headers, json=body,
+                )
+            return await client.post(
                 f"{DISCORD_API}/guilds/{settings.discord_guild_id}/auto-moderation/rules",
-                headers=headers, json=rule_body,
+                headers=headers, json=body,
             )
+
+        actions = base_actions + ([alert_action] if alert_action else [])
+        res = await _submit(actions)
+        alert_warning = None
+        if res.status_code >= 300 and alert_action and "AUTO_MODERATION_CHANNEL_FLAG_ACTION_ACCESS" in res.text:
+            # Bot lacks View/Send Messages in the alert channel - drop just
+            # that action and retry, same "don't block core enforcement
+            # over a bonus feature" approach as the exempt-role fallback.
+            logger.warning("Could not use AutoMod alert channel (bot likely missing View/Send Messages there): %s", res.text[:300])
+            alert_warning = "Could not post AutoMod alerts to the configured channel - give the bot View Channel + Send Messages permission there, then re-run this endpoint to enable alerts."
+            actions = base_actions
+            res = await _submit(actions)
         if res.status_code >= 300:
             raise HTTPException(status_code=502, detail=f"Discord AutoMod setup failed: {res.status_code} {res.text[:300]}")
         rule = res.json()
 
+    warnings = [w for w in (exempt_role_warning, alert_warning) if w]
     return {
         "rule_id": rule["id"],
         "action": "updated" if existing else "created",
@@ -603,7 +619,8 @@ async def setup_pidgin_automod(request: Request):
         "exempt_channels": len(exempt_channels),
         "exempt_role_id": exempt_role_id,
         "exempt_role_name": _PIDGIN_EXEMPT_ROLE_NAME,
-        "warning": exempt_role_warning,
+        "alert_channel_enabled": alert_action is not None and alert_warning is None,
+        "warning": " | ".join(warnings) if warnings else None,
     }
 
 
