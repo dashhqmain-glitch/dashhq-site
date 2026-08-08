@@ -125,6 +125,13 @@ COMMANDS = [
                 "name": "clear", "description": "Stop all /monitor alerts for a collection", "type": 1,
                 "options": [{"name": "collection", "description": "Collection name or contract address", "type": 3, "required": True}],
             },
+            {
+                "name": "price", "description": "Get DM'd once when a collection's floor crosses a specific ETH price", "type": 1,
+                "options": [
+                    {"name": "collection", "description": "Collection name or contract address", "type": 3, "required": True},
+                    {"name": "target", "description": "Target floor price in ETH, e.g. 0.03", "type": 10, "required": True},
+                ],
+            },
             {"name": "list", "description": "Show everything you're monitoring", "type": 1},
         ],
     },

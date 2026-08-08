@@ -159,11 +159,12 @@ alter table nft_mint_radar_seen enable row level security;
 -- /monitor: per-citizen, per-collection, per-event-type opt-in alerts
 -- (personal DM pings), separate from the blanket /watchlist alerts
 -- channel. event_type shares the same vocabulary as nft_alert_state's
--- alert_type plus two more: 'floor_change' and 'mint_progress'.
+-- alert_type, with 'floor_change' split into directional
+-- 'floor_up'/'floor_down', plus 'mint_progress'.
 create table if not exists nft_watch_subscriptions (
   discord_user_id  text not null,
   slug             text not null,
-  event_type       text not null,  -- 'floor_change' | 'supply_cut' | 'mint_progress' | 'sweep' | 'volume_spike'
+  event_type       text not null,  -- 'floor_up' | 'floor_down' | 'supply_cut' | 'mint_progress' | 'sweep' | 'volume_spike'
   created_at       timestamptz not null default now(),
   primary key (discord_user_id, slug, event_type)
 );
@@ -171,4 +172,23 @@ create table if not exists nft_watch_subscriptions (
 create index if not exists nft_watch_subscriptions_slug_idx on nft_watch_subscriptions (slug, event_type);
 
 alter table nft_watch_subscriptions enable row level security;
+
+-- /monitor price: one-shot personal alert firing once a collection's
+-- floor crosses a specific ETH price the citizen picked, then deletes
+-- itself. direction is computed once at creation time from where the
+-- floor sat relative to the target - below means "alert on the way
+-- down to/through this price", above means "alert on the way up to/
+-- through this price".
+create table if not exists nft_price_alerts (
+  discord_user_id  text not null,
+  slug             text not null,
+  target_price     double precision not null,
+  direction        text not null check (direction in ('above', 'below')),
+  created_at       timestamptz not null default now(),
+  primary key (discord_user_id, slug, target_price)
+);
+
+create index if not exists nft_price_alerts_slug_idx on nft_price_alerts (slug);
+
+alter table nft_price_alerts enable row level security;
 
