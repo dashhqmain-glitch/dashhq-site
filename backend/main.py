@@ -561,7 +561,7 @@ async def setup_pidgin_automod(request: Request):
             exempt_role_warning = "Could not create the 'Pidgin Exempt' role - give the bot Manage Roles permission, then re-run this endpoint to enable /pidgin-exempt."
 
         base_actions = [
-            {"type": 1, "metadata": {"custom_message": "English only in #general — you've been timed out for 10 minutes. Other languages are welcome in the lifestyle chat!"}},
+            {"type": 1, "metadata": {"custom_message": "🚫 Blocked: that looked like Nigerian Pidgin, and #general is English-only — that's why you've been timed out for 10 minutes. Other languages (including Pidgin) are welcome in the lifestyle chat!"}},
             {"type": 3, "metadata": {"duration_seconds": 600}},
         ]
         alert_action = None
