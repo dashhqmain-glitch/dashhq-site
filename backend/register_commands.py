@@ -76,7 +76,7 @@ COMMANDS = [
     {
         "name": "nft",
         "description": "Look up an NFT collection: floor, top offer, ATH, volume, owners, contract",
-        "options": [{"name": "collection", "description": "Collection name", "type": 3, "required": True}],
+        "options": [{"name": "collection", "description": "Collection name or contract address", "type": 3, "required": True}],
     },
     {
         "name": "wallet",
@@ -94,11 +94,11 @@ COMMANDS = [
         "options": [
             {
                 "name": "add", "description": "Add a collection to your watchlist", "type": 1,
-                "options": [{"name": "collection", "description": "Collection name", "type": 3, "required": True}],
+                "options": [{"name": "collection", "description": "Collection name or contract address", "type": 3, "required": True}],
             },
             {
                 "name": "remove", "description": "Remove a collection from your watchlist", "type": 1,
-                "options": [{"name": "collection", "description": "Collection name", "type": 3, "required": True}],
+                "options": [{"name": "collection", "description": "Collection name or contract address", "type": 3, "required": True}],
             },
             {"name": "list", "description": "Show everything on your watchlist", "type": 1},
         ],
@@ -107,7 +107,7 @@ COMMANDS = [
         "name": "pnl",
         "description": "Generate a shareable PnL card for one of your mints",
         "options": [
-            {"name": "collection", "description": "Collection name", "type": 3, "required": True},
+            {"name": "collection", "description": "Collection name or contract address", "type": 3, "required": True},
             {"name": "mint_price", "description": "What you paid per NFT, in ETH", "type": 10, "required": True},
             {"name": "amount_minted", "description": "How many you minted", "type": 4, "required": True},
             {"name": "x_username", "description": "Your X handle to show on the card (default: your Discord name)", "type": 3, "required": False},
@@ -119,11 +119,11 @@ COMMANDS = [
         "options": [
             {
                 "name": "set", "description": "Choose what to be DM'd about for a collection", "type": 1,
-                "options": [{"name": "collection", "description": "Collection name", "type": 3, "required": True}],
+                "options": [{"name": "collection", "description": "Collection name or contract address", "type": 3, "required": True}],
             },
             {
                 "name": "clear", "description": "Stop all /monitor alerts for a collection", "type": 1,
-                "options": [{"name": "collection", "description": "Collection name", "type": 3, "required": True}],
+                "options": [{"name": "collection", "description": "Collection name or contract address", "type": 3, "required": True}],
             },
             {"name": "list", "description": "Show everything you're monitoring", "type": 1},
         ],

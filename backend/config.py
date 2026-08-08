@@ -27,6 +27,13 @@ class Settings(BaseSettings):
     # interleaving them reads fine.
     discord_nft_channel_id: str = ""
 
+    # /monitor is opt-in and normally DMs subscribers privately. When set,
+    # any event a member has /monitor'd also gets posted here publicly
+    # with those members @mentioned - visible even if their DMs are closed,
+    # and lets others see who's tracking what. Leave blank to keep
+    # /monitor fully private (DM-only), matching the original behavior.
+    discord_nft_monitor_channel_id: str = ""
+
     # Separate from cron_secret on purpose: this one only guards the NFT
     # poller, which is reachable from a public GitHub Actions workflow log
     # surface far more often than the other cron endpoints - keeping it

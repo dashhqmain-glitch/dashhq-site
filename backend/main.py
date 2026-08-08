@@ -626,9 +626,11 @@ async def setup_pidgin_automod(request: Request):
 
 async def _handle_pidgin_exempt_command(payload: dict) -> dict:
     # Hidden from regular members via default_member_permissions on the
-    # command itself (same mechanism /history uses) - Discord never even
-    # shows this command to anyone without Manage Server, so there's no
-    # separate permission check needed here.
+    # command itself (same mechanism /history uses), but that's a Discord
+    # Integrations setting a server admin could loosen later - this check
+    # is the real enforcement so add/remove stay mod-only regardless.
+    if not _is_team_member(payload):
+        return {"type": 4, "data": {"content": "Mods only.", "flags": 64}}
     sub_options = (payload.get("data") or {}).get("options") or []
     if not sub_options:
         return {"type": 4, "data": {"content": "Use `/pidgin-exempt add` or `/pidgin-exempt remove`.", "flags": 64}}
@@ -2151,8 +2153,41 @@ def _enrich_with_cached_meta(shaped: dict) -> dict:
     return shaped
 
 
+_EVM_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+# Chains OpenSea's contract-lookup endpoint is tried against, in priority
+# order, when a member searches by contract address instead of a name -
+# covers every chain the rest of the NFT toolkit already deals in.
+_NFT_CONTRACT_LOOKUP_CHAINS = ["ethereum", "matic", "base", "arbitrum", "optimism", "avalanche"]
+
+
+async def _nft_resolve_by_contract(client: httpx.AsyncClient, address: str) -> dict | None:
+    # OpenSea's contract endpoint is chain-scoped and there's no
+    # "search all chains" variant, so try the candidates in parallel and
+    # keep whichever one actually maps to a real collection.
+    contract_tasks = [_opensea_get(client, f"/chain/{chain}/contract/{address}") for chain in _NFT_CONTRACT_LOOKUP_CHAINS]
+    contract_results = await asyncio.gather(*contract_tasks, return_exceptions=True)
+    slug = None
+    for res in contract_results:
+        if isinstance(res, Exception) or not res:
+            continue
+        if res.get("collection"):
+            slug = res["collection"]
+            break
+    if not slug:
+        return None
+    info = await _opensea_get(client, f"/collections/{slug}")
+    if not info:
+        return None
+    stats = await _opensea_get(client, f"/collections/{slug}/stats")
+    return _nft_collection_shape(info, stats)
+
+
 async def _nft_search_core(q: str) -> list[dict]:
+    q = (q or "").strip()
     async with httpx.AsyncClient(timeout=10) as client:
+        if _EVM_ADDRESS_RE.match(q):
+            direct = await _nft_resolve_by_contract(client, q)
+            return [_enrich_with_cached_meta(direct)] if direct else []
         data = await _opensea_get(client, "/search", {"query": q})
         if data is None:
             raise HTTPException(status_code=502, detail="Could not reach OpenSea right now")
@@ -2509,10 +2544,41 @@ async def _discord_dm(client: httpx.AsyncClient, discord_user_id: str, embed: di
         return False
 
 
+async def _post_channel_message(client: httpx.AsyncClient, channel_id: str, embed: dict, content: str | None = None) -> bool:
+    if not channel_id or not settings.discord_bot_token:
+        return False
+    try:
+        body = {"embeds": [embed]}
+        if content:
+            body["content"] = content
+        res = await _discord_post_with_retry(
+            client, f"{DISCORD_API}/channels/{channel_id}/messages",
+            {"Authorization": f"Bot {settings.discord_bot_token}"}, body,
+        )
+        if res.status_code >= 300:
+            logger.error("Monitor public post to channel %s failed: %s %s", channel_id, res.status_code, res.text[:300])
+            return False
+        return True
+    except httpx.HTTPError:
+        logger.exception("Failed to post /monitor alert publicly")
+        return False
+
+
 async def _dm_subscribers(client: httpx.AsyncClient, slug: str, event_type: str, embed: dict) -> None:
+    subscriber_ids = await _nft_watch_subscribers(client, slug, event_type)
+    if not subscriber_ids:
+        return
     ping = f"🔔 {embed['title']}" if embed.get("title") else "🔔 An NFT collection you're monitoring just updated."
-    for user_id in await _nft_watch_subscribers(client, slug, event_type):
+    for user_id in subscriber_ids:
         await _discord_dm(client, user_id, embed, content=ping)
+
+    # Also call out publicly in the shared monitor channel, tagging
+    # everyone who /monitor'd this collection for this event - stays
+    # visible even if someone's DMs are closed, and lets the rest of the
+    # server see who's tracking what instead of it being silently private.
+    if settings.discord_nft_monitor_channel_id:
+        mentions = " ".join(f"<@{uid}>" for uid in dict.fromkeys(subscriber_ids))
+        await _post_channel_message(client, settings.discord_nft_monitor_channel_id, embed, content=f"{ping} — {mentions}")
 
 
 # ── /monitor — personal per-collection, per-event DM subscriptions ─────────
@@ -3642,7 +3708,7 @@ TOOLKIT_TOOLS = {
     "nft": {
         "emoji": "🖼️", "label": "NFT Lookup",
         "short": "Floor, top offer, ATH, total volume, owners, contract address & more for any collection",
-        "usage": "/nft collection:<collection name>",
+        "usage": "/nft collection:<name or contract address>",
         "example": "/nft collection:Pudgy Penguins",
     },
     "wallet": {
@@ -3660,19 +3726,19 @@ TOOLKIT_TOOLS = {
     "watchlist": {
         "emoji": "📌", "label": "NFT Watchlist",
         "short": "Track your own personal list of NFT collections",
-        "usage": "/watchlist add|remove|list collection:<name>",
+        "usage": "/watchlist add|remove|list collection:<name or contract address>",
         "example": "/watchlist add collection:Pudgy Penguins",
     },
     "monitor": {
         "emoji": "🔔", "label": "NFT Monitor",
         "short": "Personal DM pings for specific events on a collection: floor moves, supply cuts, mint progress, sweeps, volume spikes",
-        "usage": "/monitor set|clear collection:<name> · /monitor list",
+        "usage": "/monitor set|clear collection:<name or contract address> · /monitor list",
         "example": "/monitor set collection:Pudgy Penguins",
     },
     "pnl": {
         "emoji": "📊", "label": "PnL Card",
         "short": "Generate a shareable branded card showing your realized profit/loss on a mint",
-        "usage": "/pnl collection:<name> mint_price:<ETH> amount_minted:<count> x_username:<optional>",
+        "usage": "/pnl collection:<name or contract address> mint_price:<ETH> amount_minted:<count> x_username:<optional>",
         "example": "/pnl collection:Pudgy Penguins mint_price:0.03 amount_minted:2",
     },
 }
