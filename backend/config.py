@@ -33,6 +33,13 @@ class Settings(BaseSettings):
     # distinct limits the blast radius if it ever leaks.
     nft_cron_secret: str = ""
 
+    # Pidgin AutoMod: English-only enforcement in #general (10-min timeout),
+    # exempting every other channel (Discord AutoMod has no "only apply in
+    # these channels" allowlist - only an exempt-list) so #lifestyle-chat
+    # and everywhere else stays unaffected.
+    discord_general_channel_id: str = ""
+    discord_automod_alert_channel_id: str = ""
+
     x_client_id: str = ""
     x_client_secret: str = ""
     x_redirect_uri: str = "https://www.dashhq.site/auth/x/callback"

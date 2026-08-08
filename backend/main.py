@@ -464,6 +464,88 @@ async def register_discord_commands(request: Request):
     return {"registered": len(registered), "commands": [c["name"] for c in registered]}
 
 
+# ── Pidgin AutoMod setup (one-time / re-run-on-change) ──────────────────────
+# English-only enforcement in #general via Discord's native AutoMod - free,
+# no persistent bot connection needed. Everything else in this backend is
+# reachable only through Discord's Interactions webhook (slash commands,
+# buttons, selects), which never fires for regular chat messages; scanning
+# every message ourselves would need a permanent Gateway connection, which
+# is exactly the always-on-worker cost this dodges. Trade-off: keyword
+# matching, not real language detection - it will miss some Pidgin and can
+# occasionally false-positive on a borderline phrase. Not registered
+# anywhere in TOOLKIT_TOOLS/dashboard on purpose - this is meant to be
+# invisible to regular members, unlike every other feature in this file.
+PIDGIN_KEYWORDS = [
+    "abeg", "wahala", "wetin", "dey", "abi", "sabi", "comot", "waka",
+    "gbege", "katakata", "jare", "omo", "palava", "shakara", "kolo",
+    "gist", "ehen", "biko", "japa", "sapa", "oga", "walahi", "sha",
+    "how far", "no wahala", "e go better", "na so", "wetin dey happen",
+    "i no know", "dis one", "chop money", "make we", "you dey mad",
+    "wetin be", "na him", "no vex", "abeg no", "e don do",
+]
+_PIDGIN_RULE_NAME = "English-only #general (Pidgin filter)"
+
+
+@app.get("/cron/setup-pidgin-automod")
+async def setup_pidgin_automod(request: Request):
+    # Same guarded-setup-action pattern as /cron/register-discord-commands -
+    # re-run whenever PIDGIN_KEYWORDS changes; safe to call repeatedly since
+    # it patches the existing rule by name instead of duplicating it.
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not (settings.discord_bot_token and settings.discord_guild_id and settings.discord_general_channel_id):
+        raise HTTPException(status_code=500, detail="Discord bot env vars not fully configured")
+
+    headers = {"Authorization": f"Bot {settings.discord_bot_token}"}
+    async with httpx.AsyncClient(timeout=20) as client:
+        channels_res = await client.get(f"{DISCORD_API}/guilds/{settings.discord_guild_id}/channels", headers=headers)
+        channels_res.raise_for_status()
+        all_channel_ids = [c["id"] for c in channels_res.json()]
+        # Discord AutoMod has no "only apply in these channels" allowlist,
+        # only exempt_channels - exempting everything except #general is
+        # how enforcement stays scoped to just that one channel (so
+        # #lifestyle-chat and everywhere else is unaffected).
+        exempt_channels = [cid for cid in all_channel_ids if cid != settings.discord_general_channel_id]
+
+        actions = [
+            {"type": 1, "metadata": {"custom_message": "English only in #general — you've been timed out for 10 minutes. Other languages are welcome in the lifestyle chat!"}},
+            {"type": 3, "metadata": {"duration_seconds": 600}},
+        ]
+        if settings.discord_automod_alert_channel_id:
+            actions.append({"type": 2, "metadata": {"channel_id": settings.discord_automod_alert_channel_id}})
+
+        rule_body = {
+            "name": _PIDGIN_RULE_NAME,
+            "event_type": 1,
+            "trigger_type": 1,
+            "trigger_metadata": {"keyword_filter": PIDGIN_KEYWORDS},
+            "actions": actions,
+            "enabled": True,
+            "exempt_channels": exempt_channels,
+        }
+
+        existing_res = await client.get(f"{DISCORD_API}/guilds/{settings.discord_guild_id}/auto-moderation/rules", headers=headers)
+        existing_res.raise_for_status()
+        existing = next((r for r in existing_res.json() if r["name"] == _PIDGIN_RULE_NAME), None)
+
+        if existing:
+            res = await client.patch(
+                f"{DISCORD_API}/guilds/{settings.discord_guild_id}/auto-moderation/rules/{existing['id']}",
+                headers=headers, json=rule_body,
+            )
+        else:
+            res = await client.post(
+                f"{DISCORD_API}/guilds/{settings.discord_guild_id}/auto-moderation/rules",
+                headers=headers, json=rule_body,
+            )
+        if res.status_code >= 300:
+            raise HTTPException(status_code=502, detail=f"Discord AutoMod setup failed: {res.status_code} {res.text[:300]}")
+        rule = res.json()
+
+    return {"rule_id": rule["id"], "action": "updated" if existing else "created", "keywords": len(PIDGIN_KEYWORDS), "exempt_channels": len(exempt_channels)}
+
+
 # ── Citizenship applications ─────────────────────────────────────────────────
 
 class ApplicationIn(BaseModel):
