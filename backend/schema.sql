@@ -156,3 +156,19 @@ create table if not exists nft_mint_radar_seen (
 
 alter table nft_mint_radar_seen enable row level security;
 
+-- /monitor: per-citizen, per-collection, per-event-type opt-in alerts
+-- (personal DM pings), separate from the blanket /watchlist alerts
+-- channel. event_type shares the same vocabulary as nft_alert_state's
+-- alert_type plus two more: 'floor_change' and 'mint_progress'.
+create table if not exists nft_watch_subscriptions (
+  discord_user_id  text not null,
+  slug             text not null,
+  event_type       text not null,  -- 'floor_change' | 'supply_cut' | 'mint_progress' | 'sweep' | 'volume_spike'
+  created_at       timestamptz not null default now(),
+  primary key (discord_user_id, slug, event_type)
+);
+
+create index if not exists nft_watch_subscriptions_slug_idx on nft_watch_subscriptions (slug, event_type);
+
+alter table nft_watch_subscriptions enable row level security;
+

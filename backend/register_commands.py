@@ -104,6 +104,21 @@ COMMANDS = [
         ],
     },
     {
+        "name": "monitor",
+        "description": "Get personal DM pings for specific NFT collection events",
+        "options": [
+            {
+                "name": "set", "description": "Choose what to be DM'd about for a collection", "type": 1,
+                "options": [{"name": "collection", "description": "Collection name", "type": 3, "required": True}],
+            },
+            {
+                "name": "clear", "description": "Stop all /monitor alerts for a collection", "type": 1,
+                "options": [{"name": "collection", "description": "Collection name", "type": 3, "required": True}],
+            },
+            {"name": "list", "description": "Show everything you're monitoring", "type": 1},
+        ],
+    },
+    {
         "name": "history",
         "description": "Team only: browse every citizenship application and its verdict",
         # Hidden from regular members entirely - Discord only shows/allows a

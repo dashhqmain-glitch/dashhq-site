@@ -118,3 +118,37 @@ blast radius if it ever leaks).
 4. Give the bot Send Messages + Embed Links in that channel, then hit
    `/cron/nft-init-channels` once (same `NFT_CRON_SECRET`) to post and
    pin the explainer.
+
+### `/monitor` — personal per-collection DM alerts (2026-08-08)
+The shared alerts channel above is all-or-nothing (everyone sees every
+watchlisted collection's alerts). `/monitor` is the personal, opt-in
+layer on top of it: `/monitor set collection:<name>` shows a select menu
+of five event types -
+
+- 📈 **Floor Price Change** (±8% move)
+- ✂️ **Supply Cut / Burns** (total supply decreased)
+- 🌱 **Mint Progress** (total supply increased)
+- 🧹 **Sweep Detected**
+- 📊 **Volume Spike**
+
+Picking any of them saves the choice (replacing, not appending, so
+re-running the menu resets it - selecting nothing clears it entirely);
+`/monitor list` shows everything a citizen is subscribed to; `/monitor
+clear collection:<name>` wipes one collection's subscriptions. Whenever
+`/cron/nft-poll` detects one of these events firing for a collection
+(same detection logic as the public channel - this reuses it rather than
+duplicating it), it now *also* DMs every citizen subscribed to that
+specific (collection, event type) pair, with real message `content` text
+(not just an embed) so it actually surfaces as a push notification and
+not a silently-delivered message.
+
+**New Supabase table**: `nft_watch_subscriptions` (also added to
+`backend/schema.sql` - run it again, every statement is a safe re-run).
+The poller's tracked-collections set is now the union of everyone's
+`/watchlist` *and* everyone's `/monitor` subscriptions, so a collection
+nobody watchlisted but someone specifically monitors still gets polled.
+
+No new env vars, no new infrastructure - this rides the same 5-minute
+`/cron/nft-poll` cycle and the same bot token (DMs use
+`POST /users/@me/channels` + `POST /channels/{id}/messages`, still no
+Discord gateway connection anywhere in this backend).

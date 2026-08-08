@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import hashlib
+import json
 import logging
 import re
 import secrets
@@ -20,6 +21,7 @@ from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 
+import pnl_card
 from config import settings
 from register_commands import COMMANDS as TOOLKIT_BOT_COMMANDS
 
@@ -783,6 +785,8 @@ async def discord_interactions(request: Request):
         return await _handle_toolkit_select(payload)
 
     history_id = payload.get("data", {}).get("custom_id", "")
+    if history_id.startswith("monitor_select:"):
+        return await _handle_monitor_select(payload)
     if history_id.startswith("history_select:"):
         return await _handle_history_select(payload)
     if history_id.startswith("history_page:") or history_id.startswith("history_filter:"):
@@ -2029,6 +2033,7 @@ async def _discord_watchlist_list(discord_user_id: str) -> list[dict]:
 # here runs on the same free OpenSea "instant" key and Supabase project
 # already used by the rest of the toolkit; no paid API involved.
 _NFT_ALERT_COOLDOWN_SECONDS = 3600  # don't re-alert the same collection/type within an hour
+_NFT_FLOOR_CHANGE_THRESHOLD_PCT = 8.0  # minimum floor move (either direction) worth alerting on
 _MINT_RADAR_CHAINS = ["ethereum", "base", "polygon", "robinhood"]
 
 
@@ -2145,6 +2150,34 @@ def _volume_spike_embed(c: dict, avg: float) -> dict:
     }
 
 
+def _floor_change_embed(c: dict, prev_floor: float, pct: float) -> dict:
+    up = pct >= 0
+    return {
+        "title": f"{'📈' if up else '📉'} Floor {'Up' if up else 'Down'} — {c['name']}",
+        "url": c.get("openseaUrl"),
+        "description": (
+            f"Floor moved from **{prev_floor:.4f} {c['symbol']}** to **{c['floor']:.4f} {c['symbol']}** "
+            f"({pct:+.1f}%)."
+        ),
+        "color": EMBED_COLOR_GOOD if up else EMBED_COLOR_BAD,
+        "thumbnail": {"url": c["image"]} if c.get("image") else None,
+        "footer": _nft_alert_footer(c),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _mint_progress_embed(c: dict, prev_supply: int) -> dict:
+    return {
+        "title": f"🌱 Mint Progress — {c['name']}",
+        "url": c.get("openseaUrl"),
+        "description": f"Total supply grew from **{prev_supply:,}** to **{c['totalSupply']:,}**.",
+        "color": EMBED_COLOR_GOOD,
+        "thumbnail": {"url": c["image"]} if c.get("image") else None,
+        "footer": _nft_alert_footer(c),
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 def _sweep_embed(c: dict, sweep: dict) -> dict:
     return {
         "title": f"🧹 Possible Sweep — {c['name']}",
@@ -2193,15 +2226,208 @@ async def _detect_sweep(
 
 
 async def _nft_poll_tracked_slugs(client: httpx.AsyncClient) -> list[str]:
-    # The tracked set is simply the union of every citizen's personal
-    # /watchlist - no separate curation table to maintain for MVP.
-    res = await client.get(
+    # The tracked set is the union of every citizen's personal /watchlist
+    # AND everything anyone has a /monitor subscription on - a collection
+    # nobody watchlisted but someone specifically subscribed to (via
+    # /monitor) still needs to be polled, or its subscriptions would just
+    # sit there and never fire.
+    watchlist_res = await client.get(
         f"{settings.supabase_url}/rest/v1/discord_nft_watchlist",
         headers=_supabase_headers(),
         params={"select": "slug"},
     )
-    res.raise_for_status()
-    return sorted({row["slug"] for row in res.json()})
+    watchlist_res.raise_for_status()
+    slugs = {row["slug"] for row in watchlist_res.json()}
+
+    try:
+        sub_res = await client.get(
+            f"{settings.supabase_url}/rest/v1/nft_watch_subscriptions",
+            headers=_supabase_headers(),
+            params={"select": "slug"},
+        )
+        sub_res.raise_for_status()
+        slugs |= {row["slug"] for row in sub_res.json()}
+    except httpx.HTTPError:
+        # Table may not exist yet if schema.sql hasn't been re-run - the
+        # watchlist-only set is still a valid fallback.
+        pass
+
+    return sorted(slugs)
+
+
+async def _nft_watch_subscribers(client: httpx.AsyncClient, slug: str, event_type: str) -> list[str]:
+    try:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/nft_watch_subscriptions",
+            headers=_supabase_headers(),
+            params={"slug": f"eq.{slug}", "event_type": f"eq.{event_type}", "select": "discord_user_id"},
+        )
+        res.raise_for_status()
+        return [row["discord_user_id"] for row in res.json()]
+    except httpx.HTTPError:
+        return []
+
+
+async def _discord_dm(client: httpx.AsyncClient, discord_user_id: str, embed: dict, content: str | None = None) -> bool:
+    if not settings.discord_bot_token:
+        return False
+    headers = {"Authorization": f"Bot {settings.discord_bot_token}"}
+    try:
+        dm_res = await client.post(f"{DISCORD_API}/users/@me/channels", headers=headers, json={"recipient_id": discord_user_id})
+        if dm_res.status_code >= 300:
+            logger.error("Could not open DM with %s: %s %s", discord_user_id, dm_res.status_code, dm_res.text[:200])
+            return False
+        channel_id = dm_res.json()["id"]
+        # An embed-only DM often renders as a blank push notification on
+        # mobile (the OS preview reads message.content, not the embed) -
+        # actual "content" text is what makes this land as a real ping
+        # instead of a silent message the citizen only sees if they
+        # happen to open Discord.
+        body = {"embeds": [embed]}
+        if content:
+            body["content"] = content
+        msg_res = await _discord_post_with_retry(client, f"{DISCORD_API}/channels/{channel_id}/messages", headers, body)
+        return msg_res.status_code < 300
+    except (httpx.HTTPError, KeyError):
+        # Most common cause: the user has DMs from server members disabled.
+        # Not fatal - the public channel post already carries the alert.
+        return False
+
+
+async def _dm_subscribers(client: httpx.AsyncClient, slug: str, event_type: str, embed: dict) -> None:
+    ping = f"🔔 {embed['title']}" if embed.get("title") else "🔔 An NFT collection you're monitoring just updated."
+    for user_id in await _nft_watch_subscribers(client, slug, event_type):
+        await _discord_dm(client, user_id, embed, content=ping)
+
+
+# ── /monitor — personal per-collection, per-event DM subscriptions ─────────
+_NFT_MONITOR_EVENTS = [
+    {"label": "Floor Price Change", "value": "floor_change", "emoji": "📈", "description": f"Alert when floor moves ≥{_NFT_FLOOR_CHANGE_THRESHOLD_PCT:.0f}%"},
+    {"label": "Supply Cut / Burns", "value": "supply_cut", "emoji": "✂️", "description": "Alert when total supply decreases"},
+    {"label": "Mint Progress", "value": "mint_progress", "emoji": "🌱", "description": "Alert when total supply increases"},
+    {"label": "Sweep Detected", "value": "sweep", "emoji": "🧹", "description": "Alert on concentrated buying"},
+    {"label": "Volume Spike", "value": "volume_spike", "emoji": "📊", "description": "Alert when 24h volume spikes"},
+]
+_NFT_MONITOR_LABELS = {e["value"]: e["label"] for e in _NFT_MONITOR_EVENTS}
+
+
+def _monitor_select_component(slug: str) -> dict:
+    return {
+        "type": 1,
+        "components": [{
+            "type": 3,
+            "custom_id": f"monitor_select:{slug}",
+            "placeholder": "Choose what to be DM'd about…",
+            "min_values": 0,
+            "max_values": len(_NFT_MONITOR_EVENTS),
+            "options": [
+                {"label": e["label"], "value": e["value"], "description": e["description"], "emoji": {"name": e["emoji"]}}
+                for e in _NFT_MONITOR_EVENTS
+            ],
+        }],
+    }
+
+
+async def _nft_monitor_list(discord_user_id: str) -> list[dict]:
+    async with httpx.AsyncClient(timeout=10) as client:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/nft_watch_subscriptions",
+            headers=_supabase_headers(),
+            params={"discord_user_id": f"eq.{discord_user_id}", "select": "slug,event_type", "order": "slug.asc"},
+        )
+        res.raise_for_status()
+        return res.json()
+
+
+async def _cmd_monitor_response(payload: dict, discord_user_id: str) -> dict:
+    sub_options = (payload.get("data") or {}).get("options") or []
+    if not sub_options:
+        embed = {"title": "Missing subcommand", "description": "Use `/monitor set`, `list`, or `clear`.", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
+        return {"embeds": [_clean_embed(embed)], "flags": 64}
+    sub = sub_options[0]
+    sub_name = sub.get("name")
+    sub_opts = {o["name"]: o.get("value") for o in (sub.get("options") or [])}
+
+    if sub_name == "list":
+        rows = await _nft_monitor_list(discord_user_id)
+        if not rows:
+            embed = {"title": "🔔 Your Monitor Subscriptions", "description": "Nothing yet. Try `/monitor set`.", "color": EMBED_COLOR, "footer": TOOLKIT_FOOTER}
+        else:
+            by_slug: dict[str, list[str]] = {}
+            for r in rows:
+                by_slug.setdefault(r["slug"], []).append(r["event_type"])
+            lines = [f"**{slug}**: " + ", ".join(_NFT_MONITOR_LABELS.get(et, et) for et in events) for slug, events in by_slug.items()]
+            embed = {"title": "🔔 Your Monitor Subscriptions", "description": "\n".join(lines), "color": EMBED_COLOR, "footer": TOOLKIT_FOOTER}
+        return {"embeds": [_clean_embed(embed)], "flags": 64}
+
+    query = (sub_opts.get("collection") or "").strip()
+    if not query:
+        embed = {"title": "Missing collection", "description": "Provide a collection name.", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
+        return {"embeds": [_clean_embed(embed)], "flags": 64}
+
+    matches = await _nft_search_core(query)
+    if not matches:
+        embed = {"title": "No collections found", "description": f'No OpenSea results for "{query}".', "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
+        return {"embeds": [_clean_embed(embed)], "flags": 64}
+    c = matches[0]
+
+    if sub_name == "clear":
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.delete(
+                f"{settings.supabase_url}/rest/v1/nft_watch_subscriptions",
+                headers=_supabase_headers(prefer="return=minimal"),
+                params={"discord_user_id": f"eq.{discord_user_id}", "slug": f"eq.{c['slug']}"},
+            )
+        embed = {"title": f"🔕 Cleared: {c['name']}", "description": "You won't get any /monitor alerts for this collection.", "color": EMBED_COLOR_GOOD, "footer": TOOLKIT_FOOTER}
+        return {"embeds": [_clean_embed(embed)], "flags": 64}
+
+    if sub_name == "set":
+        embed = {
+            "title": f"🔔 Monitor: {c['name']}",
+            "description": "Choose what you want to be personally DM'd about for this collection. Selecting nothing clears it.",
+            "color": EMBED_COLOR,
+            "thumbnail": {"url": c["image"]} if c.get("image") else None,
+            "footer": TOOLKIT_FOOTER,
+        }
+        return {"embeds": [_clean_embed(embed)], "components": [_monitor_select_component(c["slug"])], "flags": 64}
+
+    embed = {"title": "Unknown subcommand", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
+    return {"embeds": [_clean_embed(embed)], "flags": 64}
+
+
+async def _handle_monitor_select(payload: dict) -> dict:
+    if not _is_citizen(payload):
+        return {"type": 4, "data": {"content": "This is reserved for verified Dash HQ citizens.", "flags": 64}}
+    custom_id = (payload.get("data") or {}).get("custom_id", "")
+    _, _, slug = custom_id.partition(":")
+    selected = (payload.get("data") or {}).get("values") or []
+    member_user = (payload.get("member") or {}).get("user") or {}
+    discord_user_id = member_user.get("id", "")
+    if not slug or not discord_user_id:
+        return {"type": 4, "data": {"content": "Something went wrong - try `/monitor set` again.", "flags": 64}}
+
+    async with httpx.AsyncClient(timeout=10) as client:
+        # Replace-based: this menu always sets the exact set of events for
+        # this collection, not additive - clear then (re)insert.
+        await client.delete(
+            f"{settings.supabase_url}/rest/v1/nft_watch_subscriptions",
+            headers=_supabase_headers(prefer="return=minimal"),
+            params={"discord_user_id": f"eq.{discord_user_id}", "slug": f"eq.{slug}"},
+        )
+        if selected:
+            await client.post(
+                f"{settings.supabase_url}/rest/v1/nft_watch_subscriptions",
+                headers=_supabase_headers(prefer="resolution=merge-duplicates,return=minimal"),
+                json=[{"discord_user_id": discord_user_id, "slug": slug, "event_type": e} for e in selected],
+            )
+
+    if selected:
+        labels = [_NFT_MONITOR_LABELS.get(e, e) for e in selected]
+        desc = "You'll get a DM when any of these happen:\n" + "\n".join(f"• {l}" for l in labels)
+    else:
+        desc = "Cleared - you won't get any /monitor alerts for this collection."
+    embed = {"title": "🔔 Monitor settings saved", "description": desc, "color": EMBED_COLOR_GOOD, "footer": TOOLKIT_FOOTER}
+    return {"type": 7, "data": {"embeds": [_clean_embed(embed)], "components": [_monitor_select_component(slug)]}}
 
 
 async def _nft_poll_watchlist_alerts(client: httpx.AsyncClient) -> list[str]:
@@ -2225,10 +2451,42 @@ async def _nft_poll_watchlist_alerts(client: httpx.AsyncClient) -> list[str]:
                 ):
                     state = await _nft_alert_state_get(client, slug, "supply_cut")
                     if not state or state.get("last_value") != c["totalSupply"]:
-                        delivered = await _post_nft_alert(client, settings.discord_nft_channel_id, _supply_cut_embed(c, prev["total_supply"]))
+                        embed = _supply_cut_embed(c, prev["total_supply"])
+                        delivered = await _post_nft_alert(client, settings.discord_nft_channel_id, embed)
                         if delivered:
                             await _nft_alert_state_set(client, slug, "supply_cut", c["totalSupply"])
+                            await _dm_subscribers(client, slug, "supply_cut", embed)
                             alerted.append(f"{slug}:supply_cut")
+
+                if (
+                    c.get("totalSupply") is not None
+                    and prev.get("total_supply") is not None
+                    and c["totalSupply"] > prev["total_supply"]
+                ):
+                    state = await _nft_alert_state_get(client, slug, "mint_progress")
+                    if not state or state.get("last_value") != c["totalSupply"]:
+                        embed = _mint_progress_embed(c, prev["total_supply"])
+                        delivered = await _post_nft_alert(client, settings.discord_nft_channel_id, embed)
+                        if delivered:
+                            await _nft_alert_state_set(client, slug, "mint_progress", c["totalSupply"])
+                            await _dm_subscribers(client, slug, "mint_progress", embed)
+                            alerted.append(f"{slug}:mint_progress")
+
+                if (
+                    c.get("floor") is not None
+                    and prev.get("floor") is not None
+                    and prev["floor"] > 0
+                ):
+                    pct = (c["floor"] - prev["floor"]) / prev["floor"] * 100
+                    if abs(pct) >= _NFT_FLOOR_CHANGE_THRESHOLD_PCT:
+                        state = await _nft_alert_state_get(client, slug, "floor_change")
+                        if _nft_alert_cooled_down(state):
+                            embed = _floor_change_embed(c, prev["floor"], pct)
+                            delivered = await _post_nft_alert(client, settings.discord_nft_channel_id, embed)
+                            if delivered:
+                                await _nft_alert_state_set(client, slug, "floor_change", c["floor"])
+                                await _dm_subscribers(client, slug, "floor_change", embed)
+                                alerted.append(f"{slug}:floor_change")
 
                 baseline = [h["volume_1d"] for h in history if h.get("volume_1d") is not None]
                 if baseline and c.get("vol1d") is not None:
@@ -2236,18 +2494,22 @@ async def _nft_poll_watchlist_alerts(client: httpx.AsyncClient) -> list[str]:
                     if avg > 0 and c["vol1d"] >= avg * 2.5:
                         state = await _nft_alert_state_get(client, slug, "volume_spike")
                         if _nft_alert_cooled_down(state):
-                            delivered = await _post_nft_alert(client, settings.discord_nft_channel_id, _volume_spike_embed(c, avg))
+                            embed = _volume_spike_embed(c, avg)
+                            delivered = await _post_nft_alert(client, settings.discord_nft_channel_id, embed)
                             if delivered:
                                 await _nft_alert_state_set(client, slug, "volume_spike", c["vol1d"])
+                                await _dm_subscribers(client, slug, "volume_spike", embed)
                                 alerted.append(f"{slug}:volume_spike")
 
             sweep = await _detect_sweep(client, slug)
             if sweep:
                 state = await _nft_alert_state_get(client, slug, "sweep")
                 if _nft_alert_cooled_down(state):
-                    delivered = await _post_nft_alert(client, settings.discord_nft_channel_id, _sweep_embed(c, sweep))
+                    embed = _sweep_embed(c, sweep)
+                    delivered = await _post_nft_alert(client, settings.discord_nft_channel_id, embed)
                     if delivered:
                         await _nft_alert_state_set(client, slug, "sweep", sweep["count"])
+                        await _dm_subscribers(client, slug, "sweep", embed)
                         alerted.append(f"{slug}:sweep")
         except (httpx.HTTPError, KeyError, ZeroDivisionError):
             logger.exception("nft-poll: alert check failed for %s", slug)
@@ -2950,6 +3212,50 @@ async def _cmd_nft(query: str) -> dict:
     }
 
 
+async def _pnl_render_core(collection_query: str, mint_price: float, amount_minted: int, x_username: str) -> bytes:
+    results = await _nft_search_core(collection_query)
+    if not results:
+        raise HTTPException(status_code=404, detail=f'No OpenSea results for "{collection_query}".')
+    slug = results[0]["slug"]
+    try:
+        c = await _nft_collection_core(slug)
+    except HTTPException:
+        c = results[0]
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        try:
+            history = await _nft_recent_snapshots(client, slug, limit=200)
+        except httpx.HTTPError:
+            # Same as /nft - degrade to "no history" if the snapshot table
+            # migration hasn't been run yet, rather than failing the card.
+            history = []
+        thumb_bytes = None
+        if c.get("image"):
+            try:
+                thumb_res = await client.get(c["image"])
+                if thumb_res.status_code == 200:
+                    thumb_bytes = thumb_res.content
+            except httpx.HTTPError:
+                pass
+
+    ath_floors = [h["floor"] for h in history if h.get("floor") is not None]
+    if c.get("floor") is not None:
+        ath_floors.append(c["floor"])
+    ath = max(ath_floors) if ath_floors else c.get("floor")
+
+    data = {
+        "project": c.get("name") or collection_query,
+        "x_username": x_username,
+        "mint_price": mint_price,
+        "amount_minted": amount_minted,
+        "fp": c.get("floor") or 0.0,
+        "ath": ath,
+        "symbol": c.get("symbol") or "ETH",
+        "eth_usd": c.get("listingUsdRate") or 0,
+    }
+    return pnl_card.render_pnl_card(data, project_thumb_bytes=thumb_bytes)
+
+
 async def _cmd_wallet(address: str) -> dict:
     data = await _wallet_card_core(address)
     title = data.get("ensName") or data["address"]
@@ -3034,6 +3340,25 @@ async def _discord_edit_original(token: str, embed: dict) -> None:
             logger.exception("Failed to edit original response for interaction token")
 
 
+async def _discord_edit_original_with_file(token: str, filename: str, file_bytes: bytes, content: str | None = None) -> None:
+    # File attachments on an interaction response go through the same
+    # webhook-edit endpoint as a plain embed, but as multipart/form-data
+    # instead of JSON - the JSON part becomes a "payload_json" form field
+    # alongside the raw file bytes.
+    payload_json = {"attachments": [{"id": 0, "filename": filename}]}
+    if content:
+        payload_json["content"] = content
+    async with httpx.AsyncClient(timeout=20) as client:
+        try:
+            await client.patch(
+                f"{DISCORD_API}/webhooks/{settings.discord_client_id}/{token}/messages/@original",
+                data={"payload_json": json.dumps(payload_json)},
+                files={"files[0]": (filename, file_bytes, "image/png")},
+            )
+        except httpx.HTTPError:
+            logger.exception("Failed to edit original response with file attachment")
+
+
 def _error_embed(exc: Exception) -> dict:
     detail = exc.detail if isinstance(exc, HTTPException) else "Something went wrong running that command."
     return {"title": "⚠️ Command failed", "description": str(detail), "color": EMBED_COLOR_BAD, "footer": TOOLKIT_FOOTER}
@@ -3097,6 +3422,12 @@ TOOLKIT_TOOLS = {
         "short": "Track your own personal list of NFT collections",
         "usage": "/watchlist add|remove|list collection:<name>",
         "example": "/watchlist add collection:Pudgy Penguins",
+    },
+    "monitor": {
+        "emoji": "🔔", "label": "NFT Monitor",
+        "short": "Personal DM pings for specific events on a collection: floor moves, supply cuts, mint progress, sweeps, volume spikes",
+        "usage": "/monitor set|clear collection:<name> · /monitor list",
+        "example": "/monitor set collection:Pudgy Penguins",
     },
 }
 
@@ -3170,6 +3501,9 @@ async def _handle_toolkit_command(payload: dict) -> dict:
 
     if name == "dashboard":
         return {"type": 4, "data": _dashboard_response()}
+
+    if name == "monitor":
+        return {"type": 4, "data": await _cmd_monitor_response(payload, discord_user_id)}
 
     # /xray is the one command that can genuinely exceed Discord's 3-second
     # ack window (a heavily-active wallet's token-balance fetch alone can
