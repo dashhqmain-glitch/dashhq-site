@@ -522,12 +522,28 @@ async def setup_pidgin_automod(request: Request):
     async with httpx.AsyncClient(timeout=20) as client:
         channels_res = await client.get(f"{DISCORD_API}/guilds/{settings.discord_guild_id}/channels", headers=headers)
         channels_res.raise_for_status()
-        all_channel_ids = [c["id"] for c in channels_res.json()]
+        # Only text-capable channel types can ever trigger a MESSAGE_SEND
+        # AutoMod rule in the first place - voice channels (2), categories
+        # (4), and stage channels (13) never need exempting. Filtering to
+        # just the types that matter also keeps the list under Discord's
+        # hard cap of 50 exempt_channels per rule, which a server with
+        # many voice/category channels can otherwise exceed even though
+        # its actual TEXT channel count is well under 50.
+        TEXTUAL_CHANNEL_TYPES = {0, 5, 15}  # GUILD_TEXT, GUILD_ANNOUNCEMENT, GUILD_FORUM
+        all_channel_ids = [c["id"] for c in channels_res.json() if c.get("type") in TEXTUAL_CHANNEL_TYPES]
         # Discord AutoMod has no "only apply in these channels" allowlist,
         # only exempt_channels - exempting everything except #general is
         # how enforcement stays scoped to just that one channel (so
         # #lifestyle-chat and everywhere else is unaffected).
         exempt_channels = [cid for cid in all_channel_ids if cid != settings.discord_general_channel_id]
+        channels_truncated = len(exempt_channels) > 50
+        if channels_truncated:
+            # Still over the cap even after filtering to text channels -
+            # truncate rather than fail outright. Any channel past the
+            # 50th falls back to being enforced too (better than the
+            # whole feature not working; flagged in the response so it's
+            # visible, not silent).
+            exempt_channels = exempt_channels[:50]
         # Creating a role needs Manage Roles specifically (separate from
         # Manage Server, which is all AutoMod rule management itself
         # needs) - the bot may not have that yet. Don't let the whole
