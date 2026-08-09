@@ -3347,9 +3347,10 @@ async def _nft_mint_radar_mark_seen(client: httpx.AsyncClient, slug: str) -> Non
 _NFT_SCOPE_RED_THRESHOLD = 50
 _NFT_SCOPE_YELLOW_THRESHOLD = 70
 _NFT_SCOPE_GREEN_THRESHOLD = 85
-_NFT_SCOPE_MAX_POSTS_PER_CYCLE = 3   # hard cap across BOTH passes below - conviction over volume
+_NFT_SCOPE_MAX_POSTS_PER_CYCLE = 3   # hard cap across ALL passes below - conviction over volume
 _NFT_SCOPE_MOMENTUM_MIN_SNAPSHOTS = 6   # ~30 min of history minimum before trusting a trend
 _NFT_SCOPE_MOMENTUM_SCAN_LIMIT = 25  # bounds OpenSea API usage even when nothing qualifies
+_NFT_SCOPE_TRENDING_LIMIT = 20  # per chain, by 7-day volume - the "scour OpenSea broadly" net
 
 
 def _detect_fake_offer(c: dict, top_offer_amount: float | None) -> str | None:
@@ -3585,7 +3586,11 @@ def _nft_scope_worth_posting(score: dict) -> bool:
 
 def _nft_scope_embed(c: dict, score: dict, top_offer_amount: float | None, kind: str) -> dict:
     symbol = c.get("symbol") or "ETH"
-    title_prefix = "🧭 NFT Scope · New Mint" if kind == "fresh" else "🧭 NFT Scope · Momentum Building"
+    title_prefix = {
+        "fresh": "🧭 NFT Scope · New Mint",
+        "trending": "🧭 NFT Scope · Trending Pick",
+        "momentum": "🧭 NFT Scope · Momentum Building",
+    }.get(kind, "🧭 NFT Scope")
     lines = [f"**{score['score']}/100** · {score['risk_tier']}"]
     if score["reasons"]:
         lines.append("")
@@ -3729,7 +3734,67 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 15) 
                 logger.exception("nft-scope: fresh-mint check failed for %s", slug)
                 continue
 
-    # ── Pass 2: momentum on collections already being tracked (/watchlist
+    # ── Pass 2: trending discovery - established collections with real
+    # 7-day volume, regardless of when they were minted or whether anyone
+    # has tracked them yet. Fresh mints (pass 1) and already-tracked
+    # collections (pass 3) are both narrow nets on their own - this is
+    # what actually "scours OpenSea" for secondary plays nobody's
+    # watching yet. Runs through the exact same strict gates as
+    # everything else; wider reach, not looser rules. Uses a cooldown
+    # (re-check at most once/hour per candidate, whether it posted or
+    # not) instead of the fresh-mint pass's permanent seen-table, since a
+    # trending collection's situation can genuinely change - and this is
+    # what keeps the added OpenSea calls bounded to a handful per cycle
+    # instead of re-scanning the whole trending list every 5 minutes.
+    if len(posted) < _NFT_SCOPE_MAX_POSTS_PER_CYCLE:
+        for chain in _NFT_SCOPE_CHAINS:
+            if len(posted) >= _NFT_SCOPE_MAX_POSTS_PER_CYCLE:
+                break
+            try:
+                data = await _opensea_get(client, "/collections", {"order_by": "seven_day_volume", "limit": _NFT_SCOPE_TRENDING_LIMIT, "chain": chain})
+            except httpx.HTTPError:
+                continue
+            collections = (data or {}).get("collections") or []
+            for raw in collections:
+                if len(posted) >= _NFT_SCOPE_MAX_POSTS_PER_CYCLE:
+                    break
+                slug = raw.get("collection")
+                if not slug:
+                    continue
+                try:
+                    scan_state = await _nft_alert_state_get(client, slug, "nft_scope_trending_scan")
+                    if not _nft_alert_cooled_down(scan_state):
+                        continue
+                    c = await _nft_collection_core(slug)
+                    top_offer_amount = await _nft_scope_top_offer_amount(client, slug, c)
+                    rapid_activity = None
+                    if (c.get("sales24h") or 0) > 0:
+                        rapid_activity = await _detect_rapid_activity(client, slug)
+                    # Trending collections often already have snapshot
+                    # history from watchlist polling even if nobody
+                    # explicitly /monitor'd them - use it for momentum
+                    # scoring if it happens to exist, harmless if not.
+                    history = None
+                    try:
+                        history = await _nft_recent_snapshots(client, slug, limit=30)
+                    except httpx.HTTPError:
+                        history = None
+                    score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity)
+                    if _nft_scope_worth_posting(score) and await _nft_scope_clears_wash_check(client, slug):
+                        delivered = await _post_channel_message(client, settings.discord_nft_scope_channel_id, _nft_scope_embed(c, score, top_offer_amount, "trending"))
+                        if delivered:
+                            posted.append(slug)
+                    # Mark as scanned regardless of outcome - rate-limits
+                    # re-checking this specific candidate, it doesn't mean
+                    # "never again" the way the fresh-mint seen-table does.
+                    await _nft_alert_state_set(client, slug, "nft_scope_trending_scan", c.get("floor") or 0)
+                except HTTPException:
+                    continue
+                except (httpx.HTTPError, KeyError, ZeroDivisionError, TypeError):
+                    logger.exception("nft-scope: trending check failed for %s", slug)
+                    continue
+
+    # ── Pass 3: momentum on collections already being tracked (/watchlist
     # or /monitor), which is the only source of the snapshot history this
     # needs - an "old project about to cook" call is only as good as the
     # trend data behind it. ──
