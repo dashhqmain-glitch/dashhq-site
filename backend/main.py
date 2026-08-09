@@ -2903,6 +2903,28 @@ async def _post_channel_message(client: httpx.AsyncClient, channel_id: str, embe
         return False
 
 
+async def _dm_watchlist_owners(client: httpx.AsyncClient, slug: str, embed: dict) -> None:
+    # /watchlist has no per-event-type granularity like /monitor does -
+    # adding a collection means "keep me posted on everything for this
+    # one," so any alert that fires for it DMs everyone who added it,
+    # not just posts to the shared public channel.
+    try:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/discord_nft_watchlist",
+            headers=_supabase_headers(),
+            params={"slug": f"eq.{slug}", "select": "discord_user_id"},
+        )
+        res.raise_for_status()
+        owner_ids = [row["discord_user_id"] for row in res.json()]
+    except httpx.HTTPError:
+        return
+    if not owner_ids:
+        return
+    ping = f"🔔 {embed['title']}" if embed.get("title") else "🔔 A collection on your watchlist just updated."
+    for user_id in owner_ids:
+        await _discord_dm(client, user_id, embed, content=ping)
+
+
 async def _dm_subscribers(client: httpx.AsyncClient, slug: str, event_type: str, embed: dict) -> None:
     subscriber_ids = await _nft_watch_subscribers(client, slug, event_type)
     if not subscriber_ids:
@@ -3191,6 +3213,7 @@ async def _nft_poll_watchlist_alerts(client: httpx.AsyncClient) -> list[str]:
                         delivered = await _post_nft_alert(client, settings.discord_nft_channel_id, embed)
                         if delivered:
                             await _nft_alert_state_set(client, slug, "supply_cut", c["totalSupply"])
+                            await _dm_watchlist_owners(client, slug, embed)
                             await _dm_subscribers(client, slug, "supply_cut", embed)
                             alerted.append(f"{slug}:supply_cut")
 
@@ -3205,6 +3228,7 @@ async def _nft_poll_watchlist_alerts(client: httpx.AsyncClient) -> list[str]:
                         delivered = await _post_nft_alert(client, settings.discord_nft_channel_id, embed)
                         if delivered:
                             await _nft_alert_state_set(client, slug, "mint_progress", c["totalSupply"])
+                            await _dm_watchlist_owners(client, slug, embed)
                             await _dm_subscribers(client, slug, "mint_progress", embed)
                             alerted.append(f"{slug}:mint_progress")
 
@@ -3222,6 +3246,7 @@ async def _nft_poll_watchlist_alerts(client: httpx.AsyncClient) -> list[str]:
                             if delivered:
                                 await _nft_alert_state_set(client, slug, "floor_change", c["floor"])
                                 direction_event = "floor_up" if pct > 0 else "floor_down"
+                                await _dm_watchlist_owners(client, slug, embed)
                                 await _dm_subscribers(client, slug, direction_event, embed)
                                 alerted.append(f"{slug}:{direction_event}")
 
@@ -3249,6 +3274,7 @@ async def _nft_poll_watchlist_alerts(client: httpx.AsyncClient) -> list[str]:
                                 delivered = await _post_nft_alert(client, settings.discord_nft_channel_id, embed)
                                 if delivered:
                                     await _nft_alert_state_set(client, slug, "volume_spike", c["vol1d"])
+                                    await _dm_watchlist_owners(client, slug, embed)
                                     await _dm_subscribers(client, slug, "volume_spike", embed)
                                     alerted.append(f"{slug}:volume_spike")
 
@@ -3260,6 +3286,7 @@ async def _nft_poll_watchlist_alerts(client: httpx.AsyncClient) -> list[str]:
                     delivered = await _post_nft_alert(client, settings.discord_nft_channel_id, embed)
                     if delivered:
                         await _nft_alert_state_set(client, slug, "sweep", sweep["count"])
+                        await _dm_watchlist_owners(client, slug, embed)
                         await _dm_subscribers(client, slug, "sweep", embed)
                         alerted.append(f"{slug}:sweep")
         except (httpx.HTTPError, KeyError, ZeroDivisionError):
