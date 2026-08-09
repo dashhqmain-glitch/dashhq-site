@@ -2430,16 +2430,17 @@ def _mint_progress_embed(c: dict, prev_supply: int) -> dict:
     }
 
 
-def _price_target_embed(c: dict, target: float, direction: str) -> dict:
+def _price_target_embed(c: dict, target: float, direction: str, loop_alert: bool = False) -> dict:
     verb = "dropped to or below" if direction == "below" else "risen to or above"
     symbol = c.get("symbol") or "ETH"
+    footer_note = "Price Target · Looping (re-alerts hourly while true)" if loop_alert else "Price Target · One-time"
     return {
         "title": f"🎯 {c['name']} hit your target price",
         "url": c.get("openseaUrl"),
         "description": f"Floor has {verb} **{target:.4f} {symbol}** — currently **{c['floor']:.4f} {symbol}**.",
         "color": EMBED_COLOR_GOOD if direction == "below" else EMBED_COLOR,
         "thumbnail": {"url": c["image"]} if c.get("image") else None,
-        "footer": {"text": f"{TOOLKIT_FOOTER['text']} · Price Target"},
+        "footer": {"text": f"{TOOLKIT_FOOTER['text']} · {footer_note}"},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -2452,7 +2453,7 @@ async def _check_price_alerts(client: httpx.AsyncClient, slug: str, c: dict) -> 
         res = await client.get(
             f"{settings.supabase_url}/rest/v1/nft_price_alerts",
             headers=_supabase_headers(),
-            params={"slug": f"eq.{slug}", "select": "discord_user_id,target_price,direction"},
+            params={"slug": f"eq.{slug}", "select": "discord_user_id,target_price,direction,loop_alert,last_alerted_at"},
         )
         res.raise_for_status()
         rows = res.json()
@@ -2466,18 +2467,33 @@ async def _check_price_alerts(client: httpx.AsyncClient, slug: str, c: dict) -> 
         hit = (floor <= target) if direction == "below" else (floor >= target)
         if not hit:
             continue
-        embed = _price_target_embed(c, target, direction)
+        is_loop = bool(row.get("loop_alert"))
+        # Loop alerts re-fire on the same hour cooldown as every other
+        # /monitor event type instead of every single poll cycle, for as
+        # long as the floor keeps satisfying the condition.
+        if is_loop and not _nft_alert_cooled_down(row):
+            continue
+        embed = _price_target_embed(c, target, direction, loop_alert=is_loop)
         delivered = await _discord_dm(client, row["discord_user_id"], embed, content=f"🎯 {embed['title']}")
-        if delivered:
+        if not delivered:
+            continue
+        match_params = {"discord_user_id": f"eq.{row['discord_user_id']}", "slug": f"eq.{slug}", "target_price": f"eq.{target}"}
+        if is_loop:
+            await client.patch(
+                f"{settings.supabase_url}/rest/v1/nft_price_alerts",
+                headers=_supabase_headers(prefer="return=minimal"),
+                params=match_params,
+                json={"last_alerted_at": datetime.now(timezone.utc).isoformat()},
+            )
+        else:
             # One-shot by design - a specific price target is a single
-            # moment someone's waiting for, not a recurring condition like
-            # the other /monitor event types. Only clear it once the DM
+            # moment someone's waiting for. Only clear it once the DM
             # actually lands, so a closed-DMs failure retries next poll
             # instead of silently vanishing.
             await client.delete(
                 f"{settings.supabase_url}/rest/v1/nft_price_alerts",
                 headers=_supabase_headers(prefer="return=minimal"),
-                params={"discord_user_id": f"eq.{row['discord_user_id']}", "slug": f"eq.{slug}", "target_price": f"eq.{target}"},
+                params=match_params,
             )
 
 
@@ -2691,7 +2707,7 @@ async def _nft_price_alerts_list(discord_user_id: str) -> list[dict]:
             res = await client.get(
                 f"{settings.supabase_url}/rest/v1/nft_price_alerts",
                 headers=_supabase_headers(),
-                params={"discord_user_id": f"eq.{discord_user_id}", "select": "slug,target_price,direction", "order": "slug.asc"},
+                params={"discord_user_id": f"eq.{discord_user_id}", "select": "slug,target_price,direction,loop_alert", "order": "slug.asc"},
             )
             res.raise_for_status()
             return res.json()
@@ -2719,7 +2735,8 @@ async def _cmd_monitor_response(payload: dict, discord_user_id: str) -> dict:
                 by_slug.setdefault(r["slug"], []).append(_NFT_MONITOR_LABELS.get(r["event_type"], r["event_type"]))
             for r in price_rows:
                 verb = "≤" if r["direction"] == "below" else "≥"
-                by_slug.setdefault(r["slug"], []).append(f"🎯 Price target {verb} {r['target_price']:.4f} ETH")
+                loop_tag = " 🔁" if r.get("loop_alert") else ""
+                by_slug.setdefault(r["slug"], []).append(f"🎯 Price target {verb} {r['target_price']:.4f} ETH{loop_tag}")
             lines = [f"**{slug}**: " + ", ".join(labels) for slug, labels in by_slug.items()]
             embed = {"title": "🔔 Your Monitor Subscriptions", "description": "\n".join(lines), "color": EMBED_COLOR, "footer": TOOLKIT_FOOTER}
         return {"embeds": [_clean_embed(embed)], "flags": 64}
@@ -2764,33 +2781,54 @@ async def _cmd_monitor_response(payload: dict, discord_user_id: str) -> dict:
         return {"embeds": [_clean_embed(embed)], "components": [_monitor_select_component(c["slug"])], "flags": 64}
 
     if sub_name == "price":
-        target = sub_opts.get("target")
-        try:
-            target = float(target)
-        except (TypeError, ValueError):
-            target = None
-        if target is None or target <= 0:
-            embed = {"title": "Invalid target", "description": "Give a target price greater than 0, e.g. `0.03`.", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
-            return {"embeds": [_clean_embed(embed)], "flags": 64}
         floor = c.get("floor")
         if floor is None:
             embed = {"title": "No floor data", "description": f"{c['name']} doesn't have a floor price to compare against right now.", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
             return {"embeds": [_clean_embed(embed)], "flags": 64}
+
+        raw_target = sub_opts.get("target")
+        raw_percent = sub_opts.get("percent")
+        if raw_target is not None:
+            try:
+                target = float(raw_target)
+            except (TypeError, ValueError):
+                target = None
+        elif raw_percent is not None:
+            # Same shortcut as the reference tool's -50%/-25%/+50%/+100%
+            # quick-pick buttons - a relative offset off the live floor
+            # instead of typing an exact ETH number.
+            try:
+                target = floor * (1 + float(raw_percent) / 100)
+            except (TypeError, ValueError):
+                target = None
+        else:
+            embed = {"title": "Missing target", "description": "Give either `target` (an exact ETH price) or `percent` (e.g. `-50` for 50% below the current floor).", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
+            return {"embeds": [_clean_embed(embed)], "flags": 64}
+
+        if target is None or target <= 0:
+            embed = {"title": "Invalid target", "description": "That works out to a target price of 0 or less - give a target above 0, e.g. `target:0.03` or `percent:-50`.", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
+            return {"embeds": [_clean_embed(embed)], "flags": 64}
+
+        loop_alert = bool(sub_opts.get("loop"))
         direction = "below" if target <= floor else "above"
         async with httpx.AsyncClient(timeout=10) as client:
             res = await client.post(
                 f"{settings.supabase_url}/rest/v1/nft_price_alerts",
                 headers=_supabase_headers(prefer="resolution=merge-duplicates,return=minimal"),
-                json=[{"discord_user_id": discord_user_id, "slug": c["slug"], "target_price": target, "direction": direction}],
+                json=[{
+                    "discord_user_id": discord_user_id, "slug": c["slug"], "target_price": target,
+                    "direction": direction, "loop_alert": loop_alert,
+                }],
             )
             if res.status_code >= 300:
                 embed = {"title": "Couldn't save price alert", "description": f"`{res.status_code}` - has `schema.sql` been re-run since `/monitor price` was added?", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
                 return {"embeds": [_clean_embed(embed)], "flags": 64}
         symbol = c.get("symbol") or "ETH"
         verb = "drops to or below" if direction == "below" else "rises to or above"
+        lifecycle = "Loops - re-alerts roughly hourly for as long as it stays true." if loop_alert else "Fires once, then clears itself."
         embed = {
             "title": f"🎯 Price target set: {c['name']}",
-            "description": f"You'll get a DM once the floor {verb} **{target:.4f} {symbol}** (currently {floor:.4f} {symbol}). Fires once, then clears itself.",
+            "description": f"You'll get a DM once the floor {verb} **{target:.4f} {symbol}** (currently {floor:.4f} {symbol}). {lifecycle}",
             "color": EMBED_COLOR_GOOD,
             "thumbnail": {"url": c["image"]} if c.get("image") else None,
             "footer": TOOLKIT_FOOTER,
@@ -3861,8 +3899,8 @@ TOOLKIT_TOOLS = {
     "monitor": {
         "emoji": "🔔", "label": "NFT Monitor",
         "short": "Personal DM pings for specific events on a collection: floor up/down, supply cuts, mint progress, sweeps, volume spikes - plus a one-shot alert at a specific target price",
-        "usage": "/monitor set|clear collection:<name or contract address> · /monitor price collection:<name> target:<ETH> · /monitor list",
-        "example": "/monitor price collection:Pudgy Penguins target:0.03",
+        "usage": "/monitor set|clear collection:<name or contract address> · /monitor price collection:<name> target:<ETH>|percent:<%> loop:<true/false> · /monitor list",
+        "example": "/monitor price collection:Pudgy Penguins percent:-50 loop:true",
     },
     "pnl": {
         "emoji": "📊", "label": "PnL Card",

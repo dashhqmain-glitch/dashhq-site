@@ -126,10 +126,12 @@ COMMANDS = [
                 "options": [{"name": "collection", "description": "Collection name or contract address", "type": 3, "required": True}],
             },
             {
-                "name": "price", "description": "Get DM'd once when a collection's floor crosses a specific ETH price", "type": 1,
+                "name": "price", "description": "Get DM'd when a collection's floor crosses a specific ETH price", "type": 1,
                 "options": [
                     {"name": "collection", "description": "Collection name or contract address", "type": 3, "required": True},
-                    {"name": "target", "description": "Target floor price in ETH, e.g. 0.03", "type": 10, "required": True},
+                    {"name": "target", "description": "Exact target floor price in ETH, e.g. 0.03 (use this OR percent)", "type": 10, "required": False},
+                    {"name": "percent", "description": "Target as % off current floor, e.g. -50 or 100 (use this OR target)", "type": 10, "required": False},
+                    {"name": "loop", "description": "Keep re-alerting hourly while true, instead of firing once (default: off)", "type": 5, "required": False},
                 ],
             },
             {"name": "list", "description": "Show everything you're monitoring", "type": 1},

@@ -173,17 +173,21 @@ create index if not exists nft_watch_subscriptions_slug_idx on nft_watch_subscri
 
 alter table nft_watch_subscriptions enable row level security;
 
--- /monitor price: one-shot personal alert firing once a collection's
--- floor crosses a specific ETH price the citizen picked, then deletes
--- itself. direction is computed once at creation time from where the
--- floor sat relative to the target - below means "alert on the way
--- down to/through this price", above means "alert on the way up to/
--- through this price".
+-- /monitor price: personal alert firing when a collection's floor crosses
+-- a specific ETH price the citizen picked. direction is computed once at
+-- creation time from where the floor sat relative to the target - below
+-- means "alert on the way down to/through this price", above means
+-- "alert on the way up to/through this price". One-shot by default
+-- (deletes itself after firing); loop_alert keeps it alive and re-fires
+-- on an hour cooldown for as long as the condition keeps being true,
+-- matching the reference tool's "Loop alerts" toggle.
 create table if not exists nft_price_alerts (
   discord_user_id  text not null,
   slug             text not null,
   target_price     double precision not null,
   direction        text not null check (direction in ('above', 'below')),
+  loop_alert       boolean not null default false,
+  last_alerted_at  timestamptz,
   created_at       timestamptz not null default now(),
   primary key (discord_user_id, slug, target_price)
 );
