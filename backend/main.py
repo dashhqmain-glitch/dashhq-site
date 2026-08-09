@@ -504,11 +504,36 @@ async def purge_channel(request: Request, channel_id: str = Query(..., min_lengt
     if not settings.discord_bot_token:
         raise HTTPException(status_code=500, detail="Discord bot env vars not fully configured")
 
+    async def _delete_one(client: httpx.AsyncClient, mid: str) -> tuple[bool, str]:
+        # Respects Discord's 429 by reading the actual retry_after it
+        # hands back instead of guessing a delay - a fixed sleep either
+        # wastes time waiting longer than needed or, worse, still isn't
+        # long enough and gets 429'd again anyway.
+        for attempt in range(4):
+            res = await client.delete(f"{DISCORD_API}/channels/{channel_id}/messages/{mid}", headers=headers)
+            if res.status_code < 300:
+                return True, ""
+            if res.status_code == 429:
+                try:
+                    retry_after = float(res.json().get("retry_after", 1.0))
+                except (ValueError, TypeError):
+                    retry_after = 1.0
+                await asyncio.sleep(retry_after + 0.1)
+                continue
+            return False, f"delete {mid}: {res.status_code}"
+        return False, f"delete {mid}: gave up after repeated 429s"
+
     headers = {"Authorization": f"Bot {settings.discord_bot_token}"}
     deleted_bulk, deleted_single, errors = 0, 0, []
+    bulk_forbidden = False
     done = False
+    start = time.time()
     async with httpx.AsyncClient(timeout=20) as client:
         for _ in range(max_batches):
+            if time.time() - start > 45:
+                # Leave headroom under Vercel's 60s limit rather than risk
+                # a 504 mid-batch - the caller just re-invokes for more.
+                break
             res = await client.get(f"{DISCORD_API}/channels/{channel_id}/messages", headers=headers, params={"limit": 100})
             if res.status_code >= 300:
                 errors.append(f"fetch: {res.status_code} {res.text[:200]}")
@@ -518,29 +543,33 @@ async def purge_channel(request: Request, channel_id: str = Query(..., min_lengt
                 done = True
                 break
             ids = [m["id"] for m in batch]
-            if len(ids) >= 2:
+            if len(ids) >= 2 and not bulk_forbidden:
                 bulk_res = await client.post(f"{DISCORD_API}/channels/{channel_id}/messages/bulk-delete", headers=headers, json={"messages": ids})
-                if bulk_res.status_code >= 300:
-                    # Likely hit the 14-day-old cutoff - fall back to deleting this batch one at a time.
-                    for mid in ids:
-                        single_res = await client.delete(f"{DISCORD_API}/channels/{channel_id}/messages/{mid}", headers=headers)
-                        if single_res.status_code < 300:
-                            deleted_single += 1
-                        else:
-                            errors.append(f"delete {mid}: {single_res.status_code}")
+                if bulk_res.status_code == 403:
+                    # Bot is missing Manage Messages - bulk-delete always
+                    # needs it regardless of who authored the messages, so
+                    # retrying per-batch is pointless; drop to per-message
+                    # deletes (which don't need it for the bot's own
+                    # messages) for the rest of this run.
+                    bulk_forbidden = True
+                    errors.append("bulk-delete: 403 Forbidden - bot needs the Manage Messages permission")
+                elif bulk_res.status_code >= 300:
+                    errors.append(f"bulk-delete: {bulk_res.status_code} {bulk_res.text[:200]}")
                 else:
                     deleted_bulk += len(ids)
-            else:
-                single_res = await client.delete(f"{DISCORD_API}/channels/{channel_id}/messages/{ids[0]}", headers=headers)
-                if single_res.status_code < 300:
+                    continue
+            for mid in ids:
+                ok, err = await _delete_one(client, mid)
+                if ok:
                     deleted_single += 1
                 else:
-                    errors.append(f"delete {ids[0]}: {single_res.status_code}")
+                    errors.append(err)
+                await asyncio.sleep(0.3)  # stay comfortably under Discord's per-channel delete rate limit
             if len(batch) < 100:
                 done = True
                 break
 
-    return {"channel_id": channel_id, "deleted_bulk": deleted_bulk, "deleted_single": deleted_single, "errors": errors, "done": done}
+    return {"channel_id": channel_id, "deleted_bulk": deleted_bulk, "deleted_single": deleted_single, "errors": errors[:20], "error_count": len(errors), "done": done}
 
 
 @app.get("/cron/test-monitor-channel")
