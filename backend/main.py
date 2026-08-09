@@ -3106,20 +3106,26 @@ async def _cmd_monitor_response(payload: dict, discord_user_id: str) -> dict:
             if res.status_code >= 300:
                 embed = {"title": "Couldn't save price alert", "description": f"`{res.status_code}` - has `schema.sql` been re-run since `/monitor price` was added?", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
                 return {"embeds": [_clean_embed(embed)], "flags": 64}
-        symbol = c.get("symbol") or "ETH"
-        verb = "drops to or below" if direction == "below" else "rises to or above"
-        lifecycle = "Loops - re-alerts roughly hourly for as long as it stays true." if loop_alert else "Fires once, then clears itself."
-        embed = {
-            "title": f"🎯 Price target set: {c['name']}",
-            "description": f"<@{discord_user_id}> will get a DM once the floor {verb} **{target:.4f} {symbol}** (currently {floor:.4f} {symbol}). {lifecycle}",
-            "color": EMBED_COLOR_GOOD,
-            "thumbnail": {"url": c["image"]} if c.get("image") else None,
-            "footer": TOOLKIT_FOOTER,
-        }
-        # Public on purpose (unlike set/clear/list, which stay ephemeral) -
-        # other members watching the same collection can see what price
-        # points people are actually targeting.
-        return {"embeds": [_clean_embed(embed)]}
+
+            symbol = c.get("symbol") or "ETH"
+            verb = "drops to or below" if direction == "below" else "rises to or above"
+            lifecycle = "Loops - re-alerts roughly hourly for as long as it stays true." if loop_alert else "Fires once, then clears itself."
+            embed = {
+                "title": f"🎯 Price target set: {c['name']}",
+                "description": f"<@{discord_user_id}> will get a DM once the floor {verb} **{target:.4f} {symbol}** (currently {floor:.4f} {symbol}). {lifecycle}",
+                "color": EMBED_COLOR_GOOD,
+                "thumbnail": {"url": c["image"]} if c.get("image") else None,
+                "footer": TOOLKIT_FOOTER,
+            }
+            # /monitor works from anywhere, but the announcement always
+            # lands in the dedicated nft-intel channel specifically -
+            # same "DMs stay private, the fact of it is public, in one
+            # consistent place" pattern as the rest of /monitor - instead
+            # of showing up in whatever channel happened to be typed in.
+            if settings.discord_nft_monitor_channel_id:
+                await _post_channel_message(client, settings.discord_nft_monitor_channel_id, embed)
+        ack = {"title": "🎯 Price target set", "description": f"Posted in <#{settings.discord_nft_monitor_channel_id}>." if settings.discord_nft_monitor_channel_id else "Saved.", "color": EMBED_COLOR_GOOD, "footer": TOOLKIT_FOOTER}
+        return {"embeds": [_clean_embed(ack)], "flags": 64}
 
     embed = {"title": "Unknown subcommand", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
     return {"embeds": [_clean_embed(embed)], "flags": 64}
@@ -4326,6 +4332,23 @@ async def _cmd_pairs(chain: str) -> dict:
     return {"title": f"🔥 Fresh Pairs: {label}", "description": "\n".join(lines), "color": EMBED_COLOR, "footer": TOOLKIT_FOOTER}
 
 
+async def _announce_watchlist_change(discord_user_id: str, name: str, verb: str, check: str) -> None:
+    # /watchlist works from anywhere, but same as /monitor, what changed
+    # always lands in the dedicated nft-intel channel specifically -
+    # DMs/private acks stay where they are, the fact of it is public in
+    # one consistent place.
+    if not settings.discord_nft_monitor_channel_id:
+        return
+    embed = {
+        "title": f"📌 Watchlist {verb}: {check}{name}",
+        "description": f"<@{discord_user_id}> just {verb} **{name}** {'to' if verb == 'added' else 'from'} the shared /watchlist.",
+        "color": EMBED_COLOR_GOOD if verb == "added" else EMBED_COLOR,
+        "footer": TOOLKIT_FOOTER,
+    }
+    async with httpx.AsyncClient(timeout=10) as client:
+        await _post_channel_message(client, settings.discord_nft_monitor_channel_id, embed)
+
+
 async def _cmd_watchlist(payload: dict, discord_user_id: str) -> dict:
     sub_options = (payload.get("data") or {}).get("options") or []
     if not sub_options:
@@ -4355,12 +4378,15 @@ async def _cmd_watchlist(payload: dict, discord_user_id: str) -> dict:
             return {"title": "No collections found", "description": f'No OpenSea results for "{query}".', "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
         c = await _discord_watchlist_add(discord_user_id, matches[0]["slug"])
         check = "✅ " if c.get("verified") else ""
+        await _announce_watchlist_change(discord_user_id, c["name"], "added", check)
         return {"title": f"Added to watchlist: {check}{c['name']}", "color": EMBED_COLOR_GOOD, "footer": TOOLKIT_FOOTER}
 
     if sub_name == "remove":
         matches = await _nft_search_core(query)
         slug = matches[0]["slug"] if matches else query
+        name_for_display = matches[0]["name"] if matches else query
         await _discord_watchlist_remove(discord_user_id, slug)
+        await _announce_watchlist_change(discord_user_id, name_for_display, "removed", "")
         return {"title": f"Removed from watchlist: {query}", "color": EMBED_COLOR, "footer": TOOLKIT_FOOTER}
 
     return {"title": "Unknown subcommand", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
