@@ -485,11 +485,19 @@ async def test_dm(request: Request, user_id: str = Query(..., min_length=1, max_
 
 
 @app.get("/cron/purge-channel")
-async def purge_channel(request: Request, channel_id: str = Query(..., min_length=1, max_length=32)):
+async def purge_channel(request: Request, channel_id: str = Query(..., min_length=1, max_length=32), max_batches: int = Query(8, ge=1, le=20)):
     # Admin-only, same shared-secret gate as every other /cron endpoint -
-    # wipes every message in a channel. Bulk-delete only works on messages
+    # wipes messages from a channel. Bulk-delete only works on messages
     # under 14 days old (a hard Discord API limit), so anything older
     # falls back to one-by-one deletion.
+    #
+    # Bounded to max_batches per call on purpose - a channel with
+    # hundreds of messages plus Discord's per-route rate limiting can
+    # blow past Vercel's function timeout if it tries to loop until
+    # empty in one request (this happened on the first version). Each
+    # call processes a fixed amount of work and reports whether more is
+    # left via "done", so a caller loops by re-invoking until done=true
+    # instead of one request doing unbounded work.
     expected = f"Bearer {settings.cron_secret}"
     if not settings.cron_secret or request.headers.get("authorization") != expected:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -498,14 +506,16 @@ async def purge_channel(request: Request, channel_id: str = Query(..., min_lengt
 
     headers = {"Authorization": f"Bot {settings.discord_bot_token}"}
     deleted_bulk, deleted_single, errors = 0, 0, []
+    done = False
     async with httpx.AsyncClient(timeout=20) as client:
-        while True:
+        for _ in range(max_batches):
             res = await client.get(f"{DISCORD_API}/channels/{channel_id}/messages", headers=headers, params={"limit": 100})
             if res.status_code >= 300:
                 errors.append(f"fetch: {res.status_code} {res.text[:200]}")
                 break
             batch = res.json()
             if not batch:
+                done = True
                 break
             ids = [m["id"] for m in batch]
             if len(ids) >= 2:
@@ -526,8 +536,11 @@ async def purge_channel(request: Request, channel_id: str = Query(..., min_lengt
                     deleted_single += 1
                 else:
                     errors.append(f"delete {ids[0]}: {single_res.status_code}")
+            if len(batch) < 100:
+                done = True
+                break
 
-    return {"channel_id": channel_id, "deleted_bulk": deleted_bulk, "deleted_single": deleted_single, "errors": errors}
+    return {"channel_id": channel_id, "deleted_bulk": deleted_bulk, "deleted_single": deleted_single, "errors": errors, "done": done}
 
 
 @app.get("/cron/test-monitor-channel")
