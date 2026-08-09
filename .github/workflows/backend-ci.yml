@@ -1,0 +1,107 @@
+name: Backend CI
+
+# Runs the Python backend's test suite on every change - this is what
+# actually keeps deploys safe, not the deploy mechanism itself (Vercel's
+# own atomic per-deployment cutover already means zero downtime as long
+# as what gets shipped isn't broken). Catches a bug before it's live,
+# instead of finding out from a broken Discord command.
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'backend/**'
+      - 'api/**'
+      - '.github/workflows/backend-ci.yml'
+  pull_request:
+    branches: [master]
+    paths:
+      - 'backend/**'
+      - 'api/**'
+      - '.github/workflows/backend-ci.yml'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install -r api/requirements.txt
+          pip install pytest pytest-asyncio
+
+      - name: Compile-check every backend module
+        run: python -m py_compile backend/main.py backend/config.py backend/register_commands.py backend/pnl_card.py
+
+      - name: Full module import check
+        working-directory: backend
+        env:
+          SUPABASE_URL: https://ci-placeholder.supabase.co
+          SUPABASE_SERVICE_ROLE_KEY: ci-placeholder
+          DISCORD_BOT_TOKEN: ci-placeholder
+          DISCORD_PUBLIC_KEY: ci-placeholder
+          DISCORD_CLIENT_ID: ci-placeholder
+          DISCORD_GUILD_ID: ci-placeholder
+        run: python -c "import main; print('import OK')"
+
+      - name: Run test suite
+        working-directory: backend
+        env:
+          SUPABASE_URL: https://ci-placeholder.supabase.co
+          SUPABASE_SERVICE_ROLE_KEY: ci-placeholder
+          DISCORD_BOT_TOKEN: ci-placeholder
+          DISCORD_PUBLIC_KEY: ci-placeholder
+          DISCORD_CLIENT_ID: ci-placeholder
+          DISCORD_GUILD_ID: ci-placeholder
+        run: pytest -v
+
+  post-deploy-check:
+    # Only after a real push to master (not PRs, which never reach
+    # production) and only once the test job above has actually passed.
+    needs: test
+    if: github.ref == 'refs/heads/master' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for Vercel's deployment to go live
+        # Vercel's own build+propagation has consistently taken under a
+        # minute throughout this project's history - this margin is
+        # generous, not a guess pulled from nowhere.
+        run: sleep 90
+
+      - name: Live health check
+        run: |
+          code=$(curl -s -o /dev/null -w "%{http_code}" "https://www.dashhq.site/health")
+          echo "Health check: HTTP $code"
+          if [ "$code" != "200" ]; then
+            echo "::error::Production /health returned HTTP $code after a deploy - something is broken live."
+            exit 1
+          fi
+
+      - name: Live real-endpoint check
+        run: |
+          code=$(curl -s -o /dev/null -w "%{http_code}" "https://www.dashhq.site/toolkit/nft-search?q=azuki")
+          echo "NFT search check: HTTP $code"
+          if [ "$code" -ge 500 ]; then
+            echo "::error::A real endpoint is failing (HTTP $code) after a deploy."
+            exit 1
+          fi
+
+      - name: Re-register Discord commands
+        # Idempotent and cheap - safe to run after every deploy, so a
+        # command-schema change never gets forgotten as a separate manual
+        # step again.
+        run: |
+          status=$(curl -s -o response.json -w "%{http_code}" \
+            "https://www.dashhq.site/cron/register-discord-commands" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}")
+          echo "Command registration: HTTP $status"
+          cat response.json
+          if [ "$status" -ge 400 ]; then
+            echo "::warning::Command registration failed with HTTP $status - check manually."
+          fi
