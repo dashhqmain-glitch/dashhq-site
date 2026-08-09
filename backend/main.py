@@ -3154,6 +3154,21 @@ def _score_mint_quality(c: dict) -> dict:
     return {"checks": checks, "passed": passed, "total": len(checks), "verdict": verdict, "color": color}
 
 
+def _mint_radar_worth_posting(score: dict) -> bool:
+    # A high overall score alone isn't enough to trust - a single
+    # self-mint wash-trade can cheaply fake "floor is set" and even
+    # "not single-wallet concentrated" (low supply, 1 owner still clears
+    # a >=10% ratio). "Has recorded sales" and "5+ unique owners" are the
+    # two signals that genuinely require independent third parties to
+    # act, which is what actually separates a real early mint from a
+    # scam pretending to be one - both are mandatory on top of the 6/8
+    # overall bar, not just contributors to it.
+    if score["passed"] < 6:
+        return False
+    by_label = {ch["label"]: ch["pass"] for ch in score["checks"]}
+    return bool(by_label.get("Has recorded sales") and by_label.get("At least 5 unique owners"))
+
+
 def _mint_radar_embed(c: dict, score: dict) -> dict:
     checklist = "\n".join(f"{'✅' if ch['pass'] else '❌'} {ch['label']}" for ch in score["checks"])
     fields = [
@@ -3206,10 +3221,20 @@ async def _nft_mint_radar_scan(client: httpx.AsyncClient, per_chain_limit: int =
                     continue
                 c = await _nft_collection_core(slug)
                 score = _score_mint_quality(c)
-                delivered = await _post_nft_alert(client, settings.discord_nft_channel_id, _mint_radar_embed(c, score))
-                if delivered:
-                    await _nft_mint_radar_mark_seen(client, slug)
-                    posted.append(slug)
+                # Anyone can deploy an NFT contract for free, so most
+                # "just created" collections are spam with zero real
+                # activity - only post ones that clear a real quality bar
+                # AND show genuine independent trading/ownership, instead
+                # of flooding the channel with every contract that merely
+                # exists.
+                if _mint_radar_worth_posting(score):
+                    delivered = await _post_nft_alert(client, settings.discord_nft_channel_id, _mint_radar_embed(c, score))
+                    if delivered:
+                        posted.append(slug)
+                # Mark seen regardless - a junk collection doesn't become
+                # worth re-checking every 5 minutes forever, and this caps
+                # OpenSea API usage on the free tier.
+                await _nft_mint_radar_mark_seen(client, slug)
             except HTTPException:
                 continue
             except httpx.HTTPError:
@@ -3321,11 +3346,13 @@ async def nft_poll(request: Request):
         except (httpx.HTTPError, KeyError) as e:
             logger.exception("nft-poll: watchlist alert phase failed")
             alerted, errors = [], errors + [f"watchlist_alerts: {e}"]
-        try:
-            minted = await _nft_mint_radar_scan(client)
-        except (httpx.HTTPError, KeyError) as e:
-            logger.exception("nft-poll: mint radar phase failed")
-            minted, errors = [], errors + [f"mint_radar: {e}"]
+        minted = []
+        if settings.mint_radar_enabled:
+            try:
+                minted = await _nft_mint_radar_scan(client)
+            except (httpx.HTTPError, KeyError) as e:
+                logger.exception("nft-poll: mint radar phase failed")
+                minted, errors = [], errors + [f"mint_radar: {e}"]
         pruned = await _prune_old_snapshots(client)
 
     return {"watchlist_alerts": alerted, "mint_radar_posts": minted, "pruned_old_snapshots": pruned, "errors": errors}

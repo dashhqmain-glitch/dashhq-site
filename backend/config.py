@@ -27,6 +27,16 @@ class Settings(BaseSettings):
     # interleaving them reads fine.
     discord_nft_channel_id: str = ""
 
+    # Mint radar (auto-posting newly-created collections that clear a real
+    # quality bar) was flooding #nft-intel because it posted EVERY newly
+    # seen contract regardless of substance - anyone can deploy an NFT
+    # contract for free, so most "just created" collections are spam.
+    # Fixed by only posting High Potential (6+/8 checks) collections; this
+    # flag stays available as an emergency off-switch if it ever needs to
+    # be silenced again without a redeploy. Watchlist alerts (floor/sweep/
+    # supply) are unaffected either way.
+    mint_radar_enabled: bool = True
+
     # /monitor is opt-in and normally DMs subscribers privately. When set,
     # any event a member has /monitor'd also gets posted here publicly
     # with those members @mentioned - visible even if their DMs are closed,
