@@ -2899,12 +2899,15 @@ async def _cmd_monitor_response(payload: dict, discord_user_id: str) -> dict:
         lifecycle = "Loops - re-alerts roughly hourly for as long as it stays true." if loop_alert else "Fires once, then clears itself."
         embed = {
             "title": f"🎯 Price target set: {c['name']}",
-            "description": f"You'll get a DM once the floor {verb} **{target:.4f} {symbol}** (currently {floor:.4f} {symbol}). {lifecycle}",
+            "description": f"<@{discord_user_id}> will get a DM once the floor {verb} **{target:.4f} {symbol}** (currently {floor:.4f} {symbol}). {lifecycle}",
             "color": EMBED_COLOR_GOOD,
             "thumbnail": {"url": c["image"]} if c.get("image") else None,
             "footer": TOOLKIT_FOOTER,
         }
-        return {"embeds": [_clean_embed(embed)], "flags": 64}
+        # Public on purpose (unlike set/clear/list, which stay ephemeral) -
+        # other members watching the same collection can see what price
+        # points people are actually targeting.
+        return {"embeds": [_clean_embed(embed)]}
 
     embed = {"title": "Unknown subcommand", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
     return {"embeds": [_clean_embed(embed)], "flags": 64}
