@@ -3461,7 +3461,7 @@ def _momentum_points(c: dict, history: list[dict]) -> tuple[int, list[str]]:
     return points, reasons
 
 
-def _nft_scope_score(c: dict, top_offer_amount: float | None, history: list[dict] | None = None) -> dict:
+def _nft_scope_score(c: dict, top_offer_amount: float | None, history: list[dict] | None = None, rapid_activity: dict | None = None) -> dict:
     supply = c.get("totalSupply")
     owners = c.get("owners")
     sales = c.get("sales24h") or 0
@@ -3521,6 +3521,21 @@ def _nft_scope_score(c: dict, top_offer_amount: float | None, history: list[dict
         momentum_points, momentum_reasons = _momentum_points(c, history)
         points += momentum_points
         reasons.extend(momentum_reasons)
+
+    # Rapid activity (0-10) - an early, fast-reacting supplement to the
+    # snapshot-based momentum above, not a replacement or a shortcut
+    # around it. It only ever ADDS points on top of every other check
+    # still running in full (turnover, fake-offer, mandatory real
+    # activity, final wash-check) - a burst of trading never lowers the
+    # bar, it can only raise a score that still has to clear every gate
+    # on its own merits.
+    if rapid_activity:
+        points += 10
+        reasons.append(
+            f"🚀 {rapid_activity['count']} verified sale(s) in the last {rapid_activity['window_minutes']} min "
+            f"from {rapid_activity['unique_buyers']} buyer(s)/{rapid_activity['unique_sellers']} seller(s) - "
+            "activity accelerating right now, not just a 24h number catching up"
+        )
 
     turnover_reason = _detect_abnormal_turnover(c)
     if turnover_reason:
@@ -3686,7 +3701,14 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 15) 
                     continue
                 c = await _nft_collection_core(slug)
                 top_offer_amount = await _nft_scope_top_offer_amount(client, slug, c)
-                score = _nft_scope_score(c, top_offer_amount)
+                # Only spend the extra API call checking for a rapid burst
+                # if the collection already shows SOME real sales - bounds
+                # the added cost to candidates worth the look instead of
+                # every single one of the ~60 scanned per cycle.
+                rapid_activity = None
+                if (c.get("sales24h") or 0) > 0:
+                    rapid_activity = await _detect_rapid_activity(client, slug)
+                score = _nft_scope_score(c, top_offer_amount, rapid_activity=rapid_activity)
                 if (
                     len(posted) < _NFT_SCOPE_MAX_POSTS_PER_CYCLE
                     and _nft_scope_worth_posting(score)
@@ -3728,7 +3750,8 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 15) 
                 if len(history) < _NFT_SCOPE_MOMENTUM_MIN_SNAPSHOTS:
                     continue
                 top_offer_amount = await _nft_scope_top_offer_amount(client, slug, c)
-                score = _nft_scope_score(c, top_offer_amount, history=history)
+                rapid_activity = await _detect_rapid_activity(client, slug) if (c.get("sales24h") or 0) > 0 else None
+                score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity)
                 if _nft_scope_worth_posting(score) and await _nft_scope_clears_wash_check(client, slug):
                     delivered = await _post_channel_message(client, settings.discord_nft_scope_channel_id, _nft_scope_embed(c, score, top_offer_amount, "momentum"))
                     if delivered:
