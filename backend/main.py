@@ -1097,6 +1097,19 @@ async def discord_interactions(request: Request):
     if itype == 1:  # PING — Discord sends this to validate the endpoint URL
         return {"type": 1}
 
+    # Safety net: whatever this specific interaction ends up doing, a bug
+    # anywhere in that path must never leave Discord with no response at
+    # all ("This interaction failed", visible to whoever ran the command) -
+    # always fall back to a clean, ephemeral, generic error instead of a
+    # raw exception bubbling up to FastAPI's default handler.
+    try:
+        return await _dispatch_interaction(payload, itype)
+    except Exception:
+        logger.exception("Unhandled error dispatching Discord interaction (type=%s)", itype)
+        return {"type": 4, "data": {"content": "⚠️ Something went wrong running that. Please try again in a moment.", "flags": 64}}
+
+
+async def _dispatch_interaction(payload: dict, itype) -> dict:
     if itype == 2:  # APPLICATION_COMMAND — a /slash command
         cmd_name = (payload.get("data") or {}).get("name")
         if cmd_name == "history":
@@ -2311,7 +2324,7 @@ _EVM_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 # Chains OpenSea's contract-lookup endpoint is tried against, in priority
 # order, when a member searches by contract address instead of a name.
 # ethereum/base/robinhood first (the chains this community actually mints
-# on, matching _MINT_RADAR_CHAINS), then the rest of what OpenSea covers
+# on, matching _NFT_SCOPE_CHAINS), then the rest of what OpenSea covers
 # as bonus reach.
 _NFT_CONTRACT_LOOKUP_CHAINS = ["ethereum", "base", "robinhood", "matic", "arbitrum", "optimism", "avalanche"]
 
@@ -2440,7 +2453,7 @@ async def _discord_watchlist_list(discord_user_id: str) -> list[dict]:
 # already used by the rest of the toolkit; no paid API involved.
 _NFT_ALERT_COOLDOWN_SECONDS = 3600  # don't re-alert the same collection/type within an hour
 _NFT_FLOOR_CHANGE_THRESHOLD_PCT = 8.0  # minimum floor move (either direction) worth alerting on
-_MINT_RADAR_CHAINS = ["ethereum", "base", "polygon", "robinhood"]
+_NFT_SCOPE_CHAINS = ["ethereum", "base", "polygon", "robinhood"]
 
 
 async def _nft_store_snapshot(client: httpx.AsyncClient, c: dict) -> None:
@@ -2677,8 +2690,8 @@ def _sweep_embed(c: dict, sweep: dict) -> dict:
         "url": c.get("openseaUrl"),
         "description": (
             f"**{sweep['count']}** sales in the last {sweep['windowMinutes']} min, "
-            f"by only **{sweep['uniqueBuyers']}** unique wallet(s) — "
-            f"**{sweep['totalPaid']:.2f} {sweep['symbol']}** total."
+            f"by only **{sweep['uniqueBuyers']}** unique wallet(s) from **{sweep['uniqueSellers']}** "
+            f"different sellers — **{sweep['totalPaid']:.2f} {sweep['symbol']}** total."
         ),
         "color": EMBED_COLOR_BAD,
         "thumbnail": {"url": c["image"]} if c.get("image") else None,
@@ -2687,22 +2700,89 @@ def _sweep_embed(c: dict, sweep: dict) -> dict:
     }
 
 
-async def _detect_sweep(
-    client: httpx.AsyncClient, slug: str, window_seconds: int = 900, min_sales: int = 5, max_buyer_ratio: float = 0.4
-) -> dict | None:
-    # A "sweep": several sales in a short window concentrated in very few
-    # buyer wallets - the signal that separates a sweep from ordinary
-    # organic sales activity (many different buyers) at the same volume.
-    data = await _opensea_get(client, f"/events/collection/{slug}", {"event_type": "sale", "limit": 50})
+async def _fetch_recent_sale_events(client: httpx.AsyncClient, slug: str, window_seconds: int, limit: int = 50) -> list[dict]:
+    data = await _opensea_get(client, f"/events/collection/{slug}", {"event_type": "sale", "limit": limit})
     events = (data or {}).get("asset_events") or []
-    if not events:
-        return None
     now = time.time()
-    recent = [e for e in events if now - (e.get("event_timestamp") or 0) <= window_seconds]
+    return [e for e in events if now - (e.get("event_timestamp") or 0) <= window_seconds]
+
+
+def _analyze_wash_trading(events: list[dict]) -> dict:
+    # A free-data wash-trade heuristic built from raw sale events - not
+    # one check but a small toolkit, each catching a different way real
+    # trading can be faked without needing a paid third-party wash-trade
+    # API:
+    #   (a) direct self-trade - same wallet as buyer and seller on one sale
+    #   (b) reciprocal ping-pong - two wallets flipping the same position
+    #       back and forth
+    #   (c) closed trading cluster - a small set of wallets that ONLY
+    #       ever trade with each other, never an outside counterparty
+    #       (catches 3+ wallet cycles that (a)/(b) alone would miss)
+    #   (d) low token diversity - the same one or two tokens changing
+    #       hands repeatedly instead of distinct items actually moving
+    reasons = []
+    buyers = {e["buyer"] for e in events if e.get("buyer")}
+    sellers = {e["seller"] for e in events if e.get("seller")}
+
+    self_trades = [e for e in events if e.get("buyer") and e.get("buyer") == e.get("seller")]
+    if self_trades:
+        reasons.append(f"{len(self_trades)} sale(s) had the same wallet as buyer and seller")
+
+    edges = {(e["seller"], e["buyer"]) for e in events if e.get("buyer") and e.get("seller") and e["buyer"] != e["seller"]}
+    reciprocal_pairs = {tuple(sorted(pair)) for pair in edges if (pair[1], pair[0]) in edges}
+    if reciprocal_pairs:
+        reasons.append(f"{len(reciprocal_pairs)} wallet pair(s) traded back and forth with each other")
+
+    # A wallet that shows up as BOTH a buyer (some sale) and a seller
+    # (another sale) within the same window is the real tell of
+    # recirculation - a legitimate sweep has purely-buying whales and
+    # purely-selling holders, so this is empty for real activity no
+    # matter how few distinct sellers there are. Without this check,
+    # "closed" below is trivially true for any small wallet count, since
+    # counterparties are always built from the same event set they're
+    # compared against.
+    all_wallets = buyers | sellers
+    recirculating = buyers & sellers
+    if recirculating and 2 <= len(all_wallets) <= 6 and len(events) >= 4:
+        counterparties: dict[str, set] = {}
+        for e in events:
+            b, s = e.get("buyer"), e.get("seller")
+            if not b or not s:
+                continue
+            counterparties.setdefault(b, set()).add(s)
+            counterparties.setdefault(s, set()).add(b)
+        if counterparties and all(cps <= all_wallets for cps in counterparties.values()):
+            reasons.append(f"All {len(all_wallets)} wallet(s) involved only ever traded with each other, never an outside buyer/seller")
+
+    token_ids = [e["nft"]["identifier"] for e in events if isinstance(e.get("nft"), dict) and e["nft"].get("identifier") is not None]
+    if token_ids:
+        unique_tokens = len(set(token_ids))
+        if unique_tokens <= max(1, len(token_ids) // 3):
+            reasons.append(f"Only {unique_tokens} distinct token(s) changed hands across {len(token_ids)} sales - repeatedly flipped, not organic spread")
+
+    return {"suspicious": bool(reasons), "reasons": reasons, "unique_buyers": len(buyers), "unique_sellers": len(sellers)}
+
+
+async def _detect_sweep(
+    client: httpx.AsyncClient, slug: str, window_seconds: int = 900, min_sales: int = 5,
+    max_buyer_ratio: float = 0.4, min_seller_ratio: float = 0.3,
+) -> dict | None:
+    # A real sweep: several sales in a short window, concentrated in very
+    # few buyer wallets, bought from MANY DIFFERENT sellers (the existing
+    # holders whose floor listings just got scooped). Wash trading can
+    # fake the same "few buyers, many sales" shape without a real sweep
+    # ever happening - _analyze_wash_trading screens that out instead of
+    # presenting it as a bullish signal.
+    recent = await _fetch_recent_sale_events(client, slug, window_seconds)
     if len(recent) < min_sales:
         return None
     buyers = {e["buyer"] for e in recent if e.get("buyer")}
+    sellers = {e["seller"] for e in recent if e.get("seller")}
     if not buyers or len(buyers) / len(recent) > max_buyer_ratio:
+        return None
+    if not sellers or len(sellers) / len(recent) < min_seller_ratio:
+        return None
+    if _analyze_wash_trading(recent)["suspicious"]:
         return None
     payments = [e["payment"] for e in recent if e.get("payment")]
     if not payments:
@@ -2712,6 +2792,7 @@ async def _detect_sweep(
     return {
         "count": len(recent),
         "uniqueBuyers": len(buyers),
+        "uniqueSellers": len(sellers),
         "totalPaid": total_paid,
         "symbol": payments[0].get("symbol", "ETH"),
         "windowMinutes": window_seconds // 60,
@@ -3169,69 +3250,9 @@ async def _nft_poll_watchlist_alerts(client: httpx.AsyncClient) -> list[str]:
     return alerted
 
 
-def _score_mint_quality(c: dict) -> dict:
-    # Explicit, on-chain/OpenSea-only checklist - no socials, no paid data.
-    # Every check is labeled so citizens see exactly why a mint was flagged,
-    # same philosophy as the /rug checklist. Thresholds are a starting
-    # point, not a guarantee - tune freely once real mints have run through it.
-    supply = c.get("totalSupply")
-    owners = c.get("owners")
-    checks = [
-        {"label": "Has a website, X, or Discord link", "pass": bool(c.get("twitter") or c.get("discord") or c.get("website"))},
-        {"label": "Has a real description", "pass": len(c.get("description") or "") >= 40},
-        {"label": "Has recorded sales", "pass": (c.get("sales24h") or 0) > 0},
-        {"label": "Floor price is set", "pass": (c.get("floor") or 0) > 0},
-        {"label": "At least 5 unique owners", "pass": (owners or 0) >= 5},
-        {"label": "Plausible supply size (2-100k)", "pass": supply is not None and 1 < supply <= 100_000},
-        {"label": "Not single-wallet concentrated", "pass": bool(supply and owners and owners / supply >= 0.1)},
-        {"label": "OpenSea category assigned", "pass": bool(c.get("category"))},
-    ]
-    passed = sum(1 for ch in checks if ch["pass"])
-    if passed >= 6:
-        verdict, color = "🔥 High Potential", EMBED_COLOR_GOOD
-    elif passed >= 3:
-        verdict, color = "👀 Worth Watching", EMBED_COLOR_WARN
-    else:
-        verdict, color = "🚮 Likely Junk", EMBED_COLOR_BAD
-    return {"checks": checks, "passed": passed, "total": len(checks), "verdict": verdict, "color": color}
-
-
-def _mint_radar_worth_posting(score: dict) -> bool:
-    # A high overall score alone isn't enough to trust - a single
-    # self-mint wash-trade can cheaply fake "floor is set" and even
-    # "not single-wallet concentrated" (low supply, 1 owner still clears
-    # a >=10% ratio). "Has recorded sales" and "5+ unique owners" are the
-    # two signals that genuinely require independent third parties to
-    # act, which is what actually separates a real early mint from a
-    # scam pretending to be one - both are mandatory on top of the 6/8
-    # overall bar, not just contributors to it.
-    if score["passed"] < 6:
-        return False
-    by_label = {ch["label"]: ch["pass"] for ch in score["checks"]}
-    return bool(by_label.get("Has recorded sales") and by_label.get("At least 5 unique owners"))
-
-
-def _mint_radar_embed(c: dict, score: dict) -> dict:
-    checklist = "\n".join(f"{'✅' if ch['pass'] else '❌'} {ch['label']}" for ch in score["checks"])
-    fields = [
-        {"name": "Floor", "value": f"{c['floor']:.3f} {c['symbol']}" if c.get("floor") is not None else "-", "inline": True},
-        {"name": "Supply", "value": f"{c['totalSupply']:,}" if c.get("totalSupply") is not None else "-", "inline": True},
-        {"name": "Owners", "value": f"{c['owners']:,}" if c.get("owners") is not None else "-", "inline": True},
-        {"name": "Chain", "value": (c.get("chain") or "-").title(), "inline": True},
-    ]
-    return {
-        "title": f"{score['verdict']} — {c['name']}",
-        "url": c.get("openseaUrl"),
-        "description": f"{checklist}\n\n**{score['passed']}/{score['total']} checks passed**",
-        "color": score["color"],
-        "fields": fields,
-        "thumbnail": {"url": c["image"]} if c.get("image") else None,
-        "footer": {"text": f"{TOOLKIT_FOOTER['text']} · Mint Radar"},
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
-
-
 async def _nft_mint_radar_seen_has(client: httpx.AsyncClient, slug: str) -> bool:
+    # Table name predates the "NFT Scope" rename - kept as-is to avoid an
+    # unnecessary migration for a purely cosmetic reason.
     res = await client.get(
         f"{settings.supabase_url}/rest/v1/nft_mint_radar_seen",
         headers=_supabase_headers(),
@@ -3249,10 +3270,239 @@ async def _nft_mint_radar_mark_seen(client: httpx.AsyncClient, slug: str) -> Non
     )
 
 
-async def _nft_mint_radar_scan(client: httpx.AsyncClient, per_chain_limit: int = 15) -> list[str]:
-    posted = []
-    for chain in _MINT_RADAR_CHAINS:
-        data = await _opensea_get(client, "/collections", {"order_by": "created_date", "limit": per_chain_limit, "chain": chain})
+# ── NFT Scope — weighted signal model, not a pass/fail checklist ───────────
+#
+# Honest scope note (read before tuning): this is a heuristic model built
+# from documented, widely-understood NFT market dynamics - real trading
+# requires an independent third party to act, wash-traded/planted signals
+# are cheap to fake individually but hard to fake ALL of at once, and a
+# trend sustained across many snapshots is far more meaningful than a
+# single noisy data point. It is NOT a model trained or backtested against
+# a historical dataset of "which projects actually mooned" - no such
+# labeled dataset exists in this system, and building one is out of scope
+# for a free-tier bot. This is the strongest signal set achievable from
+# free OpenSea data, not a crystal ball. Every post carries NFA.
+
+# Three posting tiers, not a single pass/fail bar - every post is grouped
+# by intensity/risk/certainty of the underlying signals, always framed as
+# risk (never as a promise):
+#   🟢 green  85-100  strongest signal set achievable from free data
+#   🟡 yellow  70-84  solid signals, real but less complete
+#   🔴 red     50-69  genuinely speculative - the "could still cook" tier,
+#                     still verified clean (wash-trade + fake-offer gates
+#                     apply to every tier), just thinner evidence
+# Below 50, or anything blocked by a manipulation red flag, never posts -
+# that's not a fourth tier, that's "not enough to say anything useful."
+_NFT_SCOPE_RED_THRESHOLD = 50
+_NFT_SCOPE_YELLOW_THRESHOLD = 70
+_NFT_SCOPE_GREEN_THRESHOLD = 85
+_NFT_SCOPE_MAX_POSTS_PER_CYCLE = 3   # hard cap across BOTH passes below - conviction over volume
+_NFT_SCOPE_MOMENTUM_MIN_SNAPSHOTS = 6   # ~30 min of history minimum before trusting a trend
+_NFT_SCOPE_MOMENTUM_SCAN_LIMIT = 25  # bounds OpenSea API usage even when nothing qualifies
+
+
+def _detect_fake_offer(c: dict, top_offer_amount: float | None) -> str | None:
+    # A genuinely eager buyer wanting a collection badly enough to bid
+    # multiples over floor would usually just buy AT floor instead of
+    # leaving a phantom high bid nobody's filling - a huge offer/floor
+    # gap with zero recorded sales AND zero volume is the classic "plant
+    # a fake top offer to look hot" pattern. Deliberately conservative
+    # (a single fake sale could still slip past this) - it catches the
+    # cheap, common version of the trick, not every possible one.
+    floor = c.get("floor")
+    if top_offer_amount is None or not floor or floor <= 0:
+        return None
+    ratio = top_offer_amount / floor
+    sales = c.get("sales24h") or 0
+    vol1d = c.get("vol1d") or 0
+    if ratio >= 4.0 and sales == 0 and vol1d <= 0:
+        return f"Top offer is {ratio:.1f}x floor with zero recorded sales/volume backing it - reads like a planted offer, not real demand"
+    return None
+
+
+def _momentum_points(c: dict, history: list[dict]) -> tuple[int, str | None]:
+    # history is newest-first (captured_at desc). Requires a MAJORITY of
+    # recent consecutive moves to be upward, not just an endpoint-to-
+    # endpoint comparison - a single spike surrounded by noise shouldn't
+    # read as "trending."
+    floors = [h["floor"] for h in history if h.get("floor") is not None]
+    if c.get("floor") is not None:
+        floors = [c["floor"]] + floors
+    if len(floors) < _NFT_SCOPE_MOMENTUM_MIN_SNAPSHOTS:
+        return 0, None
+    deltas = [floors[i] - floors[i + 1] for i in range(len(floors) - 1)]
+    if not deltas:
+        return 0, None
+    up = sum(1 for d in deltas if d > 0)
+    oldest = floors[-1]
+    if up >= len(deltas) * 0.7 and oldest > 0 and floors[0] > oldest * 1.05:
+        pct = (floors[0] - oldest) / oldest * 100
+        return 20, f"Floor trending up {pct:.0f}% over the last {len(floors)} snapshots ({up}/{len(deltas)} moves upward, not just one spike)"
+    return 0, None
+
+
+def _nft_scope_score(c: dict, top_offer_amount: float | None, history: list[dict] | None = None) -> dict:
+    supply = c.get("totalSupply")
+    owners = c.get("owners")
+    sales = c.get("sales24h") or 0
+    vol1d = c.get("vol1d") or 0
+    floor = c.get("floor") or 0
+
+    reasons: list[str] = []
+    red_flags: list[str] = []
+    points = 0
+
+    # Distribution health (0-25)
+    if owners is not None and owners >= 5:
+        points += 10
+    if supply and owners and supply > 0:
+        ratio = owners / supply
+        if ratio >= 0.5:
+            points += 15
+            reasons.append(f"Healthy distribution - {owners} owners across {supply} supply ({ratio:.0%})")
+        elif ratio >= 0.2:
+            points += 10
+            reasons.append(f"Solid distribution - {owners} owners across {supply} supply ({ratio:.0%})")
+        elif ratio >= 0.1:
+            points += 5
+        else:
+            red_flags.append(f"Concentrated ownership - only {ratio:.0%} owner-to-supply ratio")
+
+    # Trading authenticity (0-25)
+    if sales > 0:
+        points += 15
+        reasons.append(f"{sales} independently recorded sale(s) in the last 24h")
+    if floor > 0:
+        points += 5
+    fake_offer_reason = _detect_fake_offer(c, top_offer_amount)
+    if fake_offer_reason:
+        red_flags.append(fake_offer_reason)
+    elif top_offer_amount is not None and floor > 0 and top_offer_amount >= floor:
+        points += 5
+        reasons.append("Top offer sitting at or above floor - genuine buy-side pressure")
+
+    # Project substance (0-20)
+    if c.get("twitter") or c.get("discord") or c.get("website"):
+        points += 5
+    if len(c.get("description") or "") >= 40:
+        points += 5
+    if c.get("category"):
+        points += 5
+    if c.get("verified"):
+        points += 5
+        reasons.append("OpenSea-verified collection")
+
+    # Supply sanity (0-10)
+    if supply is not None and 1 < supply <= 100_000:
+        points += 10
+
+    # Momentum (0-20, only when there's enough tracked history to trust)
+    if history:
+        momentum_points, momentum_reason = _momentum_points(c, history)
+        points += momentum_points
+        if momentum_reason:
+            reasons.append(momentum_reason)
+
+    # A detected fake offer is a manipulation signal, not a minor
+    # deduction - never recommend regardless of how high the rest of the
+    # score is.
+    blocked = fake_offer_reason is not None
+
+    if points >= _NFT_SCOPE_GREEN_THRESHOLD:
+        tier, risk_tier = "green", "🟢 Strongest Signals (Still High Risk)"
+    elif points >= _NFT_SCOPE_YELLOW_THRESHOLD:
+        tier, risk_tier = "yellow", "🟡 Moderate Signals (High Risk)"
+    elif points >= _NFT_SCOPE_RED_THRESHOLD:
+        tier, risk_tier = "red", "🔴 Speculative (Very High Risk)"
+    else:
+        tier, risk_tier = "none", "⚪ Not Enough Signal"
+
+    return {"score": points, "reasons": reasons, "red_flags": red_flags, "risk_tier": risk_tier, "tier": tier, "blocked": blocked}
+
+
+def _nft_scope_worth_posting(score: dict) -> bool:
+    return score["tier"] in ("green", "yellow", "red") and not score["blocked"]
+
+
+def _nft_scope_embed(c: dict, score: dict, top_offer_amount: float | None, kind: str) -> dict:
+    symbol = c.get("symbol") or "ETH"
+    title_prefix = "🧭 NFT Scope · New Mint" if kind == "fresh" else "🧭 NFT Scope · Momentum Building"
+    lines = [f"**{score['score']}/100** · {score['risk_tier']}"]
+    if score["reasons"]:
+        lines.append("")
+        lines.append("**Why it's on the radar**")
+        lines += [f"• {r}" for r in score["reasons"][:5]]
+    if score["red_flags"]:
+        lines.append("")
+        lines.append("**Worth noting**")
+        lines += [f"⚠️ {f}" for f in score["red_flags"]]
+    lines.append("")
+    lines.append("*Heuristic read from public OpenSea/on-chain data - not financial advice. DYOR before any trade. NFA.*")
+
+    top_offer_text = "-"
+    if top_offer_amount is not None:
+        top_offer_text = f"{top_offer_amount:.4f} {c.get('offerSymbol') or symbol}"
+    fields = [
+        {"name": "Floor", "value": f"{floor:.4f} {symbol}" if (floor := c.get("floor")) is not None else "-", "inline": True},
+        {"name": "Top Offer", "value": top_offer_text, "inline": True},
+        {"name": "Owners / Supply", "value": f"{c.get('owners') if c.get('owners') is not None else '-'} / {c.get('totalSupply') if c.get('totalSupply') is not None else '-'}", "inline": True},
+    ]
+    return {
+        "title": f"{title_prefix} — {c['name']}",
+        "url": c.get("openseaUrl"),
+        "description": "\n".join(lines),
+        "color": {"green": EMBED_COLOR_GOOD, "yellow": EMBED_COLOR_WARN, "red": EMBED_COLOR_BAD}.get(score["tier"], EMBED_COLOR_WARN),
+        "fields": fields,
+        "thumbnail": {"url": c["image"]} if c.get("image") else None,
+        "footer": {"text": f"{TOOLKIT_FOOTER['text']} · NFT Scope"},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def _nft_scope_clears_wash_check(client: httpx.AsyncClient, slug: str) -> bool:
+    # Only called once a candidate already cleared the score bar (cheap
+    # filters first, this extra API call last) - OpenSea's own sales24h
+    # count doesn't distinguish organic sales from a wash-trading ring,
+    # so a collection can clear every other check on inflated numbers.
+    # Fails open (treats as clean) on a fetch error rather than silently
+    # blocking every post whenever OpenSea hiccups.
+    try:
+        recent = await _fetch_recent_sale_events(client, slug, window_seconds=86400, limit=50)
+    except httpx.HTTPError:
+        return True
+    if not recent:
+        return True
+    return not _analyze_wash_trading(recent)["suspicious"]
+
+
+async def _nft_scope_top_offer_amount(client: httpx.AsyncClient, slug: str, c: dict) -> float | None:
+    try:
+        top_offer_raw = await _opensea_get_top_offer(client, slug)
+    except httpx.HTTPError:
+        return None
+    if top_offer_raw is None or c.get("offerDecimals") is None:
+        return None
+    try:
+        return top_offer_raw / (10 ** c["offerDecimals"])
+    except (TypeError, ZeroDivisionError, OverflowError):
+        return None
+
+
+async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 15) -> list[str]:
+    posted: list[str] = []
+
+    # ── Pass 1: fresh mints across the chains this community mints on ──
+    # The posts-per-cycle cap must only gate the actual Discord POST, not
+    # the scan/mark-seen bookkeeping - stopping the whole scan the moment
+    # the cap is hit would leave every later candidate unscanned AND
+    # unmarked, so the exact same backlog gets re-evaluated (and likely
+    # re-capped) every single cycle without ever making progress through
+    # the full candidate list.
+    for chain in _NFT_SCOPE_CHAINS:
+        try:
+            data = await _opensea_get(client, "/collections", {"order_by": "created_date", "limit": per_chain_limit, "chain": chain})
+        except httpx.HTTPError:
+            continue
         collections = (data or {}).get("collections") or []
         for raw in collections:
             slug = raw.get("collection")
@@ -3262,26 +3512,61 @@ async def _nft_mint_radar_scan(client: httpx.AsyncClient, per_chain_limit: int =
                 if await _nft_mint_radar_seen_has(client, slug):
                     continue
                 c = await _nft_collection_core(slug)
-                score = _score_mint_quality(c)
-                # Anyone can deploy an NFT contract for free, so most
-                # "just created" collections are spam with zero real
-                # activity - only post ones that clear a real quality bar
-                # AND show genuine independent trading/ownership, instead
-                # of flooding the channel with every contract that merely
-                # exists.
-                if _mint_radar_worth_posting(score):
-                    delivered = await _post_nft_alert(client, settings.discord_nft_channel_id, _mint_radar_embed(c, score))
+                top_offer_amount = await _nft_scope_top_offer_amount(client, slug, c)
+                score = _nft_scope_score(c, top_offer_amount)
+                if (
+                    len(posted) < _NFT_SCOPE_MAX_POSTS_PER_CYCLE
+                    and _nft_scope_worth_posting(score)
+                    and await _nft_scope_clears_wash_check(client, slug)
+                ):
+                    delivered = await _post_channel_message(client, settings.discord_nft_scope_channel_id, _nft_scope_embed(c, score, top_offer_amount, "fresh"))
                     if delivered:
                         posted.append(slug)
-                # Mark seen regardless - a junk collection doesn't become
-                # worth re-checking every 5 minutes forever, and this caps
-                # OpenSea API usage on the free tier.
+                # Mark seen regardless of score or whether the post cap
+                # was already hit - a weak collection doesn't become
+                # worth re-checking every 5 minutes forever, and a strong
+                # one that lost out to the cap this cycle shouldn't be
+                # re-scored and re-queued every cycle after either.
                 await _nft_mint_radar_mark_seen(client, slug)
             except HTTPException:
                 continue
-            except httpx.HTTPError:
-                logger.exception("nft-poll: mint radar failed for %s", slug)
+            except (httpx.HTTPError, KeyError, ZeroDivisionError, TypeError):
+                logger.exception("nft-scope: fresh-mint check failed for %s", slug)
                 continue
+
+    # ── Pass 2: momentum on collections already being tracked (/watchlist
+    # or /monitor), which is the only source of the snapshot history this
+    # needs - an "old project about to cook" call is only as good as the
+    # trend data behind it. ──
+    if len(posted) < _NFT_SCOPE_MAX_POSTS_PER_CYCLE:
+        try:
+            tracked_slugs = (await _nft_poll_tracked_slugs(client))[:_NFT_SCOPE_MOMENTUM_SCAN_LIMIT]
+        except httpx.HTTPError:
+            tracked_slugs = []
+        for slug in tracked_slugs:
+            if len(posted) >= _NFT_SCOPE_MAX_POSTS_PER_CYCLE:
+                break
+            try:
+                state = await _nft_alert_state_get(client, slug, "nft_scope_momentum")
+                if not _nft_alert_cooled_down(state):
+                    continue
+                c = await _nft_collection_core(slug)
+                history = await _nft_recent_snapshots(client, slug, limit=30)
+                if len(history) < _NFT_SCOPE_MOMENTUM_MIN_SNAPSHOTS:
+                    continue
+                top_offer_amount = await _nft_scope_top_offer_amount(client, slug, c)
+                score = _nft_scope_score(c, top_offer_amount, history=history)
+                if _nft_scope_worth_posting(score) and await _nft_scope_clears_wash_check(client, slug):
+                    delivered = await _post_channel_message(client, settings.discord_nft_scope_channel_id, _nft_scope_embed(c, score, top_offer_amount, "momentum"))
+                    if delivered:
+                        await _nft_alert_state_set(client, slug, "nft_scope_momentum", c.get("floor") or 0)
+                        posted.append(slug)
+            except HTTPException:
+                continue
+            except (httpx.HTTPError, KeyError, ZeroDivisionError, TypeError):
+                logger.exception("nft-scope: momentum check failed for %s", slug)
+                continue
+
     return posted
 
 
@@ -3289,19 +3574,13 @@ def _nft_channel_explainer_embed() -> dict:
     return {
         "title": "📌 How this channel works",
         "description": (
-            "Everything here is automated, posted every ~5 minutes. Two kinds of posts:\n\n"
-            "**Watchlist alerts** (for anything on anyone's `/watchlist`):\n"
+            "Everything here is automated, posted every ~5 minutes - watchlist alerts for "
+            "anything on anyone's `/watchlist`:\n\n"
             "✂️ **Supply Cut** — total supply just went down (burn, reveal, etc).\n"
-            "📈 **Volume Spike** — 24h volume is running well above its recent average.\n"
+            "📈 **Floor Change** — floor price moved meaningfully, up or down.\n"
+            "📊 **Volume Spike** — 24h volume is running well above its recent average.\n"
             "🧹 **Possible Sweep** — several sales in a short window, concentrated in very few wallets.\n"
             "Don't see a collection here? Add it with `/watchlist add`.\n\n"
-            "**Mint radar** (fully automatic, no opt-in needed):\n"
-            "New collections on Ethereum, Base, Polygon and Robinhood Chain are scored against an "
-            "8-point on-chain checklist (real links, real sales, floor set, healthy owner spread, "
-            "plausible supply, etc):\n"
-            "🔥 **High Potential** — 6-8/8 checks passed.\n"
-            "👀 **Worth Watching** — 3-5/8 checks passed.\n"
-            "🚮 **Likely Junk** — 0-2/8 checks passed.\n\n"
             "Nothing here is financial advice — these are automated, on-chain signals only."
         ),
         "color": EMBED_COLOR,
@@ -3388,16 +3667,16 @@ async def nft_poll(request: Request):
         except (httpx.HTTPError, KeyError) as e:
             logger.exception("nft-poll: watchlist alert phase failed")
             alerted, errors = [], errors + [f"watchlist_alerts: {e}"]
-        minted = []
-        if settings.mint_radar_enabled:
+        scoped = []
+        if settings.nft_scope_enabled:
             try:
-                minted = await _nft_mint_radar_scan(client)
+                scoped = await _nft_scope_scan(client)
             except (httpx.HTTPError, KeyError) as e:
-                logger.exception("nft-poll: mint radar phase failed")
-                minted, errors = [], errors + [f"mint_radar: {e}"]
+                logger.exception("nft-poll: NFT Scope phase failed")
+                scoped, errors = [], errors + [f"nft_scope: {e}"]
         pruned = await _prune_old_snapshots(client)
 
-    return {"watchlist_alerts": alerted, "mint_radar_posts": minted, "pruned_old_snapshots": pruned, "errors": errors}
+    return {"watchlist_alerts": alerted, "nft_scope_posts": scoped, "pruned_old_snapshots": pruned, "errors": errors}
 
 
 @app.get("/toolkit/nft-discover")

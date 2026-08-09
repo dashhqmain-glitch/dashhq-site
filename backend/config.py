@@ -20,22 +20,21 @@ class Settings(BaseSettings):
     discord_public_key: str = ""
     discord_applications_channel_id: str = ""
     discord_invite_channel_id: str = ""  # channel accepted citizens land in
-    # One shared channel for everything NFT-automated: supply cut / sweep /
-    # volume spike alerts AND new-mint radar posts. Kept as a single
-    # channel on purpose - fewer channels to manage in the server, and the
-    # embeds are already visually distinct (different emoji/colors) so
-    # interleaving them reads fine.
+    # Watchlist alerts channel: supply cut / sweep / volume spike / floor
+    # move posts for anything on anyone's /watchlist.
     discord_nft_channel_id: str = ""
 
-    # Mint radar (auto-posting newly-created collections that clear a real
-    # quality bar) was flooding #nft-intel because it posted EVERY newly
-    # seen contract regardless of substance - anyone can deploy an NFT
-    # contract for free, so most "just created" collections are spam.
-    # Fixed by only posting High Potential (6+/8 checks) collections; this
-    # flag stays available as an emergency off-switch if it ever needs to
-    # be silenced again without a redeploy. Watchlist alerts (floor/sweep/
-    # supply) are unaffected either way.
-    mint_radar_enabled: bool = True
+    # NFT Scope (formerly "mint radar") - a separate, deliberately
+    # selective feed: a weighted scoring model (not a pass/fail checklist)
+    # that studies genuine trading signals, actively screens out faked
+    # top-offer manipulation, and covers both fresh mints AND already-
+    # tracked collections showing real breakout momentum. Posts to its
+    # own channel/server, fully decoupled from discord_nft_channel_id
+    # above - empty means no posts anywhere (safe default) until a
+    # channel is actually configured. nft_scope_enabled stays available
+    # as an emergency off-switch without a redeploy.
+    discord_nft_scope_channel_id: str = ""
+    nft_scope_enabled: bool = True
 
     # /monitor is opt-in and normally DMs subscribers privately. When set,
     # any event a member has /monitor'd also gets posted here publicly
