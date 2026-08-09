@@ -464,6 +464,26 @@ async def register_discord_commands(request: Request):
     return {"registered": len(registered), "commands": [c["name"] for c in registered]}
 
 
+@app.get("/cron/test-dm")
+async def test_dm(request: Request, user_id: str = Query(..., min_length=1, max_length=32)):
+    # Admin-only preview tool, same shared-secret gate as every other
+    # /cron endpoint - lets a real DM be sent on demand to check how an
+    # alert actually renders in Discord, without waiting for a live poll
+    # cycle to trigger one for real.
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not settings.discord_bot_token:
+        raise HTTPException(status_code=500, detail="Discord bot env vars not fully configured")
+
+    sample_c = {"name": "Azuki", "slug": "azuki", "symbol": "ETH", "floor": 0.0289, "openseaUrl": "https://opensea.io/collection/azuki"}
+    embed = _price_target_embed(sample_c, target=0.03, direction="below", loop_alert=False)
+    embed["footer"]["text"] += " · Test DM, not a real alert"
+    async with httpx.AsyncClient(timeout=10) as client:
+        delivered = await _discord_dm(client, user_id, embed, content=f"🎯 {embed['title']} (this is a test DM)")
+    return {"delivered": delivered}
+
+
 # ── Pidgin AutoMod setup (one-time / re-run-on-change) ──────────────────────
 # English-only enforcement in #general via Discord's native AutoMod - free,
 # no persistent bot connection needed. Everything else in this backend is
