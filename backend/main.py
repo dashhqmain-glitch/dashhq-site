@@ -3412,6 +3412,22 @@ def _nft_scope_score(c: dict, top_offer_amount: float | None, history: list[dict
     # score is.
     blocked = fake_offer_reason is not None
 
+    # A description, social links, a category, even a listed floor price
+    # cost a scammer nothing to fake and don't require a single other
+    # person to act - independently verified trading (a real completed
+    # sale, from a real spread of owners) is the one thing that can't be
+    # written into a mint page. Without it there's no market validation
+    # at all yet, no matter how polished everything else looks - this is
+    # a hard requirement for every tier, not just a scoring contributor,
+    # so a freshly-launched mint with $0 volume can never be recommended
+    # on soft signals alone.
+    has_real_activity = sales > 0 and (owners or 0) >= 5
+    if not has_real_activity:
+        red_flags.append(
+            f"No independently verified trading yet ({sales} sale(s) in 24h, "
+            f"{owners if owners is not None else 0} owner(s)) - nothing here has been market-tested"
+        )
+
     if points >= _NFT_SCOPE_GREEN_THRESHOLD:
         tier, risk_tier = "green", "🟢 Strongest Signals (Still High Risk)"
     elif points >= _NFT_SCOPE_YELLOW_THRESHOLD:
@@ -3421,11 +3437,14 @@ def _nft_scope_score(c: dict, top_offer_amount: float | None, history: list[dict
     else:
         tier, risk_tier = "none", "⚪ Not Enough Signal"
 
-    return {"score": points, "reasons": reasons, "red_flags": red_flags, "risk_tier": risk_tier, "tier": tier, "blocked": blocked}
+    return {
+        "score": points, "reasons": reasons, "red_flags": red_flags, "risk_tier": risk_tier,
+        "tier": tier, "blocked": blocked, "has_real_activity": has_real_activity,
+    }
 
 
 def _nft_scope_worth_posting(score: dict) -> bool:
-    return score["tier"] in ("green", "yellow", "red") and not score["blocked"]
+    return score["tier"] in ("green", "yellow", "red") and not score["blocked"] and score["has_real_activity"]
 
 
 def _nft_scope_embed(c: dict, score: dict, top_offer_amount: float | None, kind: str) -> dict:
