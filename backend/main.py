@@ -3231,12 +3231,26 @@ async def _nft_poll_watchlist_alerts(client: httpx.AsyncClient) -> list[str]:
                     if avg > 0 and c["vol1d"] >= avg * 2.5:
                         state = await _nft_alert_state_get(client, slug, "volume_spike")
                         if _nft_alert_cooled_down(state):
-                            embed = _volume_spike_embed(c, avg)
-                            delivered = await _post_nft_alert(client, settings.discord_nft_channel_id, embed)
-                            if delivered:
-                                await _nft_alert_state_set(client, slug, "volume_spike", c["vol1d"])
-                                await _dm_subscribers(client, slug, "volume_spike", embed)
-                                alerted.append(f"{slug}:volume_spike")
+                            # A spike is only worth a call-out if the trades
+                            # behind it are real - same wash-trade module
+                            # used for sweeps and NFT Scope, applied here
+                            # too so an inflated number doesn't get
+                            # presented as organic demand. Fails open on a
+                            # fetch error rather than silently swallowing a
+                            # real spike over an OpenSea hiccup.
+                            wash_tainted = False
+                            try:
+                                recent_events = await _fetch_recent_sale_events(client, slug, window_seconds=86400)
+                                wash_tainted = bool(recent_events) and _analyze_wash_trading(recent_events)["suspicious"]
+                            except httpx.HTTPError:
+                                pass
+                            if not wash_tainted:
+                                embed = _volume_spike_embed(c, avg)
+                                delivered = await _post_nft_alert(client, settings.discord_nft_channel_id, embed)
+                                if delivered:
+                                    await _nft_alert_state_set(client, slug, "volume_spike", c["vol1d"])
+                                    await _dm_subscribers(client, slug, "volume_spike", embed)
+                                    alerted.append(f"{slug}:volume_spike")
 
             sweep = await _detect_sweep(client, slug)
             if sweep:
