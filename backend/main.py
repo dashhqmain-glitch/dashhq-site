@@ -3371,6 +3371,41 @@ def _detect_fake_offer(c: dict, top_offer_amount: float | None) -> str | None:
     return None
 
 
+def _detect_abnormal_turnover(c: dict) -> str | None:
+    # A large wallet-graph wash-trading operation (dozens+ of sybil
+    # wallets, many different token IDs) can dodge the pairwise/cluster/
+    # token-diversity checks in _analyze_wash_trading entirely, since
+    # those are built to catch a SMALL colluding ring, not a big one.
+    # But it can't hide the arithmetic: real collections essentially
+    # never see a large fraction of their entire supply change hands in
+    # a single day, and they don't see current holders each flip their
+    # token multiple times in a day either. A collection where 24h sales
+    # approach or exceed its own supply, or run far ahead of its current
+    # owner count, is trading against itself no matter how many distinct
+    # wallets are involved.
+    sales = c.get("sales24h") or 0
+    if sales <= 0:
+        return None
+    supply = c.get("totalSupply")
+    if supply and supply > 0:
+        turnover = sales / supply
+        if turnover >= 0.4:
+            return (
+                f"{sales} sales against only {supply} total supply ({turnover:.0%} of the entire "
+                "collection changed hands in 24h) - real collections don't turn over like this; "
+                "this is the signature of scripted wash trading, not genuine demand"
+            )
+    owners = c.get("owners")
+    if owners and owners > 0:
+        flips_per_owner = sales / owners
+        if flips_per_owner >= 5:
+            return (
+                f"{sales} sales across only {owners} current owners (~{flips_per_owner:.1f} flips per "
+                "holder in 24h) - way beyond organic trading, looks like scripted churn among a small set of wallets"
+            )
+    return None
+
+
 def _trend_up(values: list[float], min_len: int) -> tuple[bool, float]:
     # Requires a MAJORITY of recent consecutive moves to be upward, not
     # just an endpoint-to-endpoint comparison - a single spike surrounded
@@ -3487,10 +3522,16 @@ def _nft_scope_score(c: dict, top_offer_amount: float | None, history: list[dict
         points += momentum_points
         reasons.extend(momentum_reasons)
 
-    # A detected fake offer is a manipulation signal, not a minor
-    # deduction - never recommend regardless of how high the rest of the
-    # score is.
-    blocked = fake_offer_reason is not None
+    turnover_reason = _detect_abnormal_turnover(c)
+    if turnover_reason:
+        red_flags.append(turnover_reason)
+
+    # A detected fake offer or an abnormal supply/owner turnover is a
+    # manipulation signal, not a minor deduction - never recommend
+    # regardless of how high the rest of the score is (both can otherwise
+    # produce a HIGH score, since "lots of sales" and "many owners" are
+    # exactly what those numbers look like from the outside).
+    blocked = fake_offer_reason is not None or turnover_reason is not None
 
     # A description, social links, a category, even a listed floor price
     # cost a scammer nothing to fake and don't require a single other
@@ -3559,6 +3600,35 @@ def _nft_scope_embed(c: dict, score: dict, top_offer_amount: float | None, kind:
         "thumbnail": {"url": c["image"]} if c.get("image") else None,
         "footer": {"text": f"{TOOLKIT_FOOTER['text']} · NFT Scope"},
         "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+_NFT_SCOPE_RAPID_WINDOW_SECONDS = 1800  # 30 min - reacts to a sweep/burst as it happens, not after a 24h aggregate catches up
+_NFT_SCOPE_RAPID_MIN_SALES = 3
+
+
+async def _detect_rapid_activity(client: httpx.AsyncClient, slug: str) -> dict | None:
+    # A 24h volume figure or a multi-snapshot trend both take time to
+    # build up - by the time either shows anything, an early sweep is
+    # already over. This looks at raw sale events in a short window
+    # instead, so a burst of genuine buying gets caught within the same
+    # poll cycle it starts in, verified through the same wash-trade
+    # module as everything else (a burst that's just self-trading isn't
+    # an early signal, it's noise).
+    try:
+        recent = await _fetch_recent_sale_events(client, slug, window_seconds=_NFT_SCOPE_RAPID_WINDOW_SECONDS)
+    except httpx.HTTPError:
+        return None
+    if len(recent) < _NFT_SCOPE_RAPID_MIN_SALES:
+        return None
+    analysis = _analyze_wash_trading(recent)
+    if analysis["suspicious"]:
+        return None
+    return {
+        "count": len(recent),
+        "unique_buyers": analysis["unique_buyers"],
+        "unique_sellers": analysis["unique_sellers"],
+        "window_minutes": _NFT_SCOPE_RAPID_WINDOW_SECONDS // 60,
     }
 
 
