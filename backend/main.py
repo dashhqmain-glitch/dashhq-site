@@ -2461,6 +2461,7 @@ async def _check_price_alerts(client: httpx.AsyncClient, slug: str, c: dict) -> 
         # Table may not exist yet if schema.sql hasn't been re-run.
         return
 
+    fired_user_ids = []
     for row in rows:
         target = row["target_price"]
         direction = row["direction"]
@@ -2477,6 +2478,7 @@ async def _check_price_alerts(client: httpx.AsyncClient, slug: str, c: dict) -> 
         delivered = await _discord_dm(client, row["discord_user_id"], embed, content=f"🎯 {embed['title']}")
         if not delivered:
             continue
+        fired_user_ids.append(row["discord_user_id"])
         match_params = {"discord_user_id": f"eq.{row['discord_user_id']}", "slug": f"eq.{slug}", "target_price": f"eq.{target}"}
         if is_loop:
             await client.patch(
@@ -2495,6 +2497,24 @@ async def _check_price_alerts(client: httpx.AsyncClient, slug: str, c: dict) -> 
                 headers=_supabase_headers(prefer="return=minimal"),
                 params=match_params,
             )
+
+    # Same public+tag treatment as every other /monitor event type - post
+    # once per slug per poll cycle (not once per person) so several
+    # citizens hitting their target on the same collection at the same
+    # time show up as one call-out, not a spam of near-identical posts.
+    if fired_user_ids and settings.discord_nft_monitor_channel_id:
+        symbol = c.get("symbol") or "ETH"
+        mentions = " ".join(f"<@{uid}>" for uid in dict.fromkeys(fired_user_ids))
+        public_embed = {
+            "title": f"🎯 Price target hit — {c['name']}",
+            "url": c.get("openseaUrl"),
+            "description": f"Floor is now **{floor:.4f} {symbol}**, hitting the target for the citizens tagged below.",
+            "color": EMBED_COLOR_GOOD,
+            "thumbnail": {"url": c["image"]} if c.get("image") else None,
+            "footer": {"text": f"{TOOLKIT_FOOTER['text']} · Price Target"},
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        await _post_channel_message(client, settings.discord_nft_monitor_channel_id, public_embed, content=f"🎯 Price target hit on **{c['name']}** — {mentions}")
 
 
 def _sweep_embed(c: dict, sweep: dict) -> dict:
