@@ -108,7 +108,7 @@ COMMANDS = [
         "description": "Generate a shareable PnL card for one of your mints",
         "options": [
             {"name": "collection", "description": "Collection name or contract address", "type": 3, "required": True},
-            {"name": "mint_price", "description": "What you paid per NFT, in ETH", "type": 10, "required": True},
+            {"name": "mint_price", "description": "What you paid per NFT - ETH (0.03) or USD ($50)", "type": 3, "required": True},
             {"name": "amount_minted", "description": "How many you minted", "type": 4, "required": True},
             {"name": "x_username", "description": "Your X handle to show on the card (default: your Discord name)", "type": 3, "required": False},
         ],
@@ -129,7 +129,7 @@ COMMANDS = [
                 "name": "price", "description": "Get DM'd when a collection's floor crosses a specific ETH price", "type": 1,
                 "options": [
                     {"name": "collection", "description": "Collection name or contract address", "type": 3, "required": True},
-                    {"name": "target", "description": "Exact target floor price in ETH, e.g. 0.03 (use this OR percent)", "type": 10, "required": False},
+                    {"name": "target", "description": "Exact target floor price - ETH (0.03) or USD ($50) - use this OR percent", "type": 3, "required": False},
                     {"name": "percent", "description": "Target as % off current floor, e.g. -50 or 100 (use this OR target)", "type": 10, "required": False},
                     {"name": "loop", "description": "Keep re-alerting hourly while true, instead of firing once (default: off)", "type": 5, "required": False},
                 ],

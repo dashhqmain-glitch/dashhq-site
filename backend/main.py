@@ -1594,6 +1594,35 @@ async def _get_coingecko_prices(client: httpx.AsyncClient, ids: list[str]) -> di
     return {i: _PRICE_CACHE[i][1] for i in ids if i in _PRICE_CACHE}
 
 
+async def _parse_eth_amount(client: httpx.AsyncClient, raw, field_label: str = "amount") -> float:
+    # Accepts a plain ETH number ("0.03"), or a USD amount ("$50", "50usd",
+    # "50 USD") which gets converted at the live rate - so every price
+    # input across the bots takes whichever unit is easier to think in,
+    # not just raw ETH.
+    s = str(raw or "").strip().lower().replace(",", "").replace(" ", "")
+    if not s:
+        raise HTTPException(status_code=400, detail=f"Missing {field_label}.")
+    is_usd = s.startswith("$") or s.endswith("usd") or s.endswith("dollars")
+    s = s.lstrip("$")
+    for suffix in ("dollars", "usd", "eth"):
+        if s.endswith(suffix):
+            s = s[: -len(suffix)]
+            break
+    try:
+        value = float(s)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f'Couldn\'t read "{raw}" as a price - try something like `0.03` or `$50`.')
+    if value < 0:
+        raise HTTPException(status_code=400, detail=f"{field_label.capitalize()} can't be negative.")
+    if not is_usd:
+        return value
+    prices = await _get_coingecko_prices(client, ["ethereum"])
+    eth_usd = (prices.get("ethereum") or {}).get("usd")
+    if not eth_usd:
+        raise HTTPException(status_code=502, detail="Could not fetch a live ETH price to convert USD right now - try an ETH amount instead.")
+    return value / eth_usd
+
+
 # Solana has no "gas price" in the EVM sense — the base network fee is a
 # fixed protocol constant (5000 lamports/signature), and the variable part
 # is a priority fee (micro-lamports per compute unit) that recent blocks
@@ -2828,30 +2857,32 @@ async def _cmd_monitor_response(payload: dict, discord_user_id: str) -> dict:
 
         raw_target = sub_opts.get("target")
         raw_percent = sub_opts.get("percent")
-        if raw_target is not None:
-            try:
-                target = float(raw_target)
-            except (TypeError, ValueError):
-                target = None
-        elif raw_percent is not None:
-            # Same shortcut as the reference tool's -50%/-25%/+50%/+100%
-            # quick-pick buttons - a relative offset off the live floor
-            # instead of typing an exact ETH number.
-            try:
-                target = floor * (1 + float(raw_percent) / 100)
-            except (TypeError, ValueError):
-                target = None
-        else:
-            embed = {"title": "Missing target", "description": "Give either `target` (an exact ETH price) or `percent` (e.g. `-50` for 50% below the current floor).", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
-            return {"embeds": [_clean_embed(embed)], "flags": 64}
-
-        if target is None or target <= 0:
-            embed = {"title": "Invalid target", "description": "That works out to a target price of 0 or less - give a target above 0, e.g. `target:0.03` or `percent:-50`.", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
-            return {"embeds": [_clean_embed(embed)], "flags": 64}
-
         loop_alert = bool(sub_opts.get("loop"))
-        direction = "below" if target <= floor else "above"
         async with httpx.AsyncClient(timeout=10) as client:
+            if raw_target is not None:
+                # Accepts a plain ETH number or a USD amount ("$50") -
+                # converted at the live rate.
+                try:
+                    target = await _parse_eth_amount(client, raw_target, "target")
+                except HTTPException as exc:
+                    embed = {"title": "Invalid target", "description": exc.detail, "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
+                    return {"embeds": [_clean_embed(embed)], "flags": 64}
+            elif raw_percent is not None:
+                # Same shortcut as the reference tool's -50%/-25%/+50%/+100%
+                # quick-pick buttons - a relative offset off the live floor
+                # instead of typing an exact ETH number.
+                try:
+                    target = floor * (1 + float(raw_percent) / 100)
+                except (TypeError, ValueError):
+                    target = None
+                if target is None or target <= 0:
+                    embed = {"title": "Invalid percent", "description": "That works out to a target price of 0 or less - try a smaller drop, e.g. `percent:-50`.", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
+                    return {"embeds": [_clean_embed(embed)], "flags": 64}
+            else:
+                embed = {"title": "Missing target", "description": "Give either `target` (an exact price, ETH or `$USD`) or `percent` (e.g. `-50` for 50% below the current floor).", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
+                return {"embeds": [_clean_embed(embed)], "flags": 64}
+
+            direction = "below" if target <= floor else "above"
             res = await client.post(
                 f"{settings.supabase_url}/rest/v1/nft_price_alerts",
                 headers=_supabase_headers(prefer="resolution=merge-duplicates,return=minimal"),
@@ -3725,7 +3756,7 @@ async def _cmd_nft(query: str) -> dict:
     }
 
 
-async def _pnl_render_core(collection_query: str, mint_price: float, amount_minted: int, x_username: str) -> bytes:
+async def _pnl_render_core(collection_query: str, mint_price_raw, amount_minted: int, x_username: str) -> bytes:
     results = await _nft_search_core(collection_query)
     if not results:
         raise HTTPException(status_code=404, detail=f'No OpenSea results for "{collection_query}".')
@@ -3736,6 +3767,7 @@ async def _pnl_render_core(collection_query: str, mint_price: float, amount_mint
         c = results[0]
 
     async with httpx.AsyncClient(timeout=15) as client:
+        mint_price = await _parse_eth_amount(client, mint_price_raw, "mint price")
         try:
             history = await _nft_recent_snapshots(client, slug, limit=200)
         except httpx.HTTPError:
@@ -3939,13 +3971,13 @@ TOOLKIT_TOOLS = {
     "monitor": {
         "emoji": "🔔", "label": "NFT Monitor",
         "short": "Personal DM pings for specific events on a collection: floor up/down, supply cuts, mint progress, sweeps, volume spikes - plus a one-shot alert at a specific target price",
-        "usage": "/monitor set|clear collection:<name or contract address> · /monitor price collection:<name> target:<ETH>|percent:<%> loop:<true/false> · /monitor list",
+        "usage": "/monitor set|clear collection:<name or contract address> · /monitor price collection:<name> target:<ETH or $USD>|percent:<%> loop:<true/false> · /monitor list",
         "example": "/monitor price collection:Pudgy Penguins percent:-50 loop:true",
     },
     "pnl": {
         "emoji": "📊", "label": "PnL Card",
         "short": "Generate a shareable branded card showing your realized profit/loss on a mint",
-        "usage": "/pnl collection:<name or contract address> mint_price:<ETH> amount_minted:<count> x_username:<optional>",
+        "usage": "/pnl collection:<name or contract address> mint_price:<ETH or $USD> amount_minted:<count> x_username:<optional>",
         "example": "/pnl collection:Pudgy Penguins mint_price:0.03 amount_minted:2",
     },
 }
@@ -4049,10 +4081,10 @@ async def _handle_toolkit_command(payload: dict) -> dict:
         await _discord_deferred_ack(interaction_id, token, ephemeral=False)
         try:
             collection = opts.get("collection", "")
-            mint_price = float(opts.get("mint_price", 0))
+            mint_price_raw = opts.get("mint_price", "0")
             amount_minted = int(opts.get("amount_minted", 1))
             x_username = (opts.get("x_username") or member_user.get("global_name") or member_user.get("username") or "citizen").strip()
-            png_bytes = await _pnl_render_core(collection, mint_price, amount_minted, x_username)
+            png_bytes = await _pnl_render_core(collection, mint_price_raw, amount_minted, x_username)
             await _discord_edit_original_with_file(token, "pnl.png", png_bytes)
         except Exception as exc:
             if not isinstance(exc, HTTPException):
