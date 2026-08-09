@@ -2962,6 +2962,31 @@ async def _handle_monitor_select(payload: dict) -> dict:
     else:
         desc = "Cleared - you won't get any /monitor alerts for this collection."
     embed = {"title": "🔔 Monitor settings saved", "description": desc, "color": EMBED_COLOR_GOOD, "footer": TOOLKIT_FOOTER}
+
+    # The picker itself stays private (it's an interactive control - a
+    # public select menu could let anyone else fiddle with someone else's
+    # subscriptions), but what got saved is announced publicly, same
+    # "DMs stay private, the fact of it is public" pattern as /monitor
+    # price - other members can see who's watching what.
+    if settings.discord_nft_monitor_channel_id:
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                c_name = slug
+                try:
+                    c = await _nft_collection_core(slug)
+                    c_name = c.get("name") or slug
+                except HTTPException:
+                    pass
+                if selected:
+                    labels_public = ", ".join(_NFT_MONITOR_LABELS.get(e, e) for e in selected)
+                    public_desc = f"<@{discord_user_id}> is now watching **{c_name}** for: {labels_public}"
+                else:
+                    public_desc = f"<@{discord_user_id}> cleared their /monitor alerts for **{c_name}**"
+                public_embed = {"title": "🔔 Monitor updated", "description": public_desc, "color": EMBED_COLOR_GOOD, "footer": TOOLKIT_FOOTER}
+                await _post_channel_message(client, settings.discord_nft_monitor_channel_id, public_embed)
+        except httpx.HTTPError:
+            logger.exception("Failed to post public /monitor set announcement")
+
     return {"type": 7, "data": {"embeds": [_clean_embed(embed)], "components": [_monitor_select_component(slug)]}}
 
 
