@@ -484,6 +484,23 @@ async def test_dm(request: Request, user_id: str = Query(..., min_length=1, max_
     return {"delivered": delivered}
 
 
+@app.get("/cron/test-monitor-channel")
+async def test_monitor_channel(request: Request):
+    # Verifies DISCORD_NFT_MONITOR_CHANNEL_ID end-to-end by actually
+    # posting to it - env var presence alone isn't proof it's non-empty
+    # or that the bot has permission there (Sensitive vars are
+    # write-only, so `vercel env pull` can't confirm the stored value).
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not settings.discord_nft_monitor_channel_id:
+        return {"configured": False, "posted": False, "detail": "DISCORD_NFT_MONITOR_CHANNEL_ID is empty/unset"}
+    embed = {"title": "🎯 Test post - monitor channel wiring check", "description": "If you can see this, DISCORD_NFT_MONITOR_CHANNEL_ID is correctly configured and the bot can post here.", "color": EMBED_COLOR_GOOD, "footer": TOOLKIT_FOOTER}
+    async with httpx.AsyncClient(timeout=10) as client:
+        posted = await _post_channel_message(client, settings.discord_nft_monitor_channel_id, embed, content="🎯 Monitor channel wiring check (test post)")
+    return {"configured": True, "channel_id": settings.discord_nft_monitor_channel_id, "posted": posted}
+
+
 # ── Pidgin AutoMod setup (one-time / re-run-on-change) ──────────────────────
 # English-only enforcement in #general via Discord's native AutoMod - free,
 # no persistent bot connection needed. Everything else in this backend is
