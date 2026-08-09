@@ -3371,25 +3371,59 @@ def _detect_fake_offer(c: dict, top_offer_amount: float | None) -> str | None:
     return None
 
 
-def _momentum_points(c: dict, history: list[dict]) -> tuple[int, str | None]:
-    # history is newest-first (captured_at desc). Requires a MAJORITY of
-    # recent consecutive moves to be upward, not just an endpoint-to-
-    # endpoint comparison - a single spike surrounded by noise shouldn't
-    # read as "trending."
+def _trend_up(values: list[float], min_len: int) -> tuple[bool, float]:
+    # Requires a MAJORITY of recent consecutive moves to be upward, not
+    # just an endpoint-to-endpoint comparison - a single spike surrounded
+    # by noise shouldn't read as "trending." Shared by every dimension
+    # _momentum_points checks (floor, volume, owners).
+    if len(values) < min_len:
+        return False, 0.0
+    deltas = [values[i] - values[i + 1] for i in range(len(values) - 1)]
+    if not deltas:
+        return False, 0.0
+    up = sum(1 for d in deltas if d > 0)
+    oldest = values[-1]
+    if up >= len(deltas) * 0.7 and oldest > 0 and values[0] > oldest * 1.05:
+        return True, (values[0] - oldest) / oldest * 100
+    return False, 0.0
+
+
+def _momentum_points(c: dict, history: list[dict]) -> tuple[int, list[str]]:
+    # history is newest-first (captured_at desc). A real secondary play
+    # is backed by MULTIPLE aligned trends, not price moving alone - a
+    # single large buy can push floor up on its own with nothing else
+    # behind it. Checking volume and owner growth alongside price is
+    # what tells a genuine build-up (broadening participation, new
+    # buyers actually entering) apart from one trade making noise.
+    reasons: list[str] = []
+    points = 0
+    min_len = _NFT_SCOPE_MOMENTUM_MIN_SNAPSHOTS
+
     floors = [h["floor"] for h in history if h.get("floor") is not None]
     if c.get("floor") is not None:
         floors = [c["floor"]] + floors
-    if len(floors) < _NFT_SCOPE_MOMENTUM_MIN_SNAPSHOTS:
-        return 0, None
-    deltas = [floors[i] - floors[i + 1] for i in range(len(floors) - 1)]
-    if not deltas:
-        return 0, None
-    up = sum(1 for d in deltas if d > 0)
-    oldest = floors[-1]
-    if up >= len(deltas) * 0.7 and oldest > 0 and floors[0] > oldest * 1.05:
-        pct = (floors[0] - oldest) / oldest * 100
-        return 20, f"Floor trending up {pct:.0f}% over the last {len(floors)} snapshots ({up}/{len(deltas)} moves upward, not just one spike)"
-    return 0, None
+    floor_up, floor_pct = _trend_up(floors, min_len)
+    if floor_up:
+        points += 10
+        reasons.append(f"Floor trending up {floor_pct:.0f}% over the last {len(floors)} snapshots, not just one spike")
+
+    volumes = [h["volume_1d"] for h in history if h.get("volume_1d") is not None]
+    if c.get("vol1d") is not None:
+        volumes = [c["vol1d"]] + volumes
+    vol_up, vol_pct = _trend_up(volumes, min_len)
+    if vol_up:
+        points += 5
+        reasons.append(f"24h volume trending up {vol_pct:.0f}% across recent snapshots - broadening participation, not a one-off spike")
+
+    owner_counts = [h["owners"] for h in history if h.get("owners") is not None]
+    if c.get("owners") is not None:
+        owner_counts = [c["owners"]] + owner_counts
+    owners_up, owners_pct = _trend_up(owner_counts, min_len)
+    if owners_up:
+        points += 5
+        reasons.append(f"Unique owners growing (+{owners_pct:.0f}% over the window) - new buyers actually entering, not just existing holders reshuffling")
+
+    return points, reasons
 
 
 def _nft_scope_score(c: dict, top_offer_amount: float | None, history: list[dict] | None = None) -> dict:
@@ -3449,10 +3483,9 @@ def _nft_scope_score(c: dict, top_offer_amount: float | None, history: list[dict
 
     # Momentum (0-20, only when there's enough tracked history to trust)
     if history:
-        momentum_points, momentum_reason = _momentum_points(c, history)
+        momentum_points, momentum_reasons = _momentum_points(c, history)
         points += momentum_points
-        if momentum_reason:
-            reasons.append(momentum_reason)
+        reasons.extend(momentum_reasons)
 
     # A detected fake offer is a manipulation signal, not a minor
     # deduction - never recommend regardless of how high the rest of the
