@@ -484,6 +484,52 @@ async def test_dm(request: Request, user_id: str = Query(..., min_length=1, max_
     return {"delivered": delivered}
 
 
+@app.get("/cron/purge-channel")
+async def purge_channel(request: Request, channel_id: str = Query(..., min_length=1, max_length=32)):
+    # Admin-only, same shared-secret gate as every other /cron endpoint -
+    # wipes every message in a channel. Bulk-delete only works on messages
+    # under 14 days old (a hard Discord API limit), so anything older
+    # falls back to one-by-one deletion.
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not settings.discord_bot_token:
+        raise HTTPException(status_code=500, detail="Discord bot env vars not fully configured")
+
+    headers = {"Authorization": f"Bot {settings.discord_bot_token}"}
+    deleted_bulk, deleted_single, errors = 0, 0, []
+    async with httpx.AsyncClient(timeout=20) as client:
+        while True:
+            res = await client.get(f"{DISCORD_API}/channels/{channel_id}/messages", headers=headers, params={"limit": 100})
+            if res.status_code >= 300:
+                errors.append(f"fetch: {res.status_code} {res.text[:200]}")
+                break
+            batch = res.json()
+            if not batch:
+                break
+            ids = [m["id"] for m in batch]
+            if len(ids) >= 2:
+                bulk_res = await client.post(f"{DISCORD_API}/channels/{channel_id}/messages/bulk-delete", headers=headers, json={"messages": ids})
+                if bulk_res.status_code >= 300:
+                    # Likely hit the 14-day-old cutoff - fall back to deleting this batch one at a time.
+                    for mid in ids:
+                        single_res = await client.delete(f"{DISCORD_API}/channels/{channel_id}/messages/{mid}", headers=headers)
+                        if single_res.status_code < 300:
+                            deleted_single += 1
+                        else:
+                            errors.append(f"delete {mid}: {single_res.status_code}")
+                else:
+                    deleted_bulk += len(ids)
+            else:
+                single_res = await client.delete(f"{DISCORD_API}/channels/{channel_id}/messages/{ids[0]}", headers=headers)
+                if single_res.status_code < 300:
+                    deleted_single += 1
+                else:
+                    errors.append(f"delete {ids[0]}: {single_res.status_code}")
+
+    return {"channel_id": channel_id, "deleted_bulk": deleted_bulk, "deleted_single": deleted_single, "errors": errors}
+
+
 @app.get("/cron/test-monitor-channel")
 async def test_monitor_channel(request: Request):
     # Verifies DISCORD_NFT_MONITOR_CHANNEL_ID end-to-end by actually
@@ -4089,14 +4135,14 @@ async def _handle_toolkit_command(payload: dict) -> dict:
 
     # Anything that surfaces a specific person's financial standing or
     # personal tracking list is private — only the command's own invoker
-    # sees it. /dashboard itself stays public (it's just a menu, nothing
-    # sensitive in it) along with the price/market lookups that don't
-    # reveal anything about who's asking.
-    EPHEMERAL_COMMANDS = {"xray", "wallet", "watchlist"}
+    # sees it. /dashboard is a private instructions manual for members
+    # (not something to broadcast into the channel every time someone
+    # looks something up), so it's ephemeral too.
+    EPHEMERAL_COMMANDS = {"xray", "wallet", "watchlist", "dashboard"}
     ephemeral = name in EPHEMERAL_COMMANDS
 
     if name == "dashboard":
-        return {"type": 4, "data": _dashboard_response()}
+        return {"type": 4, "data": {**_dashboard_response(), "flags": 64}}
 
     if name == "monitor":
         return {"type": 4, "data": await _cmd_monitor_response(payload, discord_user_id)}
