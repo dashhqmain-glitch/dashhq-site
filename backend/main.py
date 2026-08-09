@@ -573,20 +573,24 @@ async def purge_channel(request: Request, channel_id: str = Query(..., min_lengt
 
 
 @app.get("/cron/test-monitor-channel")
-async def test_monitor_channel(request: Request):
-    # Verifies DISCORD_NFT_MONITOR_CHANNEL_ID end-to-end by actually
-    # posting to it - env var presence alone isn't proof it's non-empty
-    # or that the bot has permission there (Sensitive vars are
-    # write-only, so `vercel env pull` can't confirm the stored value).
+async def test_monitor_channel(request: Request, channel_id: str = Query(None, min_length=1, max_length=32)):
+    # Verifies a channel is actually postable end-to-end - env var
+    # presence alone isn't proof it's non-empty or that the bot has
+    # permission there (Sensitive vars are write-only, so `vercel env
+    # pull` can't confirm the stored value). Defaults to
+    # DISCORD_NFT_MONITOR_CHANNEL_ID; pass ?channel_id=... to check any
+    # other configured channel (e.g. DISCORD_NFT_SCOPE_CHANNEL_ID)
+    # through the same mechanism instead of a one-off endpoint each time.
     expected = f"Bearer {settings.cron_secret}"
     if not settings.cron_secret or request.headers.get("authorization") != expected:
         raise HTTPException(status_code=401, detail="Unauthorized")
-    if not settings.discord_nft_monitor_channel_id:
-        return {"configured": False, "posted": False, "detail": "DISCORD_NFT_MONITOR_CHANNEL_ID is empty/unset"}
-    embed = {"title": "🎯 Test post - monitor channel wiring check", "description": "If you can see this, DISCORD_NFT_MONITOR_CHANNEL_ID is correctly configured and the bot can post here.", "color": EMBED_COLOR_GOOD, "footer": TOOLKIT_FOOTER}
+    target = channel_id or settings.discord_nft_monitor_channel_id
+    if not target:
+        return {"configured": False, "posted": False, "detail": "No channel_id given and DISCORD_NFT_MONITOR_CHANNEL_ID is empty/unset"}
+    embed = {"title": "🎯 Test post - channel wiring check", "description": "If you can see this, the channel is correctly configured and the bot can post here.", "color": EMBED_COLOR_GOOD, "footer": TOOLKIT_FOOTER}
     async with httpx.AsyncClient(timeout=10) as client:
-        posted = await _post_channel_message(client, settings.discord_nft_monitor_channel_id, embed, content="🎯 Monitor channel wiring check (test post)")
-    return {"configured": True, "channel_id": settings.discord_nft_monitor_channel_id, "posted": posted}
+        posted = await _post_channel_message(client, target, embed, content="🎯 Channel wiring check (test post)")
+    return {"configured": True, "channel_id": target, "posted": posted}
 
 
 # ── Pidgin AutoMod setup (one-time / re-run-on-change) ──────────────────────
