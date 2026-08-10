@@ -361,3 +361,93 @@ def test_price_surge_never_bypasses_the_turnover_block():
     surge = {"count": 5, "unique_buyers": 5, "unique_sellers": 5, "window_minutes": 30, "price_surge_pct": 40.0}
     score = main._nft_scope_score(scam, None, rapid_activity=surge)
     assert score["blocked"] and not main._nft_scope_worth_posting(score)
+
+
+# ── rapid activity: sharp 5-min sub-window ("happening right now") ─────
+
+def sale_at(buyer, seller, when, token_id="1"):
+    return {
+        "buyer": buyer, "seller": seller, "nft": {"identifier": token_id}, "event_timestamp": when,
+        "payment": {"quantity": "1000000000000000000", "decimals": 18, "symbol": "ETH"},
+    }
+
+
+async def test_sharp_window_not_flagged_when_activity_is_spread_across_the_full_burst():
+    now = time.time()
+
+    async def fake_get(client, path, params=None):
+        return {"asset_events": [
+            sale_at("b1", "s1", now - 1700, "1"),
+            sale_at("b2", "s2", now - 900, "2"),
+            sale_at("b3", "s3", now - 100, "3"),  # only this one is within 5 min
+        ]}
+
+    with patch.object(main, "_opensea_get", new=fake_get):
+        async with main.httpx.AsyncClient() as client:
+            result = await main._detect_rapid_activity(client, "test-slug")
+    assert result is not None
+    assert result["is_sharp"] is False
+
+
+async def test_sharp_window_flagged_when_multiple_sales_land_within_5_minutes():
+    now = time.time()
+
+    async def fake_get(client, path, params=None):
+        return {"asset_events": [
+            sale_at("b1", "s1", now - 1000, "1"),
+            sale_at("b2", "s2", now - 200, "2"),
+            sale_at("b3", "s3", now - 60, "3"),
+        ]}
+
+    with patch.object(main, "_opensea_get", new=fake_get):
+        async with main.httpx.AsyncClient() as client:
+            result = await main._detect_rapid_activity(client, "test-slug")
+    assert result is not None
+    assert result["is_sharp"] is True
+    assert result["sharp_count"] == 2
+
+
+async def test_sharp_window_independently_catches_a_cluster_the_diluted_outer_window_misses():
+    # 10 diverse, clean trades spread across the full 30-min window,
+    # plus a 4-wallet closed cycle entirely within the last 5 minutes.
+    # The outer window has too many distinct wallets (24) for the
+    # closed-cluster check to even apply, so it passes clean - but the
+    # same 4 events, looked at on their own, are a textbook wash ring.
+    now = time.time()
+    diverse = [sale_at(f"b{i}", f"s{i}", now - 700 - i * 30, f"tok{i}") for i in range(10)]
+    cycle = [
+        sale_at("X", "W", now - 250, "c1"),
+        sale_at("Y", "X", now - 180, "c2"),
+        sale_at("Z", "Y", now - 100, "c3"),
+        sale_at("W", "Z", now - 30, "c4"),
+    ]
+    events = diverse + cycle
+
+    outer_analysis = main._analyze_wash_trading(events)
+    assert outer_analysis["suspicious"] is False, "sanity check: outer window should look clean"
+    inner_analysis = main._analyze_wash_trading(cycle)
+    assert inner_analysis["suspicious"] is True, "sanity check: the 4-wallet cycle alone should be caught"
+
+    async def fake_get(client, path, params=None):
+        return {"asset_events": events}
+
+    with patch.object(main, "_opensea_get", new=fake_get):
+        async with main.httpx.AsyncClient() as client:
+            result = await main._detect_rapid_activity(client, "test-slug")
+    assert result is not None  # outer window still passes overall
+    assert result["is_sharp"] is False  # but the sharp sub-window does NOT get the "happening right now" bonus
+
+
+def test_sharp_signal_scores_higher_and_never_bypasses_hard_gates():
+    sharp = {"count": 3, "unique_buyers": 3, "unique_sellers": 3, "window_minutes": 30,
+             "price_surge_pct": 5.0, "is_sharp": True, "sharp_count": 2, "sharp_window_minutes": 5}
+    not_sharp = dict(sharp, is_sharp=False)
+
+    score_sharp = main._nft_scope_score(strong_collection(), 0.06, rapid_activity=sharp)
+    score_not_sharp = main._nft_scope_score(strong_collection(), 0.06, rapid_activity=not_sharp)
+    assert score_sharp["score"] > score_not_sharp["score"]
+    assert any("happening right now" in r for r in score_sharp["reasons"])
+
+    scam = strong_collection(floor=0.5, totalSupply=1267, owners=131, sales24h=1267, vol1d=100, symbol="USDG")
+    score_scam = main._nft_scope_score(scam, None, rapid_activity=sharp)
+    assert score_scam["blocked"] and not main._nft_scope_worth_posting(score_scam)

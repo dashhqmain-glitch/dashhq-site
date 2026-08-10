@@ -3570,6 +3570,12 @@ def _nft_scope_score(c: dict, top_offer_amount: float | None, history: list[dict
                 f"💥 Price climbed {surge:.0f}% within that same burst - volume AND price moving together, "
                 "not just a busy but flat market"
             )
+        if rapid_activity.get("is_sharp"):
+            points += 5
+            reasons.append(
+                f"🔥 {rapid_activity['sharp_count']} of those sales landed in just the last "
+                f"{rapid_activity['sharp_window_minutes']} min - this is happening right now, not winding down"
+            )
 
     turnover_reason = _detect_abnormal_turnover(c)
     if turnover_reason:
@@ -3659,6 +3665,8 @@ def _nft_scope_embed(c: dict, score: dict, top_offer_amount: float | None, kind:
 _NFT_SCOPE_RAPID_WINDOW_SECONDS = 1800  # 30 min - reacts to a sweep/burst as it happens, not after a 24h aggregate catches up
 _NFT_SCOPE_RAPID_MIN_SALES = 3
 _NFT_SCOPE_RAPID_SURGE_THRESHOLD_PCT = 15  # min/max sale price spread within the burst that counts as a real surge, not noise
+_NFT_SCOPE_RAPID_SHARP_WINDOW_SECONDS = 300  # 5 min - "this is happening right now", not just "recently"
+_NFT_SCOPE_RAPID_SHARP_MIN_SALES = 2  # lower bar than the 30-min window since the timeframe itself is the signal
 
 
 async def _detect_rapid_activity(client: httpx.AsyncClient, slug: str) -> dict | None:
@@ -3697,12 +3705,28 @@ async def _detect_rapid_activity(client: httpx.AsyncClient, slug: str) -> dict |
     if len(prices) >= 2 and min(prices) > 0:
         price_surge_pct = (max(prices) - min(prices)) / min(prices) * 100
 
+    # Sharper sub-signal: how much of this burst is happening in just the
+    # last few minutes, not spread anywhere across the full 30-min window
+    # - "still building right now" vs. "happened a while ago and cooled
+    # off." Re-verified independently rather than assumed clean just
+    # because the larger set was - a subset can surface a pattern (e.g.
+    # two wallets trading back and forth) that enough surrounding
+    # diversity masked in the full window. No extra API call, same data.
+    now = time.time()
+    sharp_window_events = [e for e in recent if now - (e.get("event_timestamp") or 0) <= _NFT_SCOPE_RAPID_SHARP_WINDOW_SECONDS]
+    is_sharp = False
+    if len(sharp_window_events) >= _NFT_SCOPE_RAPID_SHARP_MIN_SALES:
+        is_sharp = not _analyze_wash_trading(sharp_window_events)["suspicious"]
+
     return {
         "count": len(recent),
         "unique_buyers": analysis["unique_buyers"],
         "unique_sellers": analysis["unique_sellers"],
         "window_minutes": _NFT_SCOPE_RAPID_WINDOW_SECONDS // 60,
         "price_surge_pct": price_surge_pct,
+        "is_sharp": is_sharp,
+        "sharp_count": len(sharp_window_events),
+        "sharp_window_minutes": _NFT_SCOPE_RAPID_SHARP_WINDOW_SECONDS // 60,
     }
 
 
