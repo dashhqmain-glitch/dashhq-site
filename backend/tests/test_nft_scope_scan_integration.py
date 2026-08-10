@@ -909,3 +909,81 @@ async def test_momentum_pass_is_not_structurally_biased_toward_alphabetically_ea
             winners.update(posted)
 
     assert len(winners) > 1, f"same tracked slug won every single trial - alphabetical order isn't actually being shuffled: {winners}"
+
+
+async def test_a_collection_cannot_be_posted_twice_by_different_passes_in_one_cycle():
+    # Real bug, confirmed live: "stonkbrokers-434284142" posted 4 times in
+    # 90 minutes because the trending pass and the momentum pass each only
+    # tracked THEIR OWN cooldown - a collection that's both genuinely
+    # trending AND on someone's /watchlist could clear each pass's
+    # cooldown independently, so whichever pass's timer expired first
+    # would re-post it with no idea the other pass just posted the same
+    # slug shortly before. This collection qualifies for both the
+    # trending pass (discovered via volume ranking) and the momentum pass
+    # (it's also a tracked/watchlisted slug) in the SAME cycle - it must
+    # only be posted once.
+    _config_channel()
+    slug = "shared-slug"
+
+    async def fake_opensea_get(client, path, params=None):
+        if path == "/collections":
+            if params["order_by"] == "created_date":
+                return {"collections": []}
+            if params["order_by"] == "seven_day_volume" and params["chain"] == "ethereum":
+                return {"collections": [{"collection": slug}]}
+            return {"collections": []}
+        if path.startswith("/events/collection/"):
+            return {"asset_events": []}
+        raise AssertionError(f"unexpected {path}")
+
+    state: dict = {}  # shared backing store, exactly like the real Supabase-backed one
+
+    async def fake_alert_state_get(client, s, alert_type):
+        return state.get((s, alert_type))
+
+    async def fake_alert_state_set(client, s, alert_type, value):
+        state[(s, alert_type)] = {"last_alerted_at": datetime.now(timezone.utc).isoformat()}
+
+    async def fake_collection_core(s):
+        return _strong_collection(s)
+
+    async def fake_top_offer(client, s):
+        return None
+
+    async def fake_recent_snapshots(client, s, limit=30):
+        return [{"floor": 0.05, "volume_1d": 0.5, "owners": 300}] * main._NFT_SCOPE_MOMENTUM_MIN_SNAPSHOTS
+
+    posted_by = []
+
+    async def fake_post(client, channel_id, embed, content=None):
+        posted_by.append(embed["title"])
+        return True
+
+    async def fake_wash_clean(client, s):
+        return True
+
+    async def fake_tracked_slugs(client):
+        return [slug]  # also tracked, so the momentum pass evaluates the same slug this cycle
+
+    async def fake_seen_has(client, s):
+        return False
+
+    async def fake_mark_seen(client, s):
+        return None
+
+    with patch.object(main, "_opensea_get", new=fake_opensea_get), \
+         patch.object(main, "_nft_mint_radar_seen_has", new=fake_seen_has), \
+         patch.object(main, "_nft_mint_radar_mark_seen", new=fake_mark_seen), \
+         patch.object(main, "_nft_collection_core", new=fake_collection_core), \
+         patch.object(main, "_opensea_get_top_offer", new=fake_top_offer), \
+         patch.object(main, "_nft_recent_snapshots", new=fake_recent_snapshots), \
+         patch.object(main, "_nft_scope_clears_wash_check", new=fake_wash_clean), \
+         patch.object(main, "_nft_poll_tracked_slugs", new=fake_tracked_slugs), \
+         patch.object(main, "_nft_alert_state_get", new=fake_alert_state_get), \
+         patch.object(main, "_nft_alert_state_set", new=fake_alert_state_set), \
+         patch.object(main, "_post_channel_message", new=fake_post):
+        async with main.httpx.AsyncClient() as client:
+            posted = await main._nft_scope_scan(client)
+
+    assert posted.count(slug) == 1, f"same collection posted more than once in one cycle: {posted}"
+    assert len(posted_by) == 1, f"channel got more than one message for the same collection: {posted_by}"

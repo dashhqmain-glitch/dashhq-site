@@ -3461,6 +3461,27 @@ _NFT_SCOPE_RATE_LIMIT_BACKOFF_SECONDS = 1800  # 30 min conservative mode after a
 # knob that actually forces rotation across "a ton of projects" instead
 # of the same one or two repeatedly claiming the spot cycle after cycle.
 _NFT_SCOPE_TRENDING_POST_COOLDOWN_SECONDS = 3600  # 1 hour - matches the momentum pass's own repost cadence
+# Each pass above only tracks ITS OWN cooldown - a collection that's both
+# genuinely trending AND on someone's /watchlist can clear the trending
+# pass's cooldown and the momentum pass's cooldown independently, so
+# either one re-posts it the moment its own timer expires with no idea
+# the other pass just posted the same slug 20 minutes ago (confirmed
+# live: one real collection posted 4 times in 90 minutes this way).
+# This is the fix - ONE shared "posted to NFT Scope at all, by any pass"
+# cooldown, checked by and updated from all three passes on top of their
+# own. A slug can still qualify differently per pass; it just can't
+# occupy the channel more than once an hour regardless of which pass
+# found it.
+_NFT_SCOPE_ANY_POST_COOLDOWN_SECONDS = 3600
+
+
+async def _nft_scope_recently_posted(client: httpx.AsyncClient, slug: str) -> bool:
+    state = await _nft_alert_state_get(client, slug, "nft_scope_any_post")
+    return not _nft_alert_cooled_down(state, cooldown_seconds=_NFT_SCOPE_ANY_POST_COOLDOWN_SECONDS)
+
+
+async def _nft_scope_mark_posted(client: httpx.AsyncClient, slug: str, value: float) -> None:
+    await _nft_alert_state_set(client, slug, "nft_scope_any_post", value)
 
 
 async def _opensea_healthy(client: httpx.AsyncClient) -> bool:
@@ -4040,11 +4061,13 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
                 if (
                     len(fresh_posted) < limits["fresh_max"]
                     and _nft_scope_worth_posting(score)
+                    and not await _nft_scope_recently_posted(client, slug)
                     and await _nft_scope_clears_wash_check(client, slug)
                 ):
                     delivered = await _post_channel_message(client, settings.discord_nft_scope_channel_id, _nft_scope_embed(c, score, top_offer_amount, "fresh", rapid_activity=rapid_activity))
                     if delivered:
                         fresh_posted.append(slug)
+                        await _nft_scope_mark_posted(client, slug, c.get("floor") or 0)
                 # Mark seen regardless of score or whether the post cap
                 # was already hit - a weak collection doesn't become
                 # worth re-checking every 5 minutes forever, and a strong
@@ -4132,6 +4155,13 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
             post_state = await _nft_alert_state_get(client, slug, "nft_scope_trending_post")
             if not _nft_alert_cooled_down(post_state, cooldown_seconds=_NFT_SCOPE_TRENDING_POST_COOLDOWN_SECONDS):
                 continue
+            # Also checked here, before any real evaluation - this pass's
+            # own cooldown only knows about ITS OWN past posts. The
+            # momentum pass can post this exact slug independently on its
+            # own schedule; this shared check is what stops the two from
+            # taking turns re-posting the same collection every 20-40 min.
+            if await _nft_scope_recently_posted(client, slug):
+                continue
             trending_scanned += 1
             c = await _nft_collection_core(slug)
             top_offer_amount = await _nft_scope_top_offer_amount(client, slug, c)
@@ -4153,6 +4183,7 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
                 if delivered:
                     trending_posted.append(slug)
                     await _nft_alert_state_set(client, slug, "nft_scope_trending_post", c.get("floor") or 0)
+                    await _nft_scope_mark_posted(client, slug, c.get("floor") or 0)
             # Mark as scanned regardless of outcome - rate-limits
             # re-checking this specific candidate, it doesn't mean
             # "never again" the way the fresh-mint seen-table does.
@@ -4190,6 +4221,12 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
             state = await _nft_alert_state_get(client, slug, "nft_scope_momentum")
             if not _nft_alert_cooled_down(state):
                 continue
+            # This pass's own cooldown only knows about ITS OWN past
+            # posts - the trending pass can post this exact tracked slug
+            # independently on its own schedule. Checked before any real
+            # evaluation, same as the trending pass's mirror of this check.
+            if await _nft_scope_recently_posted(client, slug):
+                continue
             c = await _nft_collection_core(slug)
             history = await _nft_recent_snapshots(client, slug, limit=30)
             if len(history) < _NFT_SCOPE_MOMENTUM_MIN_SNAPSHOTS:
@@ -4201,6 +4238,7 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
                 delivered = await _post_channel_message(client, settings.discord_nft_scope_channel_id, _nft_scope_embed(c, score, top_offer_amount, "momentum", rapid_activity=rapid_activity))
                 if delivered:
                     await _nft_alert_state_set(client, slug, "nft_scope_momentum", c.get("floor") or 0)
+                    await _nft_scope_mark_posted(client, slug, c.get("floor") or 0)
                     momentum_posted.append(slug)
         except HTTPException:
             continue
