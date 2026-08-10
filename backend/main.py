@@ -3563,6 +3563,13 @@ def _nft_scope_score(c: dict, top_offer_amount: float | None, history: list[dict
             f"from {rapid_activity['unique_buyers']} buyer(s)/{rapid_activity['unique_sellers']} seller(s) - "
             "activity accelerating right now, not just a 24h number catching up"
         )
+        surge = rapid_activity.get("price_surge_pct")
+        if surge is not None and surge >= _NFT_SCOPE_RAPID_SURGE_THRESHOLD_PCT:
+            points += 5
+            reasons.append(
+                f"💥 Price climbed {surge:.0f}% within that same burst - volume AND price moving together, "
+                "not just a busy but flat market"
+            )
 
     turnover_reason = _detect_abnormal_turnover(c)
     if turnover_reason:
@@ -3651,6 +3658,7 @@ def _nft_scope_embed(c: dict, score: dict, top_offer_amount: float | None, kind:
 
 _NFT_SCOPE_RAPID_WINDOW_SECONDS = 1800  # 30 min - reacts to a sweep/burst as it happens, not after a 24h aggregate catches up
 _NFT_SCOPE_RAPID_MIN_SALES = 3
+_NFT_SCOPE_RAPID_SURGE_THRESHOLD_PCT = 15  # min/max sale price spread within the burst that counts as a real surge, not noise
 
 
 async def _detect_rapid_activity(client: httpx.AsyncClient, slug: str) -> dict | None:
@@ -3670,11 +3678,31 @@ async def _detect_rapid_activity(client: httpx.AsyncClient, slug: str) -> dict |
     analysis = _analyze_wash_trading(recent)
     if analysis["suspicious"]:
         return None
+
+    # Sale count alone doesn't distinguish "a few genuine buys" from "a
+    # few genuine buys at a rapidly climbing price" - the latter is a
+    # much stronger degen/secondary signal. Reuses the same verified
+    # event data already fetched above, no extra API call.
+    prices = []
+    for e in recent:
+        payment = e.get("payment")
+        if not payment:
+            continue
+        try:
+            decimals = payment.get("decimals", 18)
+            prices.append(int(payment["quantity"]) / (10 ** decimals))
+        except (TypeError, ValueError, KeyError):
+            continue
+    price_surge_pct = None
+    if len(prices) >= 2 and min(prices) > 0:
+        price_surge_pct = (max(prices) - min(prices)) / min(prices) * 100
+
     return {
         "count": len(recent),
         "unique_buyers": analysis["unique_buyers"],
         "unique_sellers": analysis["unique_sellers"],
         "window_minutes": _NFT_SCOPE_RAPID_WINDOW_SECONDS // 60,
+        "price_surge_pct": price_surge_pct,
     }
 
 

@@ -22,6 +22,14 @@ def sale(buyer, seller, token_id="1", when=None):
     }
 
 
+def sale_at_price(buyer, seller, price_eth, token_id="1"):
+    return {
+        "buyer": buyer, "seller": seller, "nft": {"identifier": token_id},
+        "event_timestamp": time.time() - 60,
+        "payment": {"quantity": str(int(price_eth * 10**18)), "decimals": 18, "symbol": "ETH"},
+    }
+
+
 def strong_collection(**overrides):
     data = {
         "floor": 0.05, "totalSupply": 500, "owners": 300, "sales24h": 5, "vol1d": 0.5,
@@ -311,3 +319,45 @@ def test_embed_renders_safely_across_every_tier_and_edge_case():
         assert "NFA" in embed["description"]
         embed2 = main._nft_scope_embed(c, score, None, "momentum")
         assert "NFA" in embed2["description"]
+
+
+# ── rapid activity: price-surge-within-the-burst extension ─────────────
+
+async def test_rapid_activity_computes_price_surge_from_verified_sales():
+    async def fake_get(client, path, params=None):
+        return {"asset_events": [
+            sale_at_price(f"b{i}", f"s{i}", price, str(i))
+            for i, price in enumerate([0.05, 0.055, 0.06, 0.065, 0.07])
+        ]}
+
+    with patch.object(main, "_opensea_get", new=fake_get):
+        async with main.httpx.AsyncClient() as client:
+            result = await main._detect_rapid_activity(client, "test-slug")
+    assert result is not None
+    assert 35 <= result["price_surge_pct"] <= 45
+
+
+async def test_rapid_activity_flat_price_reports_near_zero_surge():
+    async def fake_get(client, path, params=None):
+        return {"asset_events": [sale_at_price(f"b{i}", f"s{i}", 0.05, str(i)) for i in range(5)]}
+
+    with patch.object(main, "_opensea_get", new=fake_get):
+        async with main.httpx.AsyncClient() as client:
+            result = await main._detect_rapid_activity(client, "test-slug")
+    assert result["price_surge_pct"] < 1
+
+
+def test_genuine_price_surge_scores_higher_than_flat_price_burst():
+    surge = {"count": 5, "unique_buyers": 5, "unique_sellers": 5, "window_minutes": 30, "price_surge_pct": 40.0}
+    flat = {"count": 5, "unique_buyers": 5, "unique_sellers": 5, "window_minutes": 30, "price_surge_pct": 0.5}
+    score_surge = main._nft_scope_score(strong_collection(), 0.06, rapid_activity=surge)
+    score_flat = main._nft_scope_score(strong_collection(), 0.06, rapid_activity=flat)
+    assert score_surge["score"] > score_flat["score"]
+    assert any("Price climbed" in r for r in score_surge["reasons"])
+
+
+def test_price_surge_never_bypasses_the_turnover_block():
+    scam = strong_collection(floor=0.5, totalSupply=1267, owners=131, sales24h=1267, vol1d=100, symbol="USDG")
+    surge = {"count": 5, "unique_buyers": 5, "unique_sellers": 5, "window_minutes": 30, "price_surge_pct": 40.0}
+    score = main._nft_scope_score(scam, None, rapid_activity=surge)
+    assert score["blocked"] and not main._nft_scope_worth_posting(score)
