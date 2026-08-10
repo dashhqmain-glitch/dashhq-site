@@ -3405,7 +3405,12 @@ _NFT_SCOPE_MOMENTUM_MAX_POSTS = 1
 _NFT_SCOPE_SURGE_MAX_POSTS = 3  # per-pass ceiling when OpenSea is healthy AND demand is genuinely there
 _NFT_SCOPE_MOMENTUM_MIN_SNAPSHOTS = 6   # ~30 min of history minimum before trusting a trend
 _NFT_SCOPE_MOMENTUM_SCAN_LIMIT = 25  # base; doubles in surge mode, see _nft_scope_pass_limits
-_NFT_SCOPE_TRENDING_LIMIT = 25  # per chain per source - wider discovery pool, more distinct candidates to round-robin over
+_NFT_SCOPE_TRENDING_LIMIT = 50  # per chain per source - wider discovery pool, more distinct candidates to round-robin over. This
+# is a free widening (one listing call per source per chain either way, just a bigger `limit`
+# param) - it does NOT cost extra evaluations. Combined with the post-cooldown skip above (which
+# exits before spending any real evaluation budget on a candidate that already posted recently),
+# a bigger pool means the same fixed eval budget below naturally reaches further down the ranked
+# list each cycle instead of re-checking the same handful of already-posted names at the top.
 # A pushed-down cooldown (candidates get re-judged far more often than
 # the standard 1-hour alert cooldown, so nothing sits ignored just
 # because it failed once) is only safe if worst-case cost per cycle is
@@ -3873,7 +3878,7 @@ async def _nft_scope_top_offer_amount(client: httpx.AsyncClient, slug: str, c: d
         return None
 
 
-async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 15) -> list[str]:
+async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) -> list[str]:
     posted: list[str] = []
 
     # Self-adjusting posting slots / scan budgets: expands toward the
