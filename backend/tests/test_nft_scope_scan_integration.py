@@ -409,5 +409,207 @@ async def test_trending_scan_budget_bounds_worst_case_api_cost():
         async with main.httpx.AsyncClient() as client:
             posted = await main._nft_scope_scan(client)
 
-    assert len(evaluated) <= main._NFT_SCOPE_TRENDING_SCAN_BUDGET
+    # _nft_alert_state_get is faked to return None for every lookup
+    # (including the __opensea__/rate_limited health check), so this runs
+    # in the "healthy" surge branch - the cap that actually applies here
+    # is the surge-mode budget, not the raw base constant.
+    assert len(evaluated) <= main._nft_scope_pass_limits(True)["trending_scan_budget"]
+    assert posted == []
+
+
+async def test_healthy_opensea_posts_more_than_one_when_genuine_demand_exists():
+    # The "auto-scale up" half: with no recent real 429 and several
+    # distinct candidates that ALL genuinely clear every gate on their
+    # own merits, the trending pass should post more than the base
+    # single-slot limit - up to the surge ceiling - in one cycle.
+    _config_channel()
+
+    async def fake_opensea_get(client, path, params=None):
+        if path == "/collections":
+            if params["order_by"] == "created_date":
+                return {"collections": []}
+            if params["order_by"] == "seven_day_volume":
+                return {"collections": [{"collection": f"strong-{params['chain']}"}]}
+            return {"collections": []}
+        if path.startswith("/events/collection/"):
+            return {"asset_events": []}
+        raise AssertionError(f"unexpected {path}")
+
+    async def fake_alert_state_get(client, slug, alert_type):
+        return None  # nothing rate-limited, nothing cooled-down-blocked
+
+    async def fake_alert_state_set(client, slug, alert_type, value):
+        return None
+
+    async def fake_collection_core(slug):
+        return _strong_collection(slug)
+
+    async def fake_top_offer(client, slug):
+        return None
+
+    async def fake_recent_snapshots(client, slug, limit=30):
+        return []
+
+    async def fake_post(client, channel_id, embed, content=None):
+        return True
+
+    async def fake_wash_clean(client, slug):
+        return True
+
+    async def fake_tracked_slugs(client):
+        return []
+
+    async def fake_seen_has(client, slug):
+        return False
+
+    async def fake_mark_seen(client, slug):
+        return None
+
+    with patch.object(main, "_opensea_get", new=fake_opensea_get), \
+         patch.object(main, "_nft_mint_radar_seen_has", new=fake_seen_has), \
+         patch.object(main, "_nft_mint_radar_mark_seen", new=fake_mark_seen), \
+         patch.object(main, "_nft_collection_core", new=fake_collection_core), \
+         patch.object(main, "_opensea_get_top_offer", new=fake_top_offer), \
+         patch.object(main, "_nft_recent_snapshots", new=fake_recent_snapshots), \
+         patch.object(main, "_nft_scope_clears_wash_check", new=fake_wash_clean), \
+         patch.object(main, "_nft_poll_tracked_slugs", new=fake_tracked_slugs), \
+         patch.object(main, "_nft_alert_state_get", new=fake_alert_state_get), \
+         patch.object(main, "_nft_alert_state_set", new=fake_alert_state_set), \
+         patch.object(main, "_post_channel_message", new=fake_post):
+        async with main.httpx.AsyncClient() as client:
+            posted = await main._nft_scope_scan(client)
+
+    assert len(posted) == main._NFT_SCOPE_SURGE_MAX_POSTS
+    assert len(posted) > main._NFT_SCOPE_TRENDING_MAX_POSTS
+
+
+async def test_recent_real_429_forces_scan_back_to_conservative_base_limits():
+    # The "auto-scale down" half - same exact multi-candidate demand as
+    # above, but a real 429 was recorded moments ago. Even though several
+    # candidates genuinely qualify, only the base (1-per-pass) limit
+    # should post - the system protects the shared OpenSea budget
+    # automatically, with no manual toggle involved.
+    _config_channel()
+
+    async def fake_opensea_get(client, path, params=None):
+        if path == "/collections":
+            if params["order_by"] == "created_date":
+                return {"collections": []}
+            if params["order_by"] == "seven_day_volume":
+                return {"collections": [{"collection": f"strong-{params['chain']}"}]}
+            return {"collections": []}
+        if path.startswith("/events/collection/"):
+            return {"asset_events": []}
+        raise AssertionError(f"unexpected {path}")
+
+    async def fake_alert_state_get(client, slug, alert_type):
+        if (slug, alert_type) == ("__opensea__", "rate_limited"):
+            return {"last_alerted_at": datetime.now(timezone.utc).isoformat()}
+        return None
+
+    async def fake_alert_state_set(client, slug, alert_type, value):
+        return None
+
+    async def fake_collection_core(slug):
+        return _strong_collection(slug)
+
+    async def fake_top_offer(client, slug):
+        return None
+
+    async def fake_recent_snapshots(client, slug, limit=30):
+        return []
+
+    async def fake_post(client, channel_id, embed, content=None):
+        return True
+
+    async def fake_wash_clean(client, slug):
+        return True
+
+    async def fake_tracked_slugs(client):
+        return []
+
+    async def fake_seen_has(client, slug):
+        return False
+
+    async def fake_mark_seen(client, slug):
+        return None
+
+    with patch.object(main, "_opensea_get", new=fake_opensea_get), \
+         patch.object(main, "_nft_mint_radar_seen_has", new=fake_seen_has), \
+         patch.object(main, "_nft_mint_radar_mark_seen", new=fake_mark_seen), \
+         patch.object(main, "_nft_collection_core", new=fake_collection_core), \
+         patch.object(main, "_opensea_get_top_offer", new=fake_top_offer), \
+         patch.object(main, "_nft_recent_snapshots", new=fake_recent_snapshots), \
+         patch.object(main, "_nft_scope_clears_wash_check", new=fake_wash_clean), \
+         patch.object(main, "_nft_poll_tracked_slugs", new=fake_tracked_slugs), \
+         patch.object(main, "_nft_alert_state_get", new=fake_alert_state_get), \
+         patch.object(main, "_nft_alert_state_set", new=fake_alert_state_set), \
+         patch.object(main, "_post_channel_message", new=fake_post):
+        async with main.httpx.AsyncClient() as client:
+            posted = await main._nft_scope_scan(client)
+
+    assert len(posted) == main._NFT_SCOPE_TRENDING_MAX_POSTS
+    assert len(posted) < main._NFT_SCOPE_SURGE_MAX_POSTS
+
+
+async def test_surge_mode_never_loosens_whether_a_candidate_qualifies():
+    # Surge mode must only raise HOW MANY posts a pass can make, never
+    # touch WHETHER something qualifies - a scam-shaped collection stays
+    # blocked even with every slot wide open and OpenSea fully healthy.
+    _config_channel()
+
+    async def fake_opensea_get(client, path, params=None):
+        if path == "/collections":
+            if params["order_by"] == "seven_day_volume" and params["chain"] == "ethereum":
+                return {"collections": [{"collection": "scam-trending"}]}
+            return {"collections": []}
+        if path.startswith("/events/collection/"):
+            return {"asset_events": []}
+        raise AssertionError(f"unexpected {path}")
+
+    async def fake_collection_core(slug):
+        return _scam_collection(slug)
+
+    async def fake_top_offer(client, slug):
+        return None
+
+    async def fake_recent_snapshots(client, slug, limit=30):
+        return []
+
+    async def fake_post(client, channel_id, embed, content=None):
+        return True
+
+    async def fake_wash_clean(client, slug):
+        return True
+
+    async def fake_tracked_slugs(client):
+        return []
+
+    async def fake_seen_has(client, slug):
+        return False
+
+    async def fake_mark_seen(client, slug):
+        return None
+
+    async def fake_alert_state_get(client, slug, alert_type):
+        return None  # healthy - every slot is at its widest
+
+    async def fake_alert_state_set(client, slug, alert_type, value):
+        return None
+
+    with patch.object(main, "_opensea_get", new=fake_opensea_get), \
+         patch.object(main, "_nft_mint_radar_seen_has", new=fake_seen_has), \
+         patch.object(main, "_nft_mint_radar_mark_seen", new=fake_mark_seen), \
+         patch.object(main, "_nft_collection_core", new=fake_collection_core), \
+         patch.object(main, "_opensea_get_top_offer", new=fake_top_offer), \
+         patch.object(main, "_nft_recent_snapshots", new=fake_recent_snapshots), \
+         patch.object(main, "_nft_scope_clears_wash_check", new=fake_wash_clean), \
+         patch.object(main, "_nft_poll_tracked_slugs", new=fake_tracked_slugs), \
+         patch.object(main, "_nft_alert_state_get", new=fake_alert_state_get), \
+         patch.object(main, "_nft_alert_state_set", new=fake_alert_state_set), \
+         patch.object(main, "_post_channel_message", new=fake_post):
+        async with main.httpx.AsyncClient() as client:
+            posted = await main._nft_scope_scan(client)
+
+    assert "scam-trending" not in posted
     assert posted == []

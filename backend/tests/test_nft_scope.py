@@ -451,3 +451,72 @@ def test_sharp_signal_scores_higher_and_never_bypasses_hard_gates():
     scam = strong_collection(floor=0.5, totalSupply=1267, owners=131, sales24h=1267, vol1d=100, symbol="USDG")
     score_scam = main._nft_scope_score(scam, None, rapid_activity=sharp)
     assert score_scam["blocked"] and not main._nft_scope_worth_posting(score_scam)
+
+
+# ── Self-adjusting posting slots / scan budgets ──
+# Real 429s (recorded by _opensea_get, not a guess) are the only signal
+# allowed to force conservative mode - demand alone should never be able
+# to loosen anything about WHETHER a candidate qualifies, only HOW MANY
+# qualifying candidates get evaluated/posted per cycle.
+
+async def test_opensea_healthy_with_no_recent_rate_limit_marker():
+    async def fake_alert_state_get(client, slug, alert_type):
+        assert (slug, alert_type) == ("__opensea__", "rate_limited")
+        return None
+
+    with patch.object(main, "_nft_alert_state_get", new=fake_alert_state_get):
+        async with main.httpx.AsyncClient() as client:
+            assert await main._opensea_healthy(client) is True
+
+
+async def test_opensea_unhealthy_right_after_a_real_429():
+    async def fake_alert_state_get(client, slug, alert_type):
+        from datetime import datetime, timezone
+        return {"last_alerted_at": datetime.now(timezone.utc).isoformat()}
+
+    with patch.object(main, "_nft_alert_state_get", new=fake_alert_state_get):
+        async with main.httpx.AsyncClient() as client:
+            assert await main._opensea_healthy(client) is False
+
+
+async def test_opensea_healthy_again_once_the_429_backoff_window_passes():
+    from datetime import datetime, timedelta, timezone
+
+    async def fake_alert_state_get(client, slug, alert_type):
+        old = datetime.now(timezone.utc) - timedelta(seconds=main._NFT_SCOPE_RATE_LIMIT_BACKOFF_SECONDS + 60)
+        return {"last_alerted_at": old.isoformat()}
+
+    with patch.object(main, "_nft_alert_state_get", new=fake_alert_state_get):
+        async with main.httpx.AsyncClient() as client:
+            assert await main._opensea_healthy(client) is True
+
+
+async def test_opensea_healthy_fails_open_on_lookup_error():
+    async def fake_alert_state_get(client, slug, alert_type):
+        raise main.httpx.HTTPError("boom")
+
+    with patch.object(main, "_nft_alert_state_get", new=fake_alert_state_get):
+        async with main.httpx.AsyncClient() as client:
+            assert await main._opensea_healthy(client) is True
+
+
+def test_pass_limits_scale_up_when_healthy_and_contract_when_not():
+    healthy = main._nft_scope_pass_limits(True)
+    base = main._nft_scope_pass_limits(False)
+
+    assert healthy["fresh_max"] == main._NFT_SCOPE_SURGE_MAX_POSTS
+    assert healthy["trending_max"] == main._NFT_SCOPE_SURGE_MAX_POSTS
+    assert healthy["momentum_max"] == main._NFT_SCOPE_SURGE_MAX_POSTS
+    assert healthy["trending_scan_budget"] > base["trending_scan_budget"]
+    assert healthy["momentum_scan_limit"] > base["momentum_scan_limit"]
+
+    assert base["fresh_max"] == main._NFT_SCOPE_FRESH_MAX_POSTS
+    assert base["trending_max"] == main._NFT_SCOPE_TRENDING_MAX_POSTS
+    assert base["momentum_max"] == main._NFT_SCOPE_MOMENTUM_MAX_POSTS
+    assert base["trending_scan_budget"] == main._NFT_SCOPE_TRENDING_SCAN_BUDGET
+    assert base["momentum_scan_limit"] == main._NFT_SCOPE_MOMENTUM_SCAN_LIMIT
+
+    # Surge only ever raises the ceiling - it must never be lower than base.
+    assert healthy["fresh_max"] >= base["fresh_max"]
+    assert healthy["trending_max"] >= base["trending_max"]
+    assert healthy["momentum_max"] >= base["momentum_max"]

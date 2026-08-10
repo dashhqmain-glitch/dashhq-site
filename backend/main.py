@@ -2245,6 +2245,17 @@ async def _opensea_get(client: httpx.AsyncClient, path: str, params: dict | None
                 params=params or {},
                 headers={"X-API-KEY": key},
             )
+        if res.status_code == 429:
+            # Ground-truth signal that OpenSea's free-tier rate limit has
+            # actually been hit right now - recorded so NFT Scope's
+            # dynamic slot/scan-budget sizing can automatically back off,
+            # instead of relying on a manually-tuned guess at what's
+            # "safe." Best-effort: a failed write here must never break
+            # the request already in flight.
+            try:
+                await _nft_alert_state_set(client, "__opensea__", "rate_limited", 0)
+            except httpx.HTTPError:
+                pass
         res.raise_for_status()
         return res.json()
     except (httpx.HTTPError, ValueError):
@@ -3380,11 +3391,20 @@ _NFT_SCOPE_GREEN_THRESHOLD = 85
 # trending alone could fill the whole cap before fresh mints or
 # currently-active smaller projects ever got a look. One slot each
 # guarantees every discovery source gets a fair shot regardless of size.
+#
+# These are the BASE (safe, always-on) sizes. Auto-scaling on top of
+# them - see _opensea_healthy and _nft_scope_pass_limits below - is what
+# makes this self-sufficient long-term instead of a number that needs
+# manual retuning every time real demand or OpenSea's actual rate limit
+# changes: more genuinely-qualifying projects in one cycle raises the
+# cap up to the surge ceiling automatically, and a real OpenSea 429
+# drops everything back to base automatically, without a redeploy.
 _NFT_SCOPE_FRESH_MAX_POSTS = 1
 _NFT_SCOPE_TRENDING_MAX_POSTS = 1
 _NFT_SCOPE_MOMENTUM_MAX_POSTS = 1
+_NFT_SCOPE_SURGE_MAX_POSTS = 3  # per-pass ceiling when OpenSea is healthy AND demand is genuinely there
 _NFT_SCOPE_MOMENTUM_MIN_SNAPSHOTS = 6   # ~30 min of history minimum before trusting a trend
-_NFT_SCOPE_MOMENTUM_SCAN_LIMIT = 25  # bounds OpenSea API usage even when nothing qualifies
+_NFT_SCOPE_MOMENTUM_SCAN_LIMIT = 25  # base; doubles in surge mode, see _nft_scope_pass_limits
 _NFT_SCOPE_TRENDING_LIMIT = 10  # per chain per source
 # A pushed-down cooldown (candidates get re-judged far more often than
 # the standard 1-hour alert cooldown, so nothing sits ignored just
@@ -3399,7 +3419,45 @@ _NFT_SCOPE_TRENDING_LIMIT = 10  # per chain per source
 # touches any scoring or blocking rule - just how often and how much
 # gets looked at.
 _NFT_SCOPE_TRENDING_SCAN_COOLDOWN_SECONDS = 300  # 5 min - matches the poll cadence itself, as fast as a candidate can possibly be re-judged
-_NFT_SCOPE_TRENDING_SCAN_BUDGET = 20  # hard cap on candidates evaluated per cycle across ALL chains combined
+_NFT_SCOPE_TRENDING_SCAN_BUDGET = 20  # base cap on candidates evaluated per cycle across ALL chains combined; doubles in surge mode
+_NFT_SCOPE_RATE_LIMIT_BACKOFF_SECONDS = 1800  # 30 min conservative mode after a real OpenSea 429
+
+
+async def _opensea_healthy(client: httpx.AsyncClient) -> bool:
+    # Ground truth, not a guess: checks whether OpenSea has actually
+    # 429'd us recently (marker written directly inside _opensea_get).
+    # Fails OPEN on a Supabase hiccup - a lookup error should never
+    # itself force permanent throttling, since that would be strictly
+    # worse than just using the safe base limits.
+    try:
+        state = await _nft_alert_state_get(client, "__opensea__", "rate_limited")
+    except httpx.HTTPError:
+        return True
+    return _nft_alert_cooled_down(state, cooldown_seconds=_NFT_SCOPE_RATE_LIMIT_BACKOFF_SECONDS)
+
+
+def _nft_scope_pass_limits(healthy: bool) -> dict:
+    # The self-sufficient part: no fixed slot count to manually retune.
+    # Healthy -> allowed to scale up to the surge ceiling if demand is
+    # actually there (a pass still only uses what it finds real
+    # qualifying candidates for - this raises the CEILING, it doesn't
+    # force extra posts). Recently rate-limited -> drop straight back to
+    # the safe base sizes, automatically, no redeploy needed either way.
+    if healthy:
+        return {
+            "fresh_max": _NFT_SCOPE_SURGE_MAX_POSTS,
+            "trending_max": _NFT_SCOPE_SURGE_MAX_POSTS,
+            "momentum_max": _NFT_SCOPE_SURGE_MAX_POSTS,
+            "trending_scan_budget": _NFT_SCOPE_TRENDING_SCAN_BUDGET * 2,
+            "momentum_scan_limit": _NFT_SCOPE_MOMENTUM_SCAN_LIMIT * 2,
+        }
+    return {
+        "fresh_max": _NFT_SCOPE_FRESH_MAX_POSTS,
+        "trending_max": _NFT_SCOPE_TRENDING_MAX_POSTS,
+        "momentum_max": _NFT_SCOPE_MOMENTUM_MAX_POSTS,
+        "trending_scan_budget": _NFT_SCOPE_TRENDING_SCAN_BUDGET,
+        "momentum_scan_limit": _NFT_SCOPE_MOMENTUM_SCAN_LIMIT,
+    }
 
 
 def _detect_fake_offer(c: dict, top_offer_amount: float | None) -> str | None:
@@ -3785,6 +3843,15 @@ async def _nft_scope_top_offer_amount(client: httpx.AsyncClient, slug: str, c: d
 async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 15) -> list[str]:
     posted: list[str] = []
 
+    # Self-adjusting posting slots / scan budgets: expands toward the
+    # surge ceiling when OpenSea is actually healthy (no recent real 429)
+    # so a cycle with genuine multi-candidate demand isn't artificially
+    # capped at 1 post per pass, and automatically contracts back to the
+    # conservative base sizes the moment a real rate-limit is hit - no
+    # manual retuning or redeploy either way.
+    healthy = await _opensea_healthy(client)
+    limits = _nft_scope_pass_limits(healthy)
+
     # ── Pass 1: fresh mints across the chains this community mints on ──
     # Reserved slot, not pooled with the passes below - see
     # _NFT_SCOPE_FRESH_MAX_POSTS. The posts-per-cycle cap must only gate
@@ -3818,7 +3885,7 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 15) 
                     rapid_activity = await _detect_rapid_activity(client, slug)
                 score = _nft_scope_score(c, top_offer_amount, rapid_activity=rapid_activity)
                 if (
-                    len(fresh_posted) < _NFT_SCOPE_FRESH_MAX_POSTS
+                    len(fresh_posted) < limits["fresh_max"]
                     and _nft_scope_worth_posting(score)
                     and await _nft_scope_clears_wash_check(client, slug)
                 ):
@@ -3861,7 +3928,7 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 15) 
     trending_posted: list[str] = []
     trending_scanned = 0  # counts actual evaluations (past the cooldown gate), not just discovery
     for chain in _NFT_SCOPE_CHAINS:
-        if len(trending_posted) >= _NFT_SCOPE_TRENDING_MAX_POSTS or trending_scanned >= _NFT_SCOPE_TRENDING_SCAN_BUDGET:
+        if len(trending_posted) >= limits["trending_max"] or trending_scanned >= limits["trending_scan_budget"]:
             break
         per_source: dict[str, list[dict]] = {}
         for order_by in ("seven_day_volume", "twenty_four_hour_volume", "twenty_four_hour_sales"):
@@ -3894,7 +3961,7 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 15) 
                     seen_this_chain.add(slug)
                     collections.append(raw)
         for raw in collections:
-            if len(trending_posted) >= _NFT_SCOPE_TRENDING_MAX_POSTS or trending_scanned >= _NFT_SCOPE_TRENDING_SCAN_BUDGET:
+            if len(trending_posted) >= limits["trending_max"] or trending_scanned >= limits["trending_scan_budget"]:
                 break
             slug = raw.get("collection")
             if not slug:
@@ -3941,11 +4008,11 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 15) 
     # two passes. ──
     momentum_posted: list[str] = []
     try:
-        tracked_slugs = (await _nft_poll_tracked_slugs(client))[:_NFT_SCOPE_MOMENTUM_SCAN_LIMIT]
+        tracked_slugs = (await _nft_poll_tracked_slugs(client))[:limits["momentum_scan_limit"]]
     except httpx.HTTPError:
         tracked_slugs = []
     for slug in tracked_slugs:
-        if len(momentum_posted) >= _NFT_SCOPE_MOMENTUM_MAX_POSTS:
+        if len(momentum_posted) >= limits["momentum_max"]:
             break
         try:
             state = await _nft_alert_state_get(client, slug, "nft_scope_momentum")
