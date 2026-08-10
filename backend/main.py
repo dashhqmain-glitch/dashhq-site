@@ -3629,13 +3629,14 @@ def _nft_scope_score(c: dict, top_offer_amount: float | None, history: list[dict
             reasons.append(f"Solid distribution - {owners} owners across {supply} supply ({ratio:.0%})")
         elif ratio >= 0.1:
             points += 5
+            reasons.append(f"Moderate distribution - {owners} owners across {supply} supply ({ratio:.0%})")
         else:
             red_flags.append(f"Concentrated ownership - only {ratio:.0%} owner-to-supply ratio")
 
     # Trading authenticity (0-25)
     if sales > 0:
         points += 15
-        reasons.append(f"{sales} independently recorded sale(s) in the last 24h")
+        reasons.append(f"{sales} independently recorded sale(s) in the last 24h" + (f" moving {vol1d:.4f} {c.get('symbol') or 'ETH'}" if vol1d else ""))
     if floor > 0:
         points += 5
     fake_offer_reason = _detect_fake_offer(c, top_offer_amount)
@@ -3646,12 +3647,16 @@ def _nft_scope_score(c: dict, top_offer_amount: float | None, history: list[dict
         reasons.append("Top offer sitting at or above floor - genuine buy-side pressure")
 
     # Project substance (0-20)
-    if c.get("twitter") or c.get("discord") or c.get("website"):
+    socials = [name for name, present in (("Twitter/X", c.get("twitter")), ("Discord", c.get("discord")), ("website", c.get("website"))) if present]
+    if socials:
         points += 5
+        reasons.append(f"Public presence: {', '.join(socials)} linked - not an anonymous drop with nowhere to be held accountable")
     if len(c.get("description") or "") >= 40:
         points += 5
+        reasons.append("Has a real project description, not a blank listing")
     if c.get("category"):
         points += 5
+        reasons.append(f"Listed under \"{c['category']}\" - a real declared category, not left blank")
     if c.get("verified"):
         points += 5
         reasons.append("OpenSea-verified collection")
@@ -3659,6 +3664,7 @@ def _nft_scope_score(c: dict, top_offer_amount: float | None, history: list[dict
     # Supply sanity (0-10)
     if supply is not None and 1 < supply <= 100_000:
         points += 10
+        reasons.append(f"Supply of {supply} is in a sane range - not an infinite-mint or dust-supply setup")
 
     # Momentum (0-20, only when there's enough tracked history to trust)
     if history:
@@ -3746,32 +3752,113 @@ def _nft_scope_worth_posting(score: dict) -> bool:
     return score["tier"] in ("green", "yellow", "red") and not score["blocked"] and score["has_real_activity"]
 
 
-def _nft_scope_embed(c: dict, score: dict, top_offer_amount: float | None, kind: str) -> dict:
+def _nft_scope_age_text(created_date: str | None) -> str | None:
+    # A collection's age is context nothing else here conveys - a 3-day-old
+    # mint and a 2-year-old collection can post near-identical numbers and
+    # mean completely different things.
+    if not created_date:
+        return None
+    try:
+        created = datetime.fromisoformat(created_date.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    if created.tzinfo is None:
+        created = created.replace(tzinfo=timezone.utc)
+    days = (datetime.now(timezone.utc) - created).total_seconds() / 86400
+    if days < 0:
+        return None
+    if days < 1:
+        return "minted today"
+    if days < 2:
+        return "1 day old"
+    if days < 30:
+        return f"{int(days)} days old"
+    if days < 365:
+        months = max(1, round(days / 30))
+        return f"{months} month{'s' if months != 1 else ''} old"
+    return f"{days / 365:.1f} years old"
+
+
+def _nft_scope_analyst_take(c: dict, score: dict, rapid_activity: dict | None, kind: str) -> str:
+    # Every other line in this embed is a template filled with this
+    # project's own numbers, but nothing ties them together into a single
+    # read on WHY this specific project, right now. This picks the single
+    # strongest thing actually true about THIS collection and leads with
+    # it in plain language, instead of a generic line that would read the
+    # same on every post.
+    name = c.get("name") or "This collection"
+    chain = c.get("chain")
+    chain_clause = f" on {chain.capitalize()}" if chain else ""
+    owners = c.get("owners")
+    supply = c.get("totalSupply")
+    sales = c.get("sales24h") or 0
+
+    if rapid_activity and rapid_activity.get("is_sharp"):
+        return (
+            f"{name}{chain_clause} is moving right now - {rapid_activity['sharp_count']} sale(s) landed in just the "
+            f"last {rapid_activity['sharp_window_minutes']} minutes, part of a {rapid_activity['count']}-sale burst "
+            f"across {rapid_activity['unique_buyers']} distinct buyer(s) in the last {rapid_activity['window_minutes']} min."
+        )
+    if rapid_activity:
+        return (
+            f"{name}{chain_clause} just posted a burst of {rapid_activity['count']} verified sale(s) in the last "
+            f"{rapid_activity['window_minutes']} minutes from {rapid_activity['unique_buyers']} distinct buyer(s) - "
+            "early, accelerating demand, not a stale 24h number catching up."
+        )
+    if kind == "momentum" and any("trending up" in r for r in score["reasons"]):
+        return f"{name}{chain_clause} has been quietly building over multiple recent snapshots - several aligned trends moving together, not a one-off spike."
+    if kind == "fresh":
+        extra = f" - {sales} sale(s) and {owners} owner(s) already on board" if sales and owners else ""
+        return f"{name}{chain_clause} is a fresh mint that's already cleared every wash-trade and activity screen here{extra} - early, not just new."
+    if owners and supply and owners / supply >= 0.2 and sales > 0:
+        return (
+            f"{name}{chain_clause} is trading with real breadth - {owners} distinct owners across {supply} supply "
+            f"and {sales} independently recorded sale(s) in the last 24h."
+        )
+    return f"{name}{chain_clause} cleared every screening gate here on real, independently verified on-chain activity."
+
+
+def _nft_scope_embed(c: dict, score: dict, top_offer_amount: float | None, kind: str, rapid_activity: dict | None = None) -> dict:
     symbol = c.get("symbol") or "ETH"
     title_prefix = {
         "fresh": "🧭 NFT Scope · New Mint",
         "trending": "🧭 NFT Scope · Trending Pick",
         "momentum": "🧭 NFT Scope · Momentum Building",
     }.get(kind, "🧭 NFT Scope")
-    lines = [f"**{score['score']}/100** · {score['risk_tier']}"]
+    lines = [f"*{_nft_scope_analyst_take(c, score, rapid_activity, kind)}*"]
+    lines.append("")
+    lines.append(f"**{score['score']}/100** · {score['risk_tier']}")
     if score["reasons"]:
         lines.append("")
         lines.append("**Why it's on the radar**")
-        lines += [f"• {r}" for r in score["reasons"][:5]]
+        lines += [f"• {r}" for r in score["reasons"]]
     if score["red_flags"]:
         lines.append("")
         lines.append("**Worth noting**")
         lines += [f"⚠️ {f}" for f in score["red_flags"]]
+    description_text = (c.get("description") or "").strip()
+    if description_text:
+        lines.append("")
+        lines.append("**In the project's own words**")
+        lines.append(description_text[:280] + ("…" if len(description_text) > 280 else ""))
     lines.append("")
     lines.append("*Heuristic read from public OpenSea/on-chain data - not financial advice. DYOR before any trade. NFA.*")
 
     top_offer_text = "-"
     if top_offer_amount is not None:
         top_offer_text = f"{top_offer_amount:.4f} {c.get('offerSymbol') or symbol}"
+    floor_text = "-"
+    if (floor := c.get("floor")) is not None:
+        floor_text = f"{floor:.4f} {symbol}"
+        if c.get("floorUsd") is not None:
+            floor_text += f" (~${c['floorUsd']:,.2f})"
     fields = [
-        {"name": "Floor", "value": f"{floor:.4f} {symbol}" if (floor := c.get("floor")) is not None else "-", "inline": True},
+        {"name": "Floor", "value": floor_text, "inline": True},
         {"name": "Top Offer", "value": top_offer_text, "inline": True},
         {"name": "Owners / Supply", "value": f"{c.get('owners') if c.get('owners') is not None else '-'} / {c.get('totalSupply') if c.get('totalSupply') is not None else '-'}", "inline": True},
+        {"name": "Chain", "value": (c.get("chain") or "-").capitalize(), "inline": True},
+        {"name": "Age", "value": _nft_scope_age_text(c.get("createdDate")) or "-", "inline": True},
+        {"name": "Category", "value": c.get("category") or "-", "inline": True},
     ]
     return {
         "title": f"{title_prefix} — {c['name']}",
@@ -3931,7 +4018,7 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
                     and _nft_scope_worth_posting(score)
                     and await _nft_scope_clears_wash_check(client, slug)
                 ):
-                    delivered = await _post_channel_message(client, settings.discord_nft_scope_channel_id, _nft_scope_embed(c, score, top_offer_amount, "fresh"))
+                    delivered = await _post_channel_message(client, settings.discord_nft_scope_channel_id, _nft_scope_embed(c, score, top_offer_amount, "fresh", rapid_activity=rapid_activity))
                     if delivered:
                         fresh_posted.append(slug)
                 # Mark seen regardless of score or whether the post cap
@@ -4038,7 +4125,7 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
                 history = None
             score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity)
             if _nft_scope_worth_posting(score) and await _nft_scope_clears_wash_check(client, slug):
-                delivered = await _post_channel_message(client, settings.discord_nft_scope_channel_id, _nft_scope_embed(c, score, top_offer_amount, "trending"))
+                delivered = await _post_channel_message(client, settings.discord_nft_scope_channel_id, _nft_scope_embed(c, score, top_offer_amount, "trending", rapid_activity=rapid_activity))
                 if delivered:
                     trending_posted.append(slug)
                     await _nft_alert_state_set(client, slug, "nft_scope_trending_post", c.get("floor") or 0)
@@ -4078,7 +4165,7 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
             rapid_activity = await _detect_rapid_activity(client, slug) if (c.get("sales24h") or 0) > 0 else None
             score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity)
             if _nft_scope_worth_posting(score) and await _nft_scope_clears_wash_check(client, slug):
-                delivered = await _post_channel_message(client, settings.discord_nft_scope_channel_id, _nft_scope_embed(c, score, top_offer_amount, "momentum"))
+                delivered = await _post_channel_message(client, settings.discord_nft_scope_channel_id, _nft_scope_embed(c, score, top_offer_amount, "momentum", rapid_activity=rapid_activity))
                 if delivered:
                     await _nft_alert_state_set(client, slug, "nft_scope_momentum", c.get("floor") or 0)
                     momentum_posted.append(slug)

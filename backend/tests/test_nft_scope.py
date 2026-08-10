@@ -7,6 +7,7 @@ _detect_fake_offer, _analyze_wash_trading, _detect_abnormal_turnover,
 _momentum_points, or _detect_rapid_activity, run this file first.
 """
 import time
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import main
@@ -362,6 +363,92 @@ def test_embed_renders_safely_across_every_tier_and_edge_case():
         assert "NFA" in embed["description"]
         embed2 = main._nft_scope_embed(c, score, None, "momentum")
         assert "NFA" in embed2["description"]
+
+
+# ── _nft_scope_age_text ──────────────────────────────────────────────────
+
+def test_age_text_buckets():
+    now = datetime.now(timezone.utc)
+    assert main._nft_scope_age_text(now.isoformat()) == "minted today"
+    assert main._nft_scope_age_text((now - timedelta(days=5)).isoformat()) == "5 days old"
+    assert "month" in main._nft_scope_age_text((now - timedelta(days=90)).isoformat())
+    assert "year" in main._nft_scope_age_text((now - timedelta(days=800)).isoformat())
+
+
+def test_age_text_handles_missing_and_malformed():
+    assert main._nft_scope_age_text(None) is None
+    assert main._nft_scope_age_text("") is None
+    assert main._nft_scope_age_text("not-a-date") is None
+    assert main._nft_scope_age_text("2099-01-01T00:00:00Z") is None  # future timestamp, nonsensical
+
+
+# ── _nft_scope_analyst_take: genuinely distinct per real signal pattern ──
+
+def test_analyst_take_is_distinct_per_signal_pattern():
+    c = strong_collection(name="Signal Test", chain="base")
+    score = main._nft_scope_score(c, None)
+
+    sharp = {"count": 5, "unique_buyers": 4, "unique_sellers": 3, "window_minutes": 30,
+             "price_surge_pct": 10.0, "is_sharp": True, "sharp_count": 3, "sharp_window_minutes": 5}
+    burst = dict(sharp, is_sharp=False)
+
+    take_sharp = main._nft_scope_analyst_take(c, score, sharp, "trending")
+    take_burst = main._nft_scope_analyst_take(c, score, burst, "trending")
+    take_fresh = main._nft_scope_analyst_take(c, score, None, "fresh")
+    take_plain = main._nft_scope_analyst_take(c, score, None, "trending")
+
+    takes = {take_sharp, take_burst, take_fresh, take_plain}
+    assert len(takes) == 4, f"expected 4 distinct reads, got overlap: {takes}"
+    for take in takes:
+        assert "Signal Test" in take
+        assert "Base" in take  # chain surfaced, capitalized
+
+
+def test_analyst_take_handles_missing_data_without_crashing():
+    assert main._nft_scope_analyst_take({}, main._nft_scope_score({}, None), None, "fresh")
+    assert main._nft_scope_analyst_take({"name": "X"}, main._nft_scope_score({"name": "X"}, None), None, "momentum")
+
+
+# ── Richer per-project embed content ────────────────────────────────────
+
+def test_embed_surfaces_chain_age_category_and_full_reason_list():
+    c = strong_collection(
+        name="Rich Data Test", chain="arbitrum", category="art",
+        createdDate=(datetime.now(timezone.utc) - timedelta(days=10)).isoformat(),
+        floorUsd=123.45, description="A" * 300,
+    )
+    score = main._nft_scope_score(c, 0.06)
+    embed = main._nft_scope_embed(c, score, 0.06, "trending", rapid_activity=None)
+
+    field_map = {f["name"]: f["value"] for f in embed["fields"]}
+    assert field_map["Chain"] == "Arbitrum"
+    assert "10 days old" == field_map["Age"]
+    assert field_map["Category"] == "art"
+    assert "123.45" in field_map["Floor"]
+    assert "In the project's own words" in embed["description"]
+    assert "…" in embed["description"]  # 300-char description gets truncated
+    # Every collected reason should actually appear, not just the first few.
+    assert len(score["reasons"]) > 5
+    for reason in score["reasons"]:
+        assert reason in embed["description"]
+
+
+def test_embed_stays_within_discord_description_limit_even_with_every_signal_firing():
+    # Removing the old top-5 cap on reasons means a maximal case (every
+    # signal firing at once, plus red flags, plus a long description)
+    # needs to be checked against Discord's real 4096-char description
+    # cap instead of just trusted to fit.
+    c = strong_collection(
+        name="Kitchen Sink", chain="ethereum", category="art", verified=True,
+        description="B" * 280, twitter="x", discord="d", website="w",
+        owners=400, totalSupply=500, sales24h=20, vol1d=5.0,
+    )
+    history = history_from([0.02, 0.03, 0.04, 0.05, 0.06, 0.07], "floor")
+    sharp = {"count": 8, "unique_buyers": 6, "unique_sellers": 5, "window_minutes": 30,
+             "price_surge_pct": 40.0, "is_sharp": True, "sharp_count": 4, "sharp_window_minutes": 5}
+    score = main._nft_scope_score(c, 0.08, history=history, rapid_activity=sharp)
+    embed = main._nft_scope_embed(c, score, 0.08, "momentum", rapid_activity=sharp)
+    assert len(embed["description"]) <= 4096
 
 
 # ── rapid activity: price-surge-within-the-burst extension ─────────────
