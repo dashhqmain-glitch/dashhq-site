@@ -3405,7 +3405,7 @@ _NFT_SCOPE_MOMENTUM_MAX_POSTS = 1
 _NFT_SCOPE_SURGE_MAX_POSTS = 3  # per-pass ceiling when OpenSea is healthy AND demand is genuinely there
 _NFT_SCOPE_MOMENTUM_MIN_SNAPSHOTS = 6   # ~30 min of history minimum before trusting a trend
 _NFT_SCOPE_MOMENTUM_SCAN_LIMIT = 25  # base; doubles in surge mode, see _nft_scope_pass_limits
-_NFT_SCOPE_TRENDING_LIMIT = 10  # per chain per source
+_NFT_SCOPE_TRENDING_LIMIT = 25  # per chain per source - wider discovery pool, more distinct candidates to round-robin over
 # A pushed-down cooldown (candidates get re-judged far more often than
 # the standard 1-hour alert cooldown, so nothing sits ignored just
 # because it failed once) is only safe if worst-case cost per cycle is
@@ -3421,6 +3421,13 @@ _NFT_SCOPE_TRENDING_LIMIT = 10  # per chain per source
 _NFT_SCOPE_TRENDING_SCAN_COOLDOWN_SECONDS = 300  # 5 min - matches the poll cadence itself, as fast as a candidate can possibly be re-judged
 _NFT_SCOPE_TRENDING_SCAN_BUDGET = 20  # base cap on candidates evaluated per cycle across ALL chains combined; doubles in surge mode
 _NFT_SCOPE_RATE_LIMIT_BACKOFF_SECONDS = 1800  # 30 min conservative mode after a real OpenSea 429
+# Deliberately separate from the scan cooldown above: re-SCANNING a
+# candidate every 5 min keeps discovery fresh, but re-POSTING the same
+# winner every 5 min just because it still clears the bar starves every
+# other qualifying project out of the one reserved slot. This is the
+# knob that actually forces rotation across "a ton of projects" instead
+# of the same one or two repeatedly claiming the spot cycle after cycle.
+_NFT_SCOPE_TRENDING_POST_COOLDOWN_SECONDS = 3600  # 1 hour - matches the momentum pass's own repost cadence
 
 
 async def _opensea_healthy(client: httpx.AsyncClient) -> bool:
@@ -3511,6 +3518,26 @@ def _detect_abnormal_turnover(c: dict) -> str | None:
                 f"{sales} sales across only {owners} current owners (~{flips_per_owner:.1f} flips per "
                 "holder in 24h) - way beyond organic trading, looks like scripted churn among a small set of wallets"
             )
+    return None
+
+
+_NFT_SCOPE_BLUE_CHIP_OWNERS_THRESHOLD = 2500  # already-established collections everyone knows, not secondary-play alpha
+
+
+def _detect_blue_chip(c: dict) -> str | None:
+    # Owners count is chain-agnostic (unlike floor/volume, which are
+    # priced in whatever native token that chain uses) and is the
+    # cleanest signal for "this is already a widely-known, widely-held
+    # collection" - the point of NFT Scope is surfacing plays nobody's
+    # watching yet, not re-announcing CryptoPunks/BAYC/Pudgy Penguins
+    # every time someone tracks them. A collection this broadly held
+    # doesn't need an alpha call; it needs no introduction.
+    owners = c.get("owners")
+    if owners and owners >= _NFT_SCOPE_BLUE_CHIP_OWNERS_THRESHOLD:
+        return (
+            f"{owners} owners - already an established, widely-held collection, not an emerging "
+            "secondary play; NFT Scope is for what's still under the radar"
+        )
     return None
 
 
@@ -3662,12 +3689,18 @@ def _nft_scope_score(c: dict, top_offer_amount: float | None, history: list[dict
     if turnover_reason:
         red_flags.append(turnover_reason)
 
-    # A detected fake offer or an abnormal supply/owner turnover is a
-    # manipulation signal, not a minor deduction - never recommend
-    # regardless of how high the rest of the score is (both can otherwise
-    # produce a HIGH score, since "lots of sales" and "many owners" are
-    # exactly what those numbers look like from the outside).
-    blocked = fake_offer_reason is not None or turnover_reason is not None
+    blue_chip_reason = _detect_blue_chip(c)
+    if blue_chip_reason:
+        red_flags.append(blue_chip_reason)
+
+    # A detected fake offer, an abnormal supply/owner turnover, or an
+    # already-established blue chip is a hard stop, not a minor
+    # deduction - never recommend regardless of how high the rest of the
+    # score is (the first two can otherwise produce a HIGH score, since
+    # "lots of sales" and "many owners" are exactly what those numbers
+    # look like from the outside; the third would score highest of all,
+    # since a blue chip legitimately aces every soft signal).
+    blocked = fake_offer_reason is not None or turnover_reason is not None or blue_chip_reason is not None
 
     # A description, social links, a category, even a listed floor price
     # cost a scammer nothing to fake and don't require a single other
@@ -3970,6 +4003,16 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 15) 
                 scan_state = await _nft_alert_state_get(client, slug, "nft_scope_trending_scan")
                 if not _nft_alert_cooled_down(scan_state, cooldown_seconds=_NFT_SCOPE_TRENDING_SCAN_COOLDOWN_SECONDS):
                     continue
+                # Checked BEFORE spending any real OpenSea calls on this
+                # candidate - if it already claimed the trending slot
+                # recently, evaluating it again just burns scan budget
+                # that could go toward finding something new instead. This
+                # is what actually forces rotation across the wider pool
+                # instead of the same one or two winners repeating every
+                # cycle they still clear the bar.
+                post_state = await _nft_alert_state_get(client, slug, "nft_scope_trending_post")
+                if not _nft_alert_cooled_down(post_state, cooldown_seconds=_NFT_SCOPE_TRENDING_POST_COOLDOWN_SECONDS):
+                    continue
                 trending_scanned += 1
                 c = await _nft_collection_core(slug)
                 top_offer_amount = await _nft_scope_top_offer_amount(client, slug, c)
@@ -3990,6 +4033,7 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 15) 
                     delivered = await _post_channel_message(client, settings.discord_nft_scope_channel_id, _nft_scope_embed(c, score, top_offer_amount, "trending"))
                     if delivered:
                         trending_posted.append(slug)
+                        await _nft_alert_state_set(client, slug, "nft_scope_trending_post", c.get("floor") or 0)
                 # Mark as scanned regardless of outcome - rate-limits
                 # re-checking this specific candidate, it doesn't mean
                 # "never again" the way the fresh-mint seen-table does.

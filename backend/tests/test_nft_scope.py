@@ -155,6 +155,49 @@ def test_turnover_handles_missing_and_zero_data():
     assert main._detect_abnormal_turnover({"sales24h": 50}) is None  # no supply/owners data at all
 
 
+# ── _detect_blue_chip (NFT Scope is for secondary plays, not majors) ────
+
+def test_blue_chip_blocks_established_majors():
+    # Real owner counts in the ballpark of CryptoPunks/BAYC/Pudgy Penguins.
+    for owners in (3700, 6400, 5000):
+        c = {"owners": owners, "totalSupply": 10000}
+        assert main._detect_blue_chip(c) is not None
+
+
+def test_blue_chip_does_not_flag_small_emerging_projects():
+    c = {"owners": 80, "totalSupply": 500}
+    assert main._detect_blue_chip(c) is None
+
+
+def test_blue_chip_threshold_boundary():
+    assert main._detect_blue_chip({"owners": main._NFT_SCOPE_BLUE_CHIP_OWNERS_THRESHOLD - 1}) is None
+    assert main._detect_blue_chip({"owners": main._NFT_SCOPE_BLUE_CHIP_OWNERS_THRESHOLD}) is not None
+
+
+def test_blue_chip_handles_missing_data():
+    assert main._detect_blue_chip({}) is None
+    assert main._detect_blue_chip({"owners": None}) is None
+
+
+def test_score_blocks_blue_chip_even_with_perfect_soft_signals():
+    # A blue chip legitimately aces every other check (real sales, deep
+    # distribution, full socials, verified) - it would otherwise be the
+    # highest-scoring thing NFT Scope ever sees. The gate has to be a
+    # hard block, not a deduction, or this is exactly the collection
+    # that keeps winning every slot.
+    bayc_shaped = strong_collection(owners=6400, totalSupply=10000, sales24h=40, vol1d=50, floor=8.0)
+    score = main._nft_scope_score(bayc_shaped, 8.5)
+    assert score["blocked"] is True
+    assert not main._nft_scope_worth_posting(score)
+    assert any("widely-held" in f for f in score["red_flags"])
+
+
+def test_score_allows_small_project_below_blue_chip_threshold():
+    small = strong_collection(owners=80, totalSupply=500, sales24h=3, vol1d=0.3)
+    score = main._nft_scope_score(small, None)
+    assert score["blocked"] is False
+
+
 # ── _momentum_points (floor + volume + owner-growth, aligned trends) ──
 
 def test_momentum_all_three_signals_aligned_gives_full_points():

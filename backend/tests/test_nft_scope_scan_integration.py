@@ -613,3 +613,84 @@ async def test_surge_mode_never_loosens_whether_a_candidate_qualifies():
 
     assert "scam-trending" not in posted
     assert posted == []
+
+
+async def test_trending_pass_rotates_off_a_recent_winner_instead_of_reposting_it():
+    # The bug this fixes: with only the 5-min SCAN cooldown, a candidate
+    # that clears the bar keeps winning the single reserved slot every
+    # cycle it's re-evaluated, so the same one or two projects repeat
+    # over and over even though plenty of other qualifying candidates
+    # exist. The separate, much longer POST cooldown means a winner that
+    # just posted steps aside next cycle so a different qualifying
+    # candidate actually gets the slot.
+    _config_channel()
+    state: dict = {}  # shared across both calls, like the real Supabase-backed store
+
+    async def fake_opensea_get(client, path, params=None):
+        if path == "/collections":
+            if params["order_by"] == "created_date" or params["chain"] != "ethereum":
+                return {"collections": []}
+            if params["order_by"] != "seven_day_volume":
+                return {"collections": []}
+            return {"collections": [{"collection": s} for s in ("winner-1", "winner-2", "winner-3", "winner-4")]}
+        if path.startswith("/events/collection/"):
+            return {"asset_events": []}
+        raise AssertionError(f"unexpected {path}")
+
+    async def fake_alert_state_get(client, slug, alert_type):
+        if (slug, alert_type) == ("__opensea__", "rate_limited"):
+            # Forced unhealthy so the reserved slot count is deterministic
+            # (base limit of 1), isolating the rotation behavior itself.
+            return {"last_alerted_at": datetime.now(timezone.utc).isoformat()}
+        return state.get((slug, alert_type))
+
+    async def fake_alert_state_set(client, slug, alert_type, value):
+        state[(slug, alert_type)] = {"last_alerted_at": datetime.now(timezone.utc).isoformat()}
+
+    async def fake_collection_core(slug):
+        return _strong_collection(slug)
+
+    async def fake_top_offer(client, slug):
+        return None
+
+    async def fake_recent_snapshots(client, slug, limit=30):
+        return []
+
+    async def fake_post(client, channel_id, embed, content=None):
+        return True
+
+    async def fake_wash_clean(client, slug):
+        return True
+
+    async def fake_tracked_slugs(client):
+        return []
+
+    async def fake_seen_has(client, slug):
+        return False
+
+    async def fake_mark_seen(client, slug):
+        return None
+
+    with patch.object(main, "_opensea_get", new=fake_opensea_get), \
+         patch.object(main, "_nft_mint_radar_seen_has", new=fake_seen_has), \
+         patch.object(main, "_nft_mint_radar_mark_seen", new=fake_mark_seen), \
+         patch.object(main, "_nft_collection_core", new=fake_collection_core), \
+         patch.object(main, "_opensea_get_top_offer", new=fake_top_offer), \
+         patch.object(main, "_nft_recent_snapshots", new=fake_recent_snapshots), \
+         patch.object(main, "_nft_scope_clears_wash_check", new=fake_wash_clean), \
+         patch.object(main, "_nft_poll_tracked_slugs", new=fake_tracked_slugs), \
+         patch.object(main, "_nft_alert_state_get", new=fake_alert_state_get), \
+         patch.object(main, "_nft_alert_state_set", new=fake_alert_state_set), \
+         patch.object(main, "_post_channel_message", new=fake_post):
+        async with main.httpx.AsyncClient() as client:
+            first_posted = await main._nft_scope_scan(client)
+        # Clear the scan-cooldown bookkeeping only (simulates enough time
+        # passing to re-scan) while leaving the post-cooldown intact -
+        # that's the exact condition this fix targets.
+        state = {k: v for k, v in state.items() if k[1] != "nft_scope_trending_scan"}
+        async with main.httpx.AsyncClient() as client:
+            second_posted = await main._nft_scope_scan(client)
+
+    assert first_posted == ["winner-1"]
+    assert "winner-1" not in second_posted
+    assert second_posted == ["winner-2"]
