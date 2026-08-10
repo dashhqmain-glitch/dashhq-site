@@ -2468,6 +2468,30 @@ async def _discord_watchlist_remove(discord_user_id: str, slug: str) -> None:
         res.raise_for_status()
 
 
+async def _discord_watchlist_clear(discord_user_id: str) -> int:
+    # A lightweight slug-only count first, not the full _discord_watchlist_list
+    # (which fetches each collection's live OpenSea data via
+    # asyncio.gather) - clearing doesn't need any of that, just how many
+    # rows existed, so this stays a single cheap Supabase round trip.
+    async with httpx.AsyncClient(timeout=10) as client:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/discord_nft_watchlist",
+            headers=_supabase_headers(),
+            params={"discord_user_id": f"eq.{discord_user_id}", "select": "slug"},
+        )
+        res.raise_for_status()
+        count = len(res.json())
+        if count == 0:
+            return 0
+        del_res = await client.delete(
+            f"{settings.supabase_url}/rest/v1/discord_nft_watchlist",
+            headers=_supabase_headers(prefer="return=minimal"),
+            params={"discord_user_id": f"eq.{discord_user_id}"},
+        )
+        del_res.raise_for_status()
+        return count
+
+
 async def _discord_watchlist_list(discord_user_id: str) -> list[dict]:
     async with httpx.AsyncClient(timeout=10) as client:
         res = await client.get(
@@ -4891,7 +4915,7 @@ async def _announce_watchlist_change(discord_user_id: str, name: str, verb: str,
 async def _cmd_watchlist(payload: dict, discord_user_id: str) -> dict:
     sub_options = (payload.get("data") or {}).get("options") or []
     if not sub_options:
-        return {"title": "Missing subcommand", "description": "Use `/watchlist add`, `remove`, or `list`.", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
+        return {"title": "Missing subcommand", "description": "Use `/watchlist add`, `remove`, `list`, or `clear`.", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
     sub = sub_options[0]
     sub_name = sub.get("name")
     sub_opts = {o["name"]: o.get("value") for o in (sub.get("options") or [])}
@@ -4906,6 +4930,14 @@ async def _cmd_watchlist(payload: dict, discord_user_id: str) -> dict:
             floor = f"{c['floor']:.3f} {c['symbol']}" if c.get("floor") is not None else "-"
             lines.append(f"{check}**[{c['name']}]({c.get('openseaUrl')})**: Floor {floor}")
         return {"title": "📌 Your NFT Watchlist", "description": "\n".join(lines), "color": EMBED_COLOR, "footer": TOOLKIT_FOOTER}
+
+    if sub_name == "clear":
+        count = await _discord_watchlist_clear(discord_user_id)
+        if count == 0:
+            return {"title": "Nothing to clear", "description": "Your watchlist is already empty.", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
+        plural = "s" if count != 1 else ""
+        await _announce_watchlist_change(discord_user_id, f"{count} collection{plural}", "cleared", "")
+        return {"title": "📌 Watchlist cleared", "description": f"Removed all {count} collection{plural} from your watchlist.", "color": EMBED_COLOR, "footer": TOOLKIT_FOOTER}
 
     query = (sub_opts.get("collection") or "").strip()
     if not query:
@@ -5033,7 +5065,7 @@ TOOLKIT_TOOLS = {
     "watchlist": {
         "emoji": "📌", "label": "NFT Watchlist",
         "short": "Track your own personal list of NFT collections",
-        "usage": "/watchlist add|remove|list collection:<name or contract address>",
+        "usage": "/watchlist add|remove|list|clear collection:<name or contract address>",
         "example": "/watchlist add collection:Pudgy Penguins",
     },
     "monitor": {

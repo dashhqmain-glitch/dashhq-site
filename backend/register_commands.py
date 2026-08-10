@@ -101,6 +101,7 @@ COMMANDS = [
                 "options": [{"name": "collection", "description": "Collection name or contract address", "type": 3, "required": True}],
             },
             {"name": "list", "description": "Show everything on your watchlist", "type": 1},
+            {"name": "clear", "description": "Remove everything from your watchlist", "type": 1},
         ],
     },
     {
