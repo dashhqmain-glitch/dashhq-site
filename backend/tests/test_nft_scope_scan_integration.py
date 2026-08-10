@@ -2,7 +2,7 @@
 passes (fresh mints, trending discovery, tracked-collection momentum) -
 verifying they compose correctly and that widening discovery never loosens
 the strict pruning rules."""
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import main
@@ -79,7 +79,7 @@ async def test_trending_pass_finds_a_strong_established_collection_outside_the_o
         return None
 
     with patch.object(main, "_opensea_get", new=fake_opensea_get), \
-         patch.object(main, "_nft_mint_radar_seen_has", new=fake_seen_has), \
+         patch.object(main, "_nft_mint_radar_recently_seen", new=fake_seen_has), \
          patch.object(main, "_nft_mint_radar_mark_seen", new=fake_mark_seen), \
          patch.object(main, "_nft_collection_core", new=fake_collection_core), \
          patch.object(main, "_opensea_get_top_offer", new=fake_top_offer), \
@@ -126,7 +126,7 @@ async def test_trending_candidate_not_rescanned_within_cooldown():
         return False
 
     with patch.object(main, "_opensea_get", new=fake_opensea_get), \
-         patch.object(main, "_nft_mint_radar_seen_has", new=fake_seen_has), \
+         patch.object(main, "_nft_mint_radar_recently_seen", new=fake_seen_has), \
          patch.object(main, "_nft_collection_core", new=counting_collection_core), \
          patch.object(main, "_nft_poll_tracked_slugs", new=fake_tracked_slugs), \
          patch.object(main, "_nft_alert_state_get", new=fake_alert_state_get):
@@ -182,7 +182,7 @@ async def test_trending_pass_still_blocks_scam_shaped_collections():
         return None
 
     with patch.object(main, "_opensea_get", new=fake_opensea_get), \
-         patch.object(main, "_nft_mint_radar_seen_has", new=fake_seen_has), \
+         patch.object(main, "_nft_mint_radar_recently_seen", new=fake_seen_has), \
          patch.object(main, "_nft_mint_radar_mark_seen", new=fake_mark_seen), \
          patch.object(main, "_nft_collection_core", new=fake_collection_core), \
          patch.object(main, "_opensea_get_top_offer", new=fake_top_offer), \
@@ -253,7 +253,7 @@ async def test_trending_pass_queries_both_7day_and_24h_volume_and_dedupes():
         return None
 
     with patch.object(main, "_opensea_get", new=fake_opensea_get), \
-         patch.object(main, "_nft_mint_radar_seen_has", new=fake_seen_has), \
+         patch.object(main, "_nft_mint_radar_recently_seen", new=fake_seen_has), \
          patch.object(main, "_nft_mint_radar_mark_seen", new=fake_mark_seen), \
          patch.object(main, "_nft_collection_core", new=fake_collection_core), \
          patch.object(main, "_opensea_get_top_offer", new=fake_top_offer), \
@@ -322,7 +322,7 @@ async def test_trending_slot_is_not_structurally_biased_toward_any_single_discov
 
     winners = set()
     with patch.object(main, "_opensea_get", new=fake_opensea_get), \
-         patch.object(main, "_nft_mint_radar_seen_has", new=fake_seen_has), \
+         patch.object(main, "_nft_mint_radar_recently_seen", new=fake_seen_has), \
          patch.object(main, "_nft_mint_radar_mark_seen", new=fake_mark_seen), \
          patch.object(main, "_nft_collection_core", new=fake_collection_core), \
          patch.object(main, "_opensea_get_top_offer", new=fake_top_offer), \
@@ -395,7 +395,7 @@ async def test_trending_pass_is_not_structurally_biased_toward_any_single_chain(
 
     winners = set()
     with patch.object(main, "_opensea_get", new=fake_opensea_get), \
-         patch.object(main, "_nft_mint_radar_seen_has", new=fake_seen_has), \
+         patch.object(main, "_nft_mint_radar_recently_seen", new=fake_seen_has), \
          patch.object(main, "_nft_mint_radar_mark_seen", new=fake_mark_seen), \
          patch.object(main, "_nft_collection_core", new=fake_collection_core), \
          patch.object(main, "_opensea_get_top_offer", new=fake_top_offer), \
@@ -463,7 +463,7 @@ async def test_trending_pass_spreads_across_multiple_chains_within_one_cycle():
         return None
 
     with patch.object(main, "_opensea_get", new=fake_opensea_get), \
-         patch.object(main, "_nft_mint_radar_seen_has", new=fake_seen_has), \
+         patch.object(main, "_nft_mint_radar_recently_seen", new=fake_seen_has), \
          patch.object(main, "_nft_mint_radar_mark_seen", new=fake_mark_seen), \
          patch.object(main, "_nft_collection_core", new=fake_collection_core), \
          patch.object(main, "_opensea_get_top_offer", new=fake_top_offer), \
@@ -536,7 +536,7 @@ async def test_trending_scan_budget_bounds_worst_case_api_cost():
         return None
 
     with patch.object(main, "_opensea_get", new=fake_opensea_get), \
-         patch.object(main, "_nft_mint_radar_seen_has", new=fake_seen_has), \
+         patch.object(main, "_nft_mint_radar_recently_seen", new=fake_seen_has), \
          patch.object(main, "_nft_mint_radar_mark_seen", new=fake_mark_seen), \
          patch.object(main, "_nft_collection_core", new=fake_collection_core), \
          patch.object(main, "_opensea_get_top_offer", new=fake_top_offer), \
@@ -606,7 +606,7 @@ async def test_healthy_opensea_posts_more_than_one_when_genuine_demand_exists():
         return None
 
     with patch.object(main, "_opensea_get", new=fake_opensea_get), \
-         patch.object(main, "_nft_mint_radar_seen_has", new=fake_seen_has), \
+         patch.object(main, "_nft_mint_radar_recently_seen", new=fake_seen_has), \
          patch.object(main, "_nft_mint_radar_mark_seen", new=fake_mark_seen), \
          patch.object(main, "_nft_collection_core", new=fake_collection_core), \
          patch.object(main, "_opensea_get_top_offer", new=fake_top_offer), \
@@ -675,7 +675,7 @@ async def test_recent_real_429_forces_scan_back_to_conservative_base_limits():
         return None
 
     with patch.object(main, "_opensea_get", new=fake_opensea_get), \
-         patch.object(main, "_nft_mint_radar_seen_has", new=fake_seen_has), \
+         patch.object(main, "_nft_mint_radar_recently_seen", new=fake_seen_has), \
          patch.object(main, "_nft_mint_radar_mark_seen", new=fake_mark_seen), \
          patch.object(main, "_nft_collection_core", new=fake_collection_core), \
          patch.object(main, "_opensea_get_top_offer", new=fake_top_offer), \
@@ -738,7 +738,7 @@ async def test_surge_mode_never_loosens_whether_a_candidate_qualifies():
         return None
 
     with patch.object(main, "_opensea_get", new=fake_opensea_get), \
-         patch.object(main, "_nft_mint_radar_seen_has", new=fake_seen_has), \
+         patch.object(main, "_nft_mint_radar_recently_seen", new=fake_seen_has), \
          patch.object(main, "_nft_mint_radar_mark_seen", new=fake_mark_seen), \
          patch.object(main, "_nft_collection_core", new=fake_collection_core), \
          patch.object(main, "_opensea_get_top_offer", new=fake_top_offer), \
@@ -812,7 +812,7 @@ async def test_trending_pass_rotates_off_a_recent_winner_instead_of_reposting_it
         return None
 
     with patch.object(main, "_opensea_get", new=fake_opensea_get), \
-         patch.object(main, "_nft_mint_radar_seen_has", new=fake_seen_has), \
+         patch.object(main, "_nft_mint_radar_recently_seen", new=fake_seen_has), \
          patch.object(main, "_nft_mint_radar_mark_seen", new=fake_mark_seen), \
          patch.object(main, "_nft_collection_core", new=fake_collection_core), \
          patch.object(main, "_opensea_get_top_offer", new=fake_top_offer), \
@@ -893,7 +893,7 @@ async def test_momentum_pass_is_not_structurally_biased_toward_alphabetically_ea
     winners = set()
     with patch.object(main, "_NFT_SCOPE_MOMENTUM_SCAN_LIMIT", 2), \
          patch.object(main, "_opensea_get", new=fake_opensea_get), \
-         patch.object(main, "_nft_mint_radar_seen_has", new=fake_seen_has), \
+         patch.object(main, "_nft_mint_radar_recently_seen", new=fake_seen_has), \
          patch.object(main, "_nft_mint_radar_mark_seen", new=fake_mark_seen), \
          patch.object(main, "_nft_collection_core", new=fake_collection_core), \
          patch.object(main, "_opensea_get_top_offer", new=fake_top_offer), \
@@ -972,7 +972,7 @@ async def test_a_collection_cannot_be_posted_twice_by_different_passes_in_one_cy
         return None
 
     with patch.object(main, "_opensea_get", new=fake_opensea_get), \
-         patch.object(main, "_nft_mint_radar_seen_has", new=fake_seen_has), \
+         patch.object(main, "_nft_mint_radar_recently_seen", new=fake_seen_has), \
          patch.object(main, "_nft_mint_radar_mark_seen", new=fake_mark_seen), \
          patch.object(main, "_nft_collection_core", new=fake_collection_core), \
          patch.object(main, "_opensea_get_top_offer", new=fake_top_offer), \
@@ -987,3 +987,164 @@ async def test_a_collection_cannot_be_posted_twice_by_different_passes_in_one_cy
 
     assert posted.count(slug) == 1, f"same collection posted more than once in one cycle: {posted}"
     assert len(posted_by) == 1, f"channel got more than one message for the same collection: {posted_by}"
+
+
+async def test_fresh_mint_gets_a_new_look_after_recheck_cooldown_instead_of_being_skipped_forever():
+    # The bug this fixes: a mint with zero activity on day one (near
+    # universal - it's hours old) used to get marked "seen" PERMANENTLY,
+    # so even if it built real traction days later, the fresh-mint pass
+    # would never look at it again. Same candidate scanned twice: first
+    # time it has no sales yet (fails the mandatory-activity gate),
+    # second time (after the recheck cooldown) it has real sales - it
+    # must be genuinely re-evaluated the second time, not skipped.
+    _config_channel()
+    seen_state: dict = {}
+    call_count = {"n": 0}
+
+    async def fake_opensea_get(client, path, params=None):
+        if path == "/collections":
+            if params["order_by"] == "created_date" and params["chain"] == "ethereum":
+                return {"collections": [{"collection": "grower"}]}
+            return {"collections": []}
+        if path.startswith("/events/collection/"):
+            return {"asset_events": []}
+        raise AssertionError(f"unexpected {path}")
+
+    async def fake_recently_seen(client, slug, cooldown_seconds=main._NFT_SCOPE_FRESH_RECHECK_COOLDOWN_SECONDS):
+        ts = seen_state.get(slug)
+        if not ts:
+            return False
+        return not main._nft_alert_cooled_down({"last_alerted_at": ts}, cooldown_seconds=cooldown_seconds)
+
+    async def fake_mark_seen(client, slug):
+        seen_state[slug] = datetime.now(timezone.utc).isoformat()
+
+    evaluated = []
+
+    async def fake_collection_core(slug):
+        evaluated.append(slug)
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return {**_strong_collection(slug), "sales24h": 0, "vol1d": 0}
+        return _strong_collection(slug)
+
+    async def fake_top_offer(client, slug):
+        return None
+
+    async def fake_wash_clean(client, slug):
+        return True
+
+    async def fake_post(client, channel_id, embed, content=None):
+        return True
+
+    async def fake_tracked_slugs(client):
+        return []
+
+    state: dict = {}
+
+    async def fake_alert_state_get(client, slug, alert_type):
+        return state.get((slug, alert_type))
+
+    async def fake_alert_state_set(client, slug, alert_type, value):
+        state[(slug, alert_type)] = {"last_alerted_at": datetime.now(timezone.utc).isoformat()}
+
+    with patch.object(main, "_opensea_get", new=fake_opensea_get), \
+         patch.object(main, "_nft_mint_radar_recently_seen", new=fake_recently_seen), \
+         patch.object(main, "_nft_mint_radar_mark_seen", new=fake_mark_seen), \
+         patch.object(main, "_nft_collection_core", new=fake_collection_core), \
+         patch.object(main, "_opensea_get_top_offer", new=fake_top_offer), \
+         patch.object(main, "_nft_scope_clears_wash_check", new=fake_wash_clean), \
+         patch.object(main, "_nft_poll_tracked_slugs", new=fake_tracked_slugs), \
+         patch.object(main, "_nft_alert_state_get", new=fake_alert_state_get), \
+         patch.object(main, "_nft_alert_state_set", new=fake_alert_state_set), \
+         patch.object(main, "_post_channel_message", new=fake_post):
+        async with main.httpx.AsyncClient() as client:
+            first_posted = await main._nft_scope_scan(client)
+        assert first_posted == []
+        assert "grower" in evaluated
+
+        # Simulate the recheck cooldown having passed.
+        old = datetime.now(timezone.utc) - timedelta(seconds=main._NFT_SCOPE_FRESH_RECHECK_COOLDOWN_SECONDS + 60)
+        seen_state["grower"] = old.isoformat()
+
+        async with main.httpx.AsyncClient() as client:
+            second_posted = await main._nft_scope_scan(client)
+
+    assert evaluated.count("grower") == 2, "should have been genuinely re-evaluated, not permanently skipped"
+    assert second_posted == ["grower"]
+
+
+async def test_fresh_mint_already_posted_is_never_reannounced_even_after_cooldowns_expire():
+    # Complements the test above: once a mint HAS actually been posted as
+    # a New Mint pick, it must never be re-announced again, even long
+    # after both the recheck cooldown and the cross-pass any-post
+    # cooldown have expired - the permanent fresh-posted marker is the
+    # only thing standing between "give unproven mints repeated chances"
+    # and "spam the same successful call over and over."
+    _config_channel()
+    seen_state: dict = {}
+
+    async def fake_opensea_get(client, path, params=None):
+        if path == "/collections":
+            if params["order_by"] == "created_date" and params["chain"] == "ethereum":
+                return {"collections": [{"collection": "already-called"}]}
+            return {"collections": []}
+        if path.startswith("/events/collection/"):
+            return {"asset_events": []}
+        raise AssertionError(f"unexpected {path}")
+
+    async def fake_recently_seen(client, slug, cooldown_seconds=main._NFT_SCOPE_FRESH_RECHECK_COOLDOWN_SECONDS):
+        ts = seen_state.get(slug)
+        if not ts:
+            return False
+        return not main._nft_alert_cooled_down({"last_alerted_at": ts}, cooldown_seconds=cooldown_seconds)
+
+    async def fake_mark_seen(client, slug):
+        seen_state[slug] = datetime.now(timezone.utc).isoformat()
+
+    async def fake_collection_core(slug):
+        return _strong_collection(slug)
+
+    async def fake_top_offer(client, slug):
+        return None
+
+    async def fake_wash_clean(client, slug):
+        return True
+
+    async def fake_post(client, channel_id, embed, content=None):
+        return True
+
+    async def fake_tracked_slugs(client):
+        return []
+
+    state: dict = {}
+
+    async def fake_alert_state_get(client, slug, alert_type):
+        return state.get((slug, alert_type))
+
+    async def fake_alert_state_set(client, slug, alert_type, value):
+        state[(slug, alert_type)] = {"last_alerted_at": datetime.now(timezone.utc).isoformat()}
+
+    with patch.object(main, "_opensea_get", new=fake_opensea_get), \
+         patch.object(main, "_nft_mint_radar_recently_seen", new=fake_recently_seen), \
+         patch.object(main, "_nft_mint_radar_mark_seen", new=fake_mark_seen), \
+         patch.object(main, "_nft_collection_core", new=fake_collection_core), \
+         patch.object(main, "_opensea_get_top_offer", new=fake_top_offer), \
+         patch.object(main, "_nft_scope_clears_wash_check", new=fake_wash_clean), \
+         patch.object(main, "_nft_poll_tracked_slugs", new=fake_tracked_slugs), \
+         patch.object(main, "_nft_alert_state_get", new=fake_alert_state_get), \
+         patch.object(main, "_nft_alert_state_set", new=fake_alert_state_set), \
+         patch.object(main, "_post_channel_message", new=fake_post):
+        async with main.httpx.AsyncClient() as client:
+            first_posted = await main._nft_scope_scan(client)
+        assert first_posted == ["already-called"]
+
+        old = datetime.now(timezone.utc) - timedelta(days=30)
+        seen_state["already-called"] = old.isoformat()
+        for key in list(state.keys()):
+            state[key] = {"last_alerted_at": old.isoformat()}
+
+        async with main.httpx.AsyncClient() as client:
+            second_posted = await main._nft_scope_scan(client)
+
+    assert second_posted == []

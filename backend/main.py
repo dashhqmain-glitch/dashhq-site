@@ -3437,23 +3437,46 @@ async def _nft_poll_watchlist_alerts(client: httpx.AsyncClient) -> list[str]:
     return alerted
 
 
-async def _nft_mint_radar_seen_has(client: httpx.AsyncClient, slug: str) -> bool:
+_NFT_SCOPE_FRESH_RECHECK_COOLDOWN_SECONDS = 14400  # 4 hours
+
+
+async def _nft_mint_radar_recently_seen(client: httpx.AsyncClient, slug: str, cooldown_seconds: int = _NFT_SCOPE_FRESH_RECHECK_COOLDOWN_SECONDS) -> bool:
     # Table name predates the "NFT Scope" rename - kept as-is to avoid an
     # unnecessary migration for a purely cosmetic reason.
+    #
+    # This used to be a PERMANENT check ("has this slug ever been seen at
+    # all") - a mint with zero activity on day one (near-universal for a
+    # brand new mint, and correctly blocked by the mandatory real-activity
+    # gate) got marked seen and NEVER looked at again, even if it went on
+    # to build genuine traction days later. A project that becomes
+    # good AFTER its first, inevitably-too-early scan was permanently
+    # invisible to the one pass built specifically to catch new projects.
+    # Now it's a cooldown instead of a life sentence - re-eligible for a
+    # fresh look every few hours for as long as it stays within the
+    # visible "recently created" window (it ages out naturally once
+    # enough newer mints replace it there - no separate cutoff needed).
     res = await client.get(
         f"{settings.supabase_url}/rest/v1/nft_mint_radar_seen",
         headers=_supabase_headers(),
-        params={"slug": f"eq.{slug}", "select": "slug", "limit": "1"},
+        params={"slug": f"eq.{slug}", "select": "posted_at", "limit": "1"},
     )
     res.raise_for_status()
-    return bool(res.json())
+    rows = res.json()
+    if not rows:
+        return False
+    return not _nft_alert_cooled_down({"last_alerted_at": rows[0]["posted_at"]}, cooldown_seconds=cooldown_seconds)
 
 
 async def _nft_mint_radar_mark_seen(client: httpx.AsyncClient, slug: str) -> None:
     await client.post(
         f"{settings.supabase_url}/rest/v1/nft_mint_radar_seen",
         headers=_supabase_headers(prefer="resolution=merge-duplicates,return=minimal"),
-        json=[{"slug": slug}],
+        # posted_at explicitly bumped to now - merge-duplicates only
+        # updates columns actually present in the payload, so without
+        # this the recheck cooldown above would compare against
+        # whatever the row's very first insert time happened to be,
+        # forever, instead of the most recent look.
+        json=[{"slug": slug, "posted_at": datetime.now(timezone.utc).isoformat()}],
     )
 
 
@@ -3552,6 +3575,20 @@ async def _nft_scope_recently_posted(client: httpx.AsyncClient, slug: str) -> bo
 
 async def _nft_scope_mark_posted(client: httpx.AsyncClient, slug: str, value: float) -> None:
     await _nft_alert_state_set(client, slug, "nft_scope_any_post", value)
+
+
+async def _nft_scope_fresh_already_posted(client: httpx.AsyncClient, slug: str) -> bool:
+    # Permanent, unlike the recheck cooldown above - once a mint has
+    # actually been introduced as a "New Mint" pick, it shouldn't get
+    # re-announced as one again days later just because it still
+    # qualifies. The recheck cooldown's job is giving an unproven mint
+    # repeated chances to EARN that first call; this is what stops it
+    # from being made more than once.
+    return await _nft_alert_state_get(client, slug, "nft_scope_fresh_posted") is not None
+
+
+async def _nft_scope_mark_fresh_posted(client: httpx.AsyncClient, slug: str) -> None:
+    await _nft_alert_state_set(client, slug, "nft_scope_fresh_posted", 0)
 
 
 async def _opensea_healthy(client: httpx.AsyncClient) -> bool:
@@ -4116,7 +4153,9 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
             if not slug:
                 continue
             try:
-                if await _nft_mint_radar_seen_has(client, slug):
+                if await _nft_mint_radar_recently_seen(client, slug):
+                    continue
+                if await _nft_scope_fresh_already_posted(client, slug):
                     continue
                 c = await _nft_collection_core(slug)
                 top_offer_amount = await _nft_scope_top_offer_amount(client, slug, c)
@@ -4138,11 +4177,11 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
                     if delivered:
                         fresh_posted.append(slug)
                         await _nft_scope_mark_posted(client, slug, c.get("floor") or 0)
+                        await _nft_scope_mark_fresh_posted(client, slug)
                 # Mark seen regardless of score or whether the post cap
-                # was already hit - a weak collection doesn't become
-                # worth re-checking every 5 minutes forever, and a strong
-                # one that lost out to the cap this cycle shouldn't be
-                # re-scored and re-queued every cycle after either.
+                # was already hit - re-eligible after the recheck cooldown
+                # above, not gone forever, so a mint that's quiet today but
+                # builds real traction later still gets looked at again.
                 await _nft_mint_radar_mark_seen(client, slug)
             except HTTPException:
                 continue
