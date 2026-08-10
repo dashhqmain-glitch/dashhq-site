@@ -141,3 +141,34 @@ async def test_purge_channel_uses_bulk_delete_when_permitted():
     assert result["deleted_bulk"] == 5
     assert result["deleted_single"] == 0
     assert result["errors"] == []
+
+
+async def test_notify_posts_to_ops_alert_channel_when_configured():
+    settings.discord_ops_alert_channel_id = "1074665247266308097"
+    settings.cron_secret = "testsecret"
+    posted = []
+
+    async def fake_post(client, channel_id, embed, content=None):
+        posted.append((channel_id, embed["title"], embed["description"]))
+        return True
+
+    class FakeReq:
+        headers = {"authorization": "Bearer testsecret"}
+
+    with patch.object(main, "_post_channel_message", new=fake_post):
+        result = await main.notify(FakeReq(), message="CI failed on test job", level="error")
+
+    assert result == {"configured": True, "posted": True}
+    assert posted[0][0] == "1074665247266308097"
+    assert "CI failed" in posted[0][2]
+
+
+async def test_notify_is_a_safe_noop_when_no_channel_configured():
+    settings.discord_ops_alert_channel_id = ""
+    settings.cron_secret = "testsecret"
+
+    class FakeReq:
+        headers = {"authorization": "Bearer testsecret"}
+
+    result = await main.notify(FakeReq(), message="x", level="warning")
+    assert result == {"configured": False, "posted": False}

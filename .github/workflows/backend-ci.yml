@@ -5,6 +5,12 @@ name: Backend CI
 # own atomic per-deployment cutover already means zero downtime as long
 # as what gets shipped isn't broken). Catches a bug before it's live,
 # instead of finding out from a broken Discord command.
+#
+# Manual rollback (no auto-rollback is wired up - see notify-on-failure
+# below for why): `vercel rollback <deployment-url> --yes` from a machine
+# with `vercel` CLI logged into this project, or promote any previous
+# deployment to production from the Vercel dashboard's Deployments tab.
+# Both take under a minute.
 
 on:
   push:
@@ -68,20 +74,24 @@ jobs:
     if: github.ref == 'refs/heads/master' && github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
-      - name: Wait for Vercel's deployment to go live
-        # Vercel's own build+propagation has consistently taken under a
-        # minute throughout this project's history - this margin is
-        # generous, not a guess pulled from nowhere.
-        run: sleep 90
-
-      - name: Live health check
+      - name: Poll until Vercel's deployment is live
+        # Actively confirms the deploy landed instead of guessing a fixed
+        # delay - checks every 5s for up to 3 minutes, which comfortably
+        # covers this project's typical ~15-20s build time with real
+        # margin instead of a blind sleep that could fire early on a slow
+        # deploy or waste time on a fast one.
         run: |
-          code=$(curl -s -o /dev/null -w "%{http_code}" "https://www.dashhq.site/health")
-          echo "Health check: HTTP $code"
-          if [ "$code" != "200" ]; then
-            echo "::error::Production /health returned HTTP $code after a deploy - something is broken live."
-            exit 1
-          fi
+          for i in $(seq 1 36); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" "https://www.dashhq.site/health")
+            echo "attempt $i: HTTP $code"
+            if [ "$code" = "200" ]; then
+              echo "Live."
+              exit 0
+            fi
+            sleep 5
+          done
+          echo "::error::Production never came back healthy within 3 minutes of the deploy starting."
+          exit 1
 
       - name: Live real-endpoint check
         run: |
@@ -95,13 +105,45 @@ jobs:
       - name: Re-register Discord commands
         # Idempotent and cheap - safe to run after every deploy, so a
         # command-schema change never gets forgotten as a separate manual
-        # step again.
+        # step again. A 401 here specifically means CRON_SECRET has
+        # drifted between Vercel's env and this repo's GitHub secret -
+        # that's a real, fixable problem, so it fails the job instead of
+        # just warning. Any other failure (a transient 5xx, etc.) warns
+        # without blocking, since it's not something re-running fixes.
         run: |
           status=$(curl -s -o response.json -w "%{http_code}" \
             "https://www.dashhq.site/cron/register-discord-commands" \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}")
           echo "Command registration: HTTP $status"
           cat response.json
-          if [ "$status" -ge 400 ]; then
+          if [ "$status" = "401" ]; then
+            echo "::error::CRON_SECRET in GitHub Actions no longer matches Vercel's copy - update the 'CRON_SECRET' repo secret to match the current Vercel value."
+            exit 1
+          elif [ "$status" -ge 400 ]; then
             echo "::warning::Command registration failed with HTTP $status - check manually."
           fi
+
+  notify-on-failure:
+    # Fires if either job above failed, on a real push to master only -
+    # GitHub's default is a failure email to whoever pushed, easy to
+    # miss. This posts straight into the ops alert channel instead. Does
+    # NOT auto-rollback (see the note at the top of this file for why and
+    # what the manual command is) - a human should look at what actually
+    # broke before deciding whether reverting is even the right fix.
+    #
+    # Known blind spot: this uses the same CRON_SECRET as the endpoints
+    # above, so a secret-drift failure (the one case the previous job
+    # hard-fails on) also breaks this notification. GitHub's own red X
+    # and failure email still fire regardless - that path isn't lost,
+    # just the proactive Discord ping for that one specific failure mode.
+    needs: [test, post-deploy-check]
+    if: failure() && github.ref == 'refs/heads/master' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post failure alert
+        run: |
+          curl -s -o /dev/null -w "notify: %{http_code}\n" \
+            -G "https://www.dashhq.site/cron/notify" \
+            --data-urlencode "level=error" \
+            --data-urlencode "message=Backend CI failed on master after ${{ github.sha }} (${{ github.event.head_commit.message }}). Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"

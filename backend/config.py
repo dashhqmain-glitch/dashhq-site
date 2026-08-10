@@ -56,6 +56,11 @@ class Settings(BaseSettings):
     discord_general_channel_id: str = ""
     discord_automod_alert_channel_id: str = ""
 
+    # Where CI posts when a deploy's live health check or test suite
+    # fails - proactive alerting instead of relying on GitHub's own
+    # email-on-failure. Empty = the /cron/notify endpoint is a safe no-op.
+    discord_ops_alert_channel_id: str = ""
+
     x_client_id: str = ""
     x_client_secret: str = ""
     x_redirect_uri: str = "https://www.dashhq.site/auth/x/callback"

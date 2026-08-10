@@ -572,6 +572,32 @@ async def purge_channel(request: Request, channel_id: str = Query(..., min_lengt
     return {"channel_id": channel_id, "deleted_bulk": deleted_bulk, "deleted_single": deleted_single, "errors": errors[:20], "error_count": len(errors), "done": done}
 
 
+@app.get("/cron/notify")
+async def notify(request: Request, message: str = Query(..., min_length=1, max_length=1500), level: str = Query("error", pattern="^(error|warning|info)$")):
+    # Proactive CI/ops alerting - GitHub's own default is a failure email
+    # to whoever pushed, easy to miss. Same shared-secret gate as every
+    # other /cron endpoint. Safe no-op if no alert channel is configured,
+    # so this never becomes a hard dependency for CI to pass.
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not settings.discord_ops_alert_channel_id:
+        return {"configured": False, "posted": False}
+
+    icon = {"error": "🚨", "warning": "⚠️", "info": "ℹ️"}[level]
+    color = {"error": EMBED_COLOR_BAD, "warning": EMBED_COLOR_WARN, "info": EMBED_COLOR}[level]
+    embed = {
+        "title": f"{icon} CI/Ops Alert",
+        "description": message[:4000],
+        "color": color,
+        "footer": {"text": "Dash HQ Toolkit · CI/CD"},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    async with httpx.AsyncClient(timeout=10) as client:
+        posted = await _post_channel_message(client, settings.discord_ops_alert_channel_id, embed)
+    return {"configured": True, "posted": posted}
+
+
 @app.get("/cron/test-monitor-channel")
 async def test_monitor_channel(request: Request, channel_id: str = Query(None, min_length=1, max_length=32)):
     # Verifies a channel is actually postable end-to-end - env var
