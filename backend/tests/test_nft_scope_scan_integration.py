@@ -197,3 +197,78 @@ async def test_trending_pass_still_blocks_scam_shaped_collections():
 
     assert "scam-trending" not in posted
     assert posted_titles == []
+
+
+async def test_trending_pass_queries_both_7day_and_24h_volume_and_dedupes():
+    # 7-day volume alone can be dominated by activity earlier in the week
+    # and miss something hot RIGHT NOW - the 24h source closes that gap.
+    _config_channel()
+    calls_by_order = {"seven_day_volume": 0, "twenty_four_hour_volume": 0}
+
+    async def fake_opensea_get(client, path, params=None):
+        if path == "/collections":
+            if params["order_by"] == "created_date":
+                return {"collections": []}
+            if params["chain"] != "ethereum":
+                return {"collections": []}
+            calls_by_order[params["order_by"]] += 1
+            if params["order_by"] == "seven_day_volume":
+                return {"collections": [{"collection": "shared"}, {"collection": "only-in-7d"}]}
+            if params["order_by"] == "twenty_four_hour_volume":
+                return {"collections": [{"collection": "shared"}, {"collection": "only-in-24h"}]}
+        if path.startswith("/events/collection/"):
+            return {"asset_events": []}
+        raise AssertionError(f"unexpected {path} {params}")
+
+    evaluated = []
+
+    async def fake_alert_state_get(client, slug, alert_type):
+        return None
+
+    async def fake_alert_state_set(client, slug, alert_type, value):
+        return None
+
+    async def fake_collection_core(slug):
+        evaluated.append(slug)
+        return _strong_collection(slug)
+
+    async def fake_top_offer(client, slug):
+        return None
+
+    async def fake_recent_snapshots(client, slug, limit=30):
+        return []
+
+    async def fake_post(client, channel_id, embed, content=None):
+        return True
+
+    async def fake_wash_clean(client, slug):
+        return True
+
+    async def fake_tracked_slugs(client):
+        return []
+
+    async def fake_seen_has(client, slug):
+        return False
+
+    async def fake_mark_seen(client, slug):
+        return None
+
+    with patch.object(main, "_opensea_get", new=fake_opensea_get), \
+         patch.object(main, "_nft_mint_radar_seen_has", new=fake_seen_has), \
+         patch.object(main, "_nft_mint_radar_mark_seen", new=fake_mark_seen), \
+         patch.object(main, "_nft_collection_core", new=fake_collection_core), \
+         patch.object(main, "_opensea_get_top_offer", new=fake_top_offer), \
+         patch.object(main, "_nft_recent_snapshots", new=fake_recent_snapshots), \
+         patch.object(main, "_nft_scope_clears_wash_check", new=fake_wash_clean), \
+         patch.object(main, "_nft_poll_tracked_slugs", new=fake_tracked_slugs), \
+         patch.object(main, "_nft_alert_state_get", new=fake_alert_state_get), \
+         patch.object(main, "_nft_alert_state_set", new=fake_alert_state_set), \
+         patch.object(main, "_post_channel_message", new=fake_post):
+        async with main.httpx.AsyncClient() as client:
+            await main._nft_scope_scan(client)
+
+    assert calls_by_order["seven_day_volume"] == 1
+    assert calls_by_order["twenty_four_hour_volume"] == 1
+    assert "only-in-24h" in evaluated
+    assert "only-in-7d" in evaluated
+    assert evaluated.count("shared") == 1

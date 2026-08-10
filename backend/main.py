@@ -3804,11 +3804,24 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 15) 
         for chain in _NFT_SCOPE_CHAINS:
             if len(posted) >= _NFT_SCOPE_MAX_POSTS_PER_CYCLE:
                 break
-            try:
-                data = await _opensea_get(client, "/collections", {"order_by": "seven_day_volume", "limit": _NFT_SCOPE_TRENDING_LIMIT, "chain": chain})
-            except httpx.HTTPError:
-                continue
-            collections = (data or {}).get("collections") or []
+            # Two sources, not one: 7-day volume alone can be dominated by
+            # activity earlier in the week and miss something that's hot
+            # RIGHT NOW - 24h volume catches currently-active projects
+            # the weekly view would wash out. Deduped by slug before the
+            # (expensive, cooldown-gated) per-candidate checks below, so
+            # this costs one extra cheap listing call per chain, not
+            # double the real work.
+            collections_by_slug: dict[str, dict] = {}
+            for order_by in ("seven_day_volume", "twenty_four_hour_volume"):
+                try:
+                    data = await _opensea_get(client, "/collections", {"order_by": order_by, "limit": _NFT_SCOPE_TRENDING_LIMIT, "chain": chain})
+                except httpx.HTTPError:
+                    continue
+                for raw in (data or {}).get("collections") or []:
+                    slug = raw.get("collection")
+                    if slug:
+                        collections_by_slug[slug] = raw
+            collections = list(collections_by_slug.values())
             for raw in collections:
                 if len(posted) >= _NFT_SCOPE_MAX_POSTS_PER_CYCLE:
                     break
