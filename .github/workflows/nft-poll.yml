@@ -2,26 +2,53 @@ name: NFT Poll (alerts & mint radar)
 
 # Free stand-in for a real cron: Vercel's own cron on this project's plan
 # only fires once a day, but supply-cut/sweep/volume-spike detection and the
-# mint radar need much tighter polling. This hits the backend's
-# /cron/nft-poll endpoint every 5 minutes at no cost, using only GitHub
-# Actions minutes this repo already has for free.
+# mint radar need much tighter polling.
+#
+# A raw `schedule: '*/5 * * * *'` (the old approach) looks right but isn't:
+# GitHub Actions silently delays/queues short-interval schedules under its
+# own platform load - this repo's real run history showed "every 5 min"
+# actually landing anywhere from ~20 min to 2.5+ hours apart. Every
+# downstream cooldown (trending rotation, momentum re-checks) was tuned
+# assuming a reliable 5-min cadence, so that unreliability is exactly what
+# was causing repeats and stale calls to resurface.
+#
+# Fix: get the real 5-minute cadence from a single job's own wall clock
+# instead of from GH's scheduler queue - `sleep 300` inside an actively
+# running job is precise and isn't subject to that queue. The job loops
+# for as long as GH allows a single job to run (hard 6h cap), then a much
+# coarser `schedule:` (which GH delivers on reliably, unlike 5-min) starts
+# the next loop. `concurrency` makes a fresh restart replace any
+# still-running loop instead of stacking duplicates alongside it.
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '0 */2 * * *'  # coarse restart cadence GH Actions actually delivers on time - NOT the real poll interval, see the loop below
   workflow_dispatch: {}
+
+concurrency:
+  group: nft-poll-chain
+  cancel-in-progress: true
 
 jobs:
   poll:
     runs-on: ubuntu-latest
+    timeout-minutes: 350  # under GitHub's hard 6-hour per-job cap, with margin before a forced cutoff
     steps:
-      - name: Trigger NFT poll cron endpoint
+      - name: Poll every 5 minutes using this job's own clock
         run: |
-          status=$(curl -s -o response.json -w "%{http_code}" \
-            -X GET "https://www.dashhq.site/cron/nft-poll" \
-            -H "Authorization: Bearer ${{ secrets.NFT_CRON_SECRET }}")
-          echo "HTTP $status"
-          cat response.json
-          if [ "$status" -ge 400 ]; then
-            exit 1
-          fi
+          set +e  # a transient network hiccup must not kill a 5.5-hour loop over one bad tick
+          deadline=$((SECONDS + 340 * 60))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            status=$(curl -s -o response.json -w "%{http_code}" \
+              -X GET "https://www.dashhq.site/cron/nft-poll" \
+              -H "Authorization: Bearer ${{ secrets.NFT_CRON_SECRET }}")
+            status=${status:-000}
+            echo "$(date -u +%H:%M:%S) HTTP $status"
+            cat response.json 2>/dev/null
+            echo
+            case "$status" in
+              ''|*[!0-9]*) echo "::warning::poll produced no valid HTTP status - continuing the loop" ;;
+              *) if [ "$status" -ge 400 ]; then echo "::warning::poll returned HTTP $status - continuing the loop"; fi ;;
+            esac
+            sleep 300
+          done
