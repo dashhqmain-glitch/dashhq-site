@@ -340,6 +340,146 @@ async def test_trending_slot_is_not_structurally_biased_toward_any_single_discov
     assert len(winners) > 1, f"same source won every single trial - source order isn't actually being shuffled: {winners}"
 
 
+async def test_trending_pass_is_not_structurally_biased_toward_any_single_chain():
+    # The bug this fixes: chains used to be scanned in a fixed sequential
+    # order, and the FIRST chain in the list could burn the entire
+    # cross-chain scan budget on its own candidates before the loop ever
+    # reached chain 2 - so every chain after the first effectively never
+    # got evaluated, cycle after cycle. Each chain here offers one
+    # distinct, equally-strong candidate; over enough trials, more than
+    # one chain's candidate should win, proving chain order is genuinely
+    # shuffled and the budget is spread across chains, not camped on
+    # whichever one is listed first.
+    _config_channel()
+
+    async def fake_opensea_get(client, path, params=None):
+        if path == "/collections":
+            if params["order_by"] == "created_date":
+                return {"collections": []}
+            if params["order_by"] != "seven_day_volume":
+                return {"collections": []}
+            return {"collections": [{"collection": f"from-{params['chain']}"}]}
+        if path.startswith("/events/collection/"):
+            return {"asset_events": []}
+        raise AssertionError(f"unexpected {path} {params}")
+
+    async def fake_alert_state_get(client, slug, alert_type):
+        return None
+
+    async def fake_alert_state_set(client, slug, alert_type, value):
+        return None
+
+    async def fake_collection_core(slug):
+        return _strong_collection(slug)
+
+    async def fake_top_offer(client, slug):
+        return None
+
+    async def fake_recent_snapshots(client, slug, limit=30):
+        return []
+
+    async def fake_post(client, channel_id, embed, content=None):
+        return True
+
+    async def fake_wash_clean(client, slug):
+        return True
+
+    async def fake_tracked_slugs(client):
+        return []
+
+    async def fake_seen_has(client, slug):
+        return False
+
+    async def fake_mark_seen(client, slug):
+        return None
+
+    winners = set()
+    with patch.object(main, "_opensea_get", new=fake_opensea_get), \
+         patch.object(main, "_nft_mint_radar_seen_has", new=fake_seen_has), \
+         patch.object(main, "_nft_mint_radar_mark_seen", new=fake_mark_seen), \
+         patch.object(main, "_nft_collection_core", new=fake_collection_core), \
+         patch.object(main, "_opensea_get_top_offer", new=fake_top_offer), \
+         patch.object(main, "_nft_recent_snapshots", new=fake_recent_snapshots), \
+         patch.object(main, "_nft_scope_clears_wash_check", new=fake_wash_clean), \
+         patch.object(main, "_nft_poll_tracked_slugs", new=fake_tracked_slugs), \
+         patch.object(main, "_nft_alert_state_get", new=fake_alert_state_get), \
+         patch.object(main, "_nft_alert_state_set", new=fake_alert_state_set), \
+         patch.object(main, "_post_channel_message", new=fake_post):
+        for _ in range(30):
+            async with main.httpx.AsyncClient() as client:
+                posted = await main._nft_scope_scan(client)
+            winners.update(posted)
+
+    assert len(winners) > 1, f"same chain won every single trial - chain order isn't actually being shuffled: {winners}"
+
+
+async def test_trending_pass_spreads_across_multiple_chains_within_one_cycle():
+    # Stronger than rotation-over-time: with several chains each offering
+    # a genuinely qualifying candidate and enough surge-mode slots to fit
+    # more than one, a SINGLE cycle should be able to post candidates from
+    # more than one chain - not exhaust the whole budget on one chain
+    # before ever reaching the others.
+    _config_channel()
+
+    async def fake_opensea_get(client, path, params=None):
+        if path == "/collections":
+            if params["order_by"] == "created_date":
+                return {"collections": []}
+            if params["order_by"] != "seven_day_volume":
+                return {"collections": []}
+            return {"collections": [{"collection": f"from-{params['chain']}"}]}
+        if path.startswith("/events/collection/"):
+            return {"asset_events": []}
+        raise AssertionError(f"unexpected {path} {params}")
+
+    async def fake_alert_state_get(client, slug, alert_type):
+        return None  # nothing rate-limited -> healthy -> surge slot count
+
+    async def fake_alert_state_set(client, slug, alert_type, value):
+        return None
+
+    async def fake_collection_core(slug):
+        return _strong_collection(slug)
+
+    async def fake_top_offer(client, slug):
+        return None
+
+    async def fake_recent_snapshots(client, slug, limit=30):
+        return []
+
+    async def fake_post(client, channel_id, embed, content=None):
+        return True
+
+    async def fake_wash_clean(client, slug):
+        return True
+
+    async def fake_tracked_slugs(client):
+        return []
+
+    async def fake_seen_has(client, slug):
+        return False
+
+    async def fake_mark_seen(client, slug):
+        return None
+
+    with patch.object(main, "_opensea_get", new=fake_opensea_get), \
+         patch.object(main, "_nft_mint_radar_seen_has", new=fake_seen_has), \
+         patch.object(main, "_nft_mint_radar_mark_seen", new=fake_mark_seen), \
+         patch.object(main, "_nft_collection_core", new=fake_collection_core), \
+         patch.object(main, "_opensea_get_top_offer", new=fake_top_offer), \
+         patch.object(main, "_nft_recent_snapshots", new=fake_recent_snapshots), \
+         patch.object(main, "_nft_scope_clears_wash_check", new=fake_wash_clean), \
+         patch.object(main, "_nft_poll_tracked_slugs", new=fake_tracked_slugs), \
+         patch.object(main, "_nft_alert_state_get", new=fake_alert_state_get), \
+         patch.object(main, "_nft_alert_state_set", new=fake_alert_state_set), \
+         patch.object(main, "_post_channel_message", new=fake_post):
+        async with main.httpx.AsyncClient() as client:
+            posted = await main._nft_scope_scan(client)
+
+    source_chains = {slug.removeprefix("from-") for slug in posted}
+    assert len(source_chains) > 1, f"every post in this single cycle came from the same chain: {posted}"
+
+
 async def test_trending_scan_budget_bounds_worst_case_api_cost():
     # A pushed-down cooldown is only safe if a cycle where NOTHING clears
     # the bar can't blow through OpenSea's shared free-tier budget - this

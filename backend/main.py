@@ -2495,7 +2495,11 @@ async def _discord_watchlist_list(discord_user_id: str) -> list[dict]:
 # already used by the rest of the toolkit; no paid API involved.
 _NFT_ALERT_COOLDOWN_SECONDS = 3600  # don't re-alert the same collection/type within an hour
 _NFT_FLOOR_CHANGE_THRESHOLD_PCT = 8.0  # minimum floor move (either direction) worth alerting on
-_NFT_SCOPE_CHAINS = ["ethereum", "base", "polygon", "robinhood"]
+# arbitrum/optimism/avalanche are already proven-working OpenSea chain
+# slugs elsewhere in this codebase (_NFT_CONTRACT_LOOKUP_CHAINS) - adding
+# them here covers three more entire, independent NFT ecosystems this
+# scan previously never touched at all.
+_NFT_SCOPE_CHAINS = ["ethereum", "base", "polygon", "robinhood", "arbitrum", "optimism", "avalanche"]
 
 
 async def _nft_store_snapshot(client: httpx.AsyncClient, c: dict) -> None:
@@ -3965,89 +3969,88 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
     # per chain, not proportionally more real work.
     trending_posted: list[str] = []
     trending_scanned = 0  # counts actual evaluations (past the cooldown gate), not just discovery
-    for chain in _NFT_SCOPE_CHAINS:
+    # Fetch every (chain, source) listing FIRST, before evaluating anything -
+    # this used to be a per-chain loop where chain 1 (always "ethereum",
+    # first in the list) could burn the entire cross-chain scan budget on
+    # its own candidates before the loop ever moved on to chain 2, so
+    # every other chain never got evaluated at all, cycle after cycle.
+    # Merging every (chain, source) pair into ONE shuffled round-robin
+    # list - the same fix already applied to sources within a chain,
+    # widened to cover chains too - is what actually gets the scan budget
+    # spread across the whole discovery surface instead of camping on
+    # whichever chain happens to be listed first.
+    sources = ("seven_day_volume", "twenty_four_hour_volume", "twenty_four_hour_sales")
+    pairs = [(chain, source) for chain in _NFT_SCOPE_CHAINS for source in sources]
+    random.shuffle(pairs)
+    per_pair: dict[tuple[str, str], list[dict]] = {}
+    for chain, order_by in pairs:
+        try:
+            data = await _opensea_get(client, "/collections", {"order_by": order_by, "limit": _NFT_SCOPE_TRENDING_LIMIT, "chain": chain})
+        except httpx.HTTPError:
+            data = None
+        per_pair[(chain, order_by)] = (data or {}).get("collections") or []
+    seen_slugs: set[str] = set()
+    collections: list[dict] = []
+    for i in range(_NFT_SCOPE_TRENDING_LIMIT):
+        for pair in pairs:
+            lst = per_pair.get(pair) or []
+            if i >= len(lst):
+                continue
+            raw = lst[i]
+            slug = raw.get("collection")
+            if slug and slug not in seen_slugs:
+                seen_slugs.add(slug)
+                collections.append(raw)
+    for raw in collections:
         if len(trending_posted) >= limits["trending_max"] or trending_scanned >= limits["trending_scan_budget"]:
             break
-        per_source: dict[str, list[dict]] = {}
-        for order_by in ("seven_day_volume", "twenty_four_hour_volume", "twenty_four_hour_sales"):
+        slug = raw.get("collection")
+        if not slug:
+            continue
+        try:
+            scan_state = await _nft_alert_state_get(client, slug, "nft_scope_trending_scan")
+            if not _nft_alert_cooled_down(scan_state, cooldown_seconds=_NFT_SCOPE_TRENDING_SCAN_COOLDOWN_SECONDS):
+                continue
+            # Checked BEFORE spending any real OpenSea calls on this
+            # candidate - if it already claimed the trending slot
+            # recently, evaluating it again just burns scan budget
+            # that could go toward finding something new instead. This
+            # is what actually forces rotation across the wider pool
+            # instead of the same one or two winners repeating every
+            # cycle they still clear the bar.
+            post_state = await _nft_alert_state_get(client, slug, "nft_scope_trending_post")
+            if not _nft_alert_cooled_down(post_state, cooldown_seconds=_NFT_SCOPE_TRENDING_POST_COOLDOWN_SECONDS):
+                continue
+            trending_scanned += 1
+            c = await _nft_collection_core(slug)
+            top_offer_amount = await _nft_scope_top_offer_amount(client, slug, c)
+            rapid_activity = None
+            if (c.get("sales24h") or 0) > 0:
+                rapid_activity = await _detect_rapid_activity(client, slug)
+            # Trending collections often already have snapshot
+            # history from watchlist polling even if nobody
+            # explicitly /monitor'd them - use it for momentum
+            # scoring if it happens to exist, harmless if not.
+            history = None
             try:
-                data = await _opensea_get(client, "/collections", {"order_by": order_by, "limit": _NFT_SCOPE_TRENDING_LIMIT, "chain": chain})
+                history = await _nft_recent_snapshots(client, slug, limit=30)
             except httpx.HTTPError:
-                data = None
-            per_source[order_by] = (data or {}).get("collections") or []
-        # Round-robin interleave across sources instead of concatenating
-        # them in a fixed order - if $ volume were always checked first,
-        # a big-money collection would claim the single reserved trending
-        # slot before a smaller, actively-traded one (found via sales
-        # count) ever got evaluated. The source order is also shuffled
-        # per chain per cycle, not just interleaved by position - without
-        # that, ties within each round would still always resolve the
-        # same way (whichever source is listed first), which is exactly
-        # the kind of structural favoritism this is meant to remove.
-        seen_this_chain: set[str] = set()
-        collections: list[dict] = []
-        order = ["seven_day_volume", "twenty_four_hour_volume", "twenty_four_hour_sales"]
-        random.shuffle(order)
-        for i in range(_NFT_SCOPE_TRENDING_LIMIT):
-            for order_by in order:
-                lst = per_source.get(order_by) or []
-                if i >= len(lst):
-                    continue
-                raw = lst[i]
-                slug = raw.get("collection")
-                if slug and slug not in seen_this_chain:
-                    seen_this_chain.add(slug)
-                    collections.append(raw)
-        for raw in collections:
-            if len(trending_posted) >= limits["trending_max"] or trending_scanned >= limits["trending_scan_budget"]:
-                break
-            slug = raw.get("collection")
-            if not slug:
-                continue
-            try:
-                scan_state = await _nft_alert_state_get(client, slug, "nft_scope_trending_scan")
-                if not _nft_alert_cooled_down(scan_state, cooldown_seconds=_NFT_SCOPE_TRENDING_SCAN_COOLDOWN_SECONDS):
-                    continue
-                # Checked BEFORE spending any real OpenSea calls on this
-                # candidate - if it already claimed the trending slot
-                # recently, evaluating it again just burns scan budget
-                # that could go toward finding something new instead. This
-                # is what actually forces rotation across the wider pool
-                # instead of the same one or two winners repeating every
-                # cycle they still clear the bar.
-                post_state = await _nft_alert_state_get(client, slug, "nft_scope_trending_post")
-                if not _nft_alert_cooled_down(post_state, cooldown_seconds=_NFT_SCOPE_TRENDING_POST_COOLDOWN_SECONDS):
-                    continue
-                trending_scanned += 1
-                c = await _nft_collection_core(slug)
-                top_offer_amount = await _nft_scope_top_offer_amount(client, slug, c)
-                rapid_activity = None
-                if (c.get("sales24h") or 0) > 0:
-                    rapid_activity = await _detect_rapid_activity(client, slug)
-                # Trending collections often already have snapshot
-                # history from watchlist polling even if nobody
-                # explicitly /monitor'd them - use it for momentum
-                # scoring if it happens to exist, harmless if not.
                 history = None
-                try:
-                    history = await _nft_recent_snapshots(client, slug, limit=30)
-                except httpx.HTTPError:
-                    history = None
-                score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity)
-                if _nft_scope_worth_posting(score) and await _nft_scope_clears_wash_check(client, slug):
-                    delivered = await _post_channel_message(client, settings.discord_nft_scope_channel_id, _nft_scope_embed(c, score, top_offer_amount, "trending"))
-                    if delivered:
-                        trending_posted.append(slug)
-                        await _nft_alert_state_set(client, slug, "nft_scope_trending_post", c.get("floor") or 0)
-                # Mark as scanned regardless of outcome - rate-limits
-                # re-checking this specific candidate, it doesn't mean
-                # "never again" the way the fresh-mint seen-table does.
-                await _nft_alert_state_set(client, slug, "nft_scope_trending_scan", c.get("floor") or 0)
-            except HTTPException:
-                continue
-            except (httpx.HTTPError, KeyError, ZeroDivisionError, TypeError):
-                logger.exception("nft-scope: trending check failed for %s", slug)
-                continue
+            score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity)
+            if _nft_scope_worth_posting(score) and await _nft_scope_clears_wash_check(client, slug):
+                delivered = await _post_channel_message(client, settings.discord_nft_scope_channel_id, _nft_scope_embed(c, score, top_offer_amount, "trending"))
+                if delivered:
+                    trending_posted.append(slug)
+                    await _nft_alert_state_set(client, slug, "nft_scope_trending_post", c.get("floor") or 0)
+            # Mark as scanned regardless of outcome - rate-limits
+            # re-checking this specific candidate, it doesn't mean
+            # "never again" the way the fresh-mint seen-table does.
+            await _nft_alert_state_set(client, slug, "nft_scope_trending_scan", c.get("floor") or 0)
+        except HTTPException:
+            continue
+        except (httpx.HTTPError, KeyError, ZeroDivisionError, TypeError):
+            logger.exception("nft-scope: trending check failed for %s", slug)
+            continue
     posted.extend(trending_posted)
 
     # ── Pass 3: momentum on collections already being tracked (/watchlist
