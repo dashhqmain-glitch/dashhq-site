@@ -4171,9 +4171,18 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
     # two passes. ──
     momentum_posted: list[str] = []
     try:
-        tracked_slugs = (await _nft_poll_tracked_slugs(client))[:limits["momentum_scan_limit"]]
+        tracked_slugs = await _nft_poll_tracked_slugs(client)
     except httpx.HTTPError:
         tracked_slugs = []
+    # _nft_poll_tracked_slugs returns sorted(slugs) - alphabetical, and
+    # fixed every single cycle. Truncating straight from that order (the
+    # old behavior) meant alphabetically-early collections could
+    # permanently monopolize the scan-limit cutoff and the momentum slot,
+    # the exact same structural bias the trending pass had before its own
+    # chain-order fix. Shuffling before truncating is that same fix,
+    # applied here too.
+    random.shuffle(tracked_slugs)
+    tracked_slugs = tracked_slugs[:limits["momentum_scan_limit"]]
     for slug in tracked_slugs:
         if len(momentum_posted) >= limits["momentum_max"]:
             break

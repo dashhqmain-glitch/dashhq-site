@@ -834,3 +834,78 @@ async def test_trending_pass_rotates_off_a_recent_winner_instead_of_reposting_it
     assert first_posted == ["winner-1"]
     assert "winner-1" not in second_posted
     assert second_posted == ["winner-2"]
+
+
+async def test_momentum_pass_is_not_structurally_biased_toward_alphabetically_early_slugs():
+    # _nft_poll_tracked_slugs returns sorted(slugs) - a fixed alphabetical
+    # order every cycle. Truncating and evaluating straight from that
+    # order used to mean alphabetically-early tracked collections could
+    # permanently monopolize the scan-limit cutoff and the momentum slot -
+    # the same structural bias the trending pass had before its own
+    # chain-order fix, just for /watchlist and /monitor's tracked set
+    # instead of open discovery. Every candidate here is equally strong;
+    # over enough trials, more than one should win.
+    _config_channel()
+
+    async def fake_opensea_get(client, path, params=None):
+        if path == "/collections":
+            return {"collections": []}
+        if path.startswith("/events/collection/"):
+            return {"asset_events": []}
+        raise AssertionError(f"unexpected {path}")
+
+    # Deliberately alphabetical, and larger than a shrunk scan limit -
+    # the old code would truncate to the same leading slice every time.
+    all_slugs = [f"tracked-{c}" for c in "abcdefghij"]
+
+    async def fake_tracked_slugs(client):
+        return list(all_slugs)  # fresh copy - the fix shuffles in place
+
+    async def fake_alert_state_get(client, slug, alert_type):
+        if (slug, alert_type) == ("__opensea__", "rate_limited"):
+            return {"last_alerted_at": datetime.now(timezone.utc).isoformat()}  # forced unhealthy -> base limits, momentum_max=1
+        return None
+
+    async def fake_alert_state_set(client, slug, alert_type, value):
+        return None
+
+    async def fake_collection_core(slug):
+        return _strong_collection(slug)
+
+    async def fake_top_offer(client, slug):
+        return None
+
+    async def fake_recent_snapshots(client, slug, limit=30):
+        return [{"floor": 0.05, "volume_1d": 0.5, "owners": 300}] * main._NFT_SCOPE_MOMENTUM_MIN_SNAPSHOTS
+
+    async def fake_post(client, channel_id, embed, content=None):
+        return True
+
+    async def fake_wash_clean(client, slug):
+        return True
+
+    async def fake_seen_has(client, slug):
+        return False
+
+    async def fake_mark_seen(client, slug):
+        return None
+
+    winners = set()
+    with patch.object(main, "_NFT_SCOPE_MOMENTUM_SCAN_LIMIT", 2), \
+         patch.object(main, "_opensea_get", new=fake_opensea_get), \
+         patch.object(main, "_nft_mint_radar_seen_has", new=fake_seen_has), \
+         patch.object(main, "_nft_mint_radar_mark_seen", new=fake_mark_seen), \
+         patch.object(main, "_nft_collection_core", new=fake_collection_core), \
+         patch.object(main, "_opensea_get_top_offer", new=fake_top_offer), \
+         patch.object(main, "_nft_recent_snapshots", new=fake_recent_snapshots), \
+         patch.object(main, "_nft_scope_clears_wash_check", new=fake_wash_clean), \
+         patch.object(main, "_nft_poll_tracked_slugs", new=fake_tracked_slugs), \
+         patch.object(main, "_nft_alert_state_get", new=fake_alert_state_get), \
+         patch.object(main, "_nft_alert_state_set", new=fake_alert_state_set), \
+         patch.object(main, "_post_channel_message", new=fake_post):
+        for _ in range(30):
+            async with main.httpx.AsyncClient() as client:
+                posted = await main._nft_scope_scan(client)
+            winners.update(posted)
+
+    assert len(winners) > 1, f"same tracked slug won every single trial - alphabetical order isn't actually being shuffled: {winners}"
