@@ -123,8 +123,8 @@ COMMANDS = [
                 "options": [{"name": "collection", "description": "Collection name or contract address", "type": 3, "required": True}],
             },
             {
-                "name": "clear", "description": "Stop all /monitor alerts for a collection", "type": 1,
-                "options": [{"name": "collection", "description": "Collection name or contract address", "type": 3, "required": True}],
+                "name": "clear", "description": "Stop /monitor alerts for one collection, or leave blank to clear everything", "type": 1,
+                "options": [{"name": "collection", "description": "Collection name or contract address (omit to clear everything)", "type": 3, "required": False}],
             },
             {
                 "name": "price", "description": "Get DM'd when a collection's floor crosses a specific ETH price", "type": 1,

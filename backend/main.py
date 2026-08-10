@@ -1237,7 +1237,17 @@ async def _finalize_review(app_id: str, status: str, reviewer: str, decline_reas
 
             invite_url = None
             if status == "accepted" and settings.discord_bot_token:
-                invite_url = await _create_one_time_invite(client)
+                # Idempotent: if this application was already accepted
+                # once before (a double-click on Accept, Discord retrying
+                # a slow interaction, a mod re-processing it), reuse the
+                # invite already generated instead of minting a brand new
+                # one - a second invite doesn't invalidate the first, but
+                # it does mean whichever link the applicant already
+                # opened stops matching what the status page now shows,
+                # which reads exactly like "the invite expired" even
+                # though the real problem is a second, different link
+                # silently replacing the first.
+                invite_url = application.get("invite_url") or await _create_one_time_invite(client)
 
             patch_json = {
                 "status": status,
@@ -3062,6 +3072,16 @@ async def _nft_price_alerts_list(discord_user_id: str) -> list[dict]:
             return []
 
 
+def _fuzzy_slug_match(query: str, slug: str) -> bool:
+    # A typed name and a stored slug rarely share exact punctuation/casing
+    # ("Pudgy Penguins" vs "pudgypenguins") - strip everything down to
+    # bare alphanumerics on both sides before comparing, so this doesn't
+    # miss an obvious match over a space or hyphen.
+    norm = lambda s: re.sub(r"[^a-z0-9]", "", (s or "").lower())
+    q, s = norm(query), norm(slug)
+    return bool(q) and bool(s) and (q in s or s in q)
+
+
 async def _cmd_monitor_response(payload: dict, discord_user_id: str) -> dict:
     sub_options = (payload.get("data") or {}).get("options") or []
     if not sub_options:
@@ -3088,6 +3108,74 @@ async def _cmd_monitor_response(payload: dict, discord_user_id: str) -> dict:
             embed = {"title": "🔔 Your Monitor Subscriptions", "description": "\n".join(lines), "color": EMBED_COLOR, "footer": TOOLKIT_FOOTER}
         return {"embeds": [_clean_embed(embed)], "flags": 64}
 
+    if sub_name == "clear":
+        watch_rows = await _nft_monitor_list(discord_user_id)
+        price_rows = await _nft_price_alerts_list(discord_user_id)
+        subscribed_slugs = {r["slug"] for r in watch_rows} | {r["slug"] for r in price_rows}
+        query = (sub_opts.get("collection") or "").strip()
+
+        if not query:
+            # No collection given - clear everything, same "clear" verb
+            # /watchlist clear already uses for the same all-at-once case.
+            if not subscribed_slugs:
+                embed = {"title": "Nothing to clear", "description": "You're not monitoring anything.", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
+                return {"embeds": [_clean_embed(embed)], "flags": 64}
+            async with httpx.AsyncClient(timeout=10) as client:
+                await client.delete(
+                    f"{settings.supabase_url}/rest/v1/nft_watch_subscriptions",
+                    headers=_supabase_headers(prefer="return=minimal"),
+                    params={"discord_user_id": f"eq.{discord_user_id}"},
+                )
+                try:
+                    await client.delete(
+                        f"{settings.supabase_url}/rest/v1/nft_price_alerts",
+                        headers=_supabase_headers(prefer="return=minimal"),
+                        params={"discord_user_id": f"eq.{discord_user_id}"},
+                    )
+                except httpx.HTTPError:
+                    pass
+            plural = "s" if len(subscribed_slugs) != 1 else ""
+            embed = {"title": "🔕 Cleared everything", "description": f"Removed monitoring for all {len(subscribed_slugs)} collection{plural}. You won't get any more /monitor alerts.", "color": EMBED_COLOR_GOOD, "footer": TOOLKIT_FOOTER}
+            return {"embeds": [_clean_embed(embed)], "flags": 64}
+
+        # Matched against what you're ACTUALLY subscribed to, not a fresh
+        # OpenSea search - a free-text query resolved via search can rank
+        # differently between when /monitor set first ran and now (a
+        # renamed/re-indexed collection, an ambiguous name, etc.), which
+        # meant /monitor clear could silently delete a DIFFERENT slug
+        # than the one you're really subscribed under and report "Cleared"
+        # anyway, leaving the real subscription (and its tags) untouched.
+        target_slug = next((s for s in subscribed_slugs if _fuzzy_slug_match(query, s)), None)
+        if not target_slug:
+            searched = await _nft_search_core(query)
+            target_slug = next((m["slug"] for m in searched if m["slug"] in subscribed_slugs), None)
+        if not target_slug:
+            embed = {
+                "title": "Not currently monitoring that",
+                "description": f'No active /monitor subscription matches "{query}". Use `/monitor list` to see what you\'re tracking.',
+                "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER,
+            }
+            return {"embeds": [_clean_embed(embed)], "flags": 64}
+
+        async with httpx.AsyncClient(timeout=10) as client:
+            del_res = await client.delete(
+                f"{settings.supabase_url}/rest/v1/nft_watch_subscriptions",
+                headers=_supabase_headers(prefer="return=minimal"),
+                params={"discord_user_id": f"eq.{discord_user_id}", "slug": f"eq.{target_slug}"},
+            )
+            del_res.raise_for_status()
+            try:
+                price_res = await client.delete(
+                    f"{settings.supabase_url}/rest/v1/nft_price_alerts",
+                    headers=_supabase_headers(prefer="return=minimal"),
+                    params={"discord_user_id": f"eq.{discord_user_id}", "slug": f"eq.{target_slug}"},
+                )
+                price_res.raise_for_status()
+            except httpx.HTTPError:
+                pass
+        embed = {"title": f"🔕 Cleared: {target_slug}", "description": "You won't get any /monitor alerts for this collection.", "color": EMBED_COLOR_GOOD, "footer": TOOLKIT_FOOTER}
+        return {"embeds": [_clean_embed(embed)], "flags": 64}
+
     query = (sub_opts.get("collection") or "").strip()
     if not query:
         embed = {"title": "Missing collection", "description": "Provide a collection name.", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
@@ -3098,24 +3186,6 @@ async def _cmd_monitor_response(payload: dict, discord_user_id: str) -> dict:
         embed = {"title": "No collections found", "description": f'No OpenSea results for "{query}".', "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
         return {"embeds": [_clean_embed(embed)], "flags": 64}
     c = matches[0]
-
-    if sub_name == "clear":
-        async with httpx.AsyncClient(timeout=10) as client:
-            await client.delete(
-                f"{settings.supabase_url}/rest/v1/nft_watch_subscriptions",
-                headers=_supabase_headers(prefer="return=minimal"),
-                params={"discord_user_id": f"eq.{discord_user_id}", "slug": f"eq.{c['slug']}"},
-            )
-            try:
-                await client.delete(
-                    f"{settings.supabase_url}/rest/v1/nft_price_alerts",
-                    headers=_supabase_headers(prefer="return=minimal"),
-                    params={"discord_user_id": f"eq.{discord_user_id}", "slug": f"eq.{c['slug']}"},
-                )
-            except httpx.HTTPError:
-                pass
-        embed = {"title": f"🔕 Cleared: {c['name']}", "description": "You won't get any /monitor alerts for this collection.", "color": EMBED_COLOR_GOOD, "footer": TOOLKIT_FOOTER}
-        return {"embeds": [_clean_embed(embed)], "flags": 64}
 
     if sub_name == "set":
         embed = {
