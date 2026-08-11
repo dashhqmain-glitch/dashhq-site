@@ -199,6 +199,39 @@ def test_score_allows_small_project_below_blue_chip_threshold():
     assert score["blocked"] is False
 
 
+# ── mandatory real-activity gate accepts rapid_activity as proof too ───
+# (sales24h comes from OpenSea's aggregate stats, which can lag reality
+# for a collection minting fast right now - confirmed against real
+# production data)
+
+def test_real_activity_gate_accepts_rapid_activity_when_sales24h_is_stale_zero():
+    rapid = {"count": 4, "unique_buyers": 4, "unique_sellers": 4, "window_minutes": 30,
+             "price_surge_pct": None, "is_sharp": False, "sharp_count": 0, "sharp_window_minutes": 5}
+    c = strong_collection(sales24h=0, vol1d=0, owners=50)
+    score = main._nft_scope_score(c, None, rapid_activity=rapid)
+    assert score["has_real_activity"] is True
+    assert main._nft_scope_worth_posting(score)
+
+
+def test_real_activity_gate_still_blocks_zero_sales_with_no_rapid_activity_either():
+    # Without rapid_activity to back it up, a stale/zero sales24h still
+    # correctly reads as "not market-tested yet" - this isn't a general
+    # loosening of the gate, only rapid_activity's own independent,
+    # wash-verified proof counts.
+    c = strong_collection(sales24h=0, vol1d=0, owners=50)
+    score = main._nft_scope_score(c, None, rapid_activity=None)
+    assert score["has_real_activity"] is False
+    assert not main._nft_scope_worth_posting(score)
+
+
+def test_real_activity_gate_still_requires_minimum_owners_even_with_rapid_activity():
+    rapid = {"count": 4, "unique_buyers": 4, "unique_sellers": 4, "window_minutes": 30,
+             "price_surge_pct": None, "is_sharp": False, "sharp_count": 0, "sharp_window_minutes": 5}
+    c = strong_collection(sales24h=0, vol1d=0, owners=2)
+    score = main._nft_scope_score(c, None, rapid_activity=rapid)
+    assert score["has_real_activity"] is False
+
+
 # ── _momentum_points (floor + volume + owner-growth, aligned trends) ──
 
 def test_momentum_all_three_signals_aligned_gives_full_points():

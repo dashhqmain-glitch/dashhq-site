@@ -3563,9 +3563,18 @@ _NFT_SCOPE_TRENDING_POST_COOLDOWN_SECONDS = 3600  # 1 hour - matches the momentu
 # This is the fix - ONE shared "posted to NFT Scope at all, by any pass"
 # cooldown, checked by and updated from all three passes on top of their
 # own. A slug can still qualify differently per pass; it just can't
-# occupy the channel more than once an hour regardless of which pass
+# occupy the channel more than once per window regardless of which pass
 # found it.
-_NFT_SCOPE_ANY_POST_COOLDOWN_SECONDS = 3600
+#
+# 3 hours, not 1 - a 1-hour version fixed the worst case (the same
+# collection re-posting every 20-40 min) but still let a small set of
+# reliably-clean projects claim a slot every single hour like clockwork,
+# which reads as "it's always the same names" even though each repost
+# individually respected its cooldown. Widening this window is what
+# actually forces those hourly regulars to share airtime with whatever
+# else clears the bar in between, instead of just slowing down their
+# own repeat rate.
+_NFT_SCOPE_ANY_POST_COOLDOWN_SECONDS = 10800
 
 
 async def _nft_scope_recently_posted(client: httpx.AsyncClient, slug: str) -> bool:
@@ -3878,7 +3887,16 @@ def _nft_scope_score(c: dict, top_offer_amount: float | None, history: list[dict
     # a hard requirement for every tier, not just a scoring contributor,
     # so a freshly-launched mint with $0 volume can never be recommended
     # on soft signals alone.
-    has_real_activity = sales > 0 and (owners or 0) >= 5
+    # sales24h comes from OpenSea's aggregate stats, which can lag well
+    # behind reality for a collection minting fast right now (confirmed
+    # live - sales24h and volume sitting frozen for minutes while owners
+    # kept climbing on the same response). rapid_activity is independently
+    # verified from raw sale events (wash-checked, minimum sale count on
+    # its own), so it's valid proof of real activity even on a cycle
+    # where the aggregate stat hasn't caught up yet - without this, a
+    # mint that's genuinely exploding right now could still read as
+    # "$0 volume, no sales" and get blocked by this exact gate.
+    has_real_activity = (sales > 0 or rapid_activity is not None) and (owners or 0) >= 5
     if not has_real_activity:
         red_flags.append(
             f"No independently verified trading yet ({sales} sale(s) in 24h, "
@@ -4159,13 +4177,18 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
                     continue
                 c = await _nft_collection_core(slug)
                 top_offer_amount = await _nft_scope_top_offer_amount(client, slug, c)
-                # Only spend the extra API call checking for a rapid burst
-                # if the collection already shows SOME real sales - bounds
-                # the added cost to candidates worth the look instead of
-                # every single one of the ~60 scanned per cycle.
-                rapid_activity = None
-                if (c.get("sales24h") or 0) > 0:
-                    rapid_activity = await _detect_rapid_activity(client, slug)
+                # Always checked now, not gated on c["sales24h"] > 0 - that
+                # stat comes from OpenSea's aggregate stats endpoint, which
+                # can lag well behind reality for a collection minting
+                # fast right now (confirmed live: sales24h and total
+                # volume sitting still for minutes at a time while owners
+                # kept climbing on the same response). Gating on a number
+                # that can legitimately still read as 0/stale during
+                # exactly the rapid-growth window this is meant to catch
+                # meant a genuinely exploding mint could be skipped
+                # entirely. _detect_rapid_activity reads raw sale events
+                # directly instead, which don't have this lag.
+                rapid_activity = await _detect_rapid_activity(client, slug)
                 score = _nft_scope_score(c, top_offer_amount, rapid_activity=rapid_activity)
                 if (
                     len(fresh_posted) < limits["fresh_max"]
@@ -4274,9 +4297,9 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
             trending_scanned += 1
             c = await _nft_collection_core(slug)
             top_offer_amount = await _nft_scope_top_offer_amount(client, slug, c)
-            rapid_activity = None
-            if (c.get("sales24h") or 0) > 0:
-                rapid_activity = await _detect_rapid_activity(client, slug)
+            # Not gated on c["sales24h"] > 0 - see the fresh-mint pass for
+            # why (that stat can lag reality for a fast-moving mint).
+            rapid_activity = await _detect_rapid_activity(client, slug)
             # Trending collections often already have snapshot
             # history from watchlist polling even if nobody
             # explicitly /monitor'd them - use it for momentum
@@ -4341,7 +4364,9 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
             if len(history) < _NFT_SCOPE_MOMENTUM_MIN_SNAPSHOTS:
                 continue
             top_offer_amount = await _nft_scope_top_offer_amount(client, slug, c)
-            rapid_activity = await _detect_rapid_activity(client, slug) if (c.get("sales24h") or 0) > 0 else None
+            # Not gated on c["sales24h"] > 0 - see the fresh-mint pass for
+            # why (that stat can lag reality for a fast-moving mint).
+            rapid_activity = await _detect_rapid_activity(client, slug)
             score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity)
             if _nft_scope_worth_posting(score) and await _nft_scope_clears_wash_check(client, slug):
                 delivered = await _post_channel_message(client, settings.discord_nft_scope_channel_id, _nft_scope_embed(c, score, top_offer_amount, "momentum", rapid_activity=rapid_activity))

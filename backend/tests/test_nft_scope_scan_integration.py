@@ -1148,3 +1148,88 @@ async def test_fresh_mint_already_posted_is_never_reannounced_even_after_cooldow
             second_posted = await main._nft_scope_scan(client)
 
     assert second_posted == []
+
+
+async def test_rapid_activity_still_checked_even_when_stats_sales24h_reads_zero():
+    # Confirmed live against production: OpenSea's aggregate stats
+    # (sales24h, total volume) can sit stale for minutes at a time on a
+    # collection that's minting fast right now, while raw sale events are
+    # already there. Gating the rapid-activity check on that same laggy
+    # stat meant a genuinely exploding mint could read as "sales24h: 0"
+    # and never even get its real-time activity checked at all. A
+    # collection with sales24h=0 but 3+ real, clean recent sale events
+    # must still get flagged as rapid activity.
+    _config_channel()
+
+    now = 10_000_000.0
+
+    def sale_event(i):
+        return {
+            "buyer": f"buyer{i}", "seller": f"seller{i}", "nft": {"identifier": str(i)},
+            "event_timestamp": now - 60 * i,
+            "payment": {"quantity": "1000000000000000000", "decimals": 18, "symbol": "ETH"},
+        }
+
+    async def fake_opensea_get(client, path, params=None):
+        if path == "/collections":
+            if params["order_by"] == "created_date" and params["chain"] == "ethereum":
+                return {"collections": [{"collection": "stale-stats-mint"}]}
+            return {"collections": []}
+        if path.startswith("/events/collection/"):
+            return {"asset_events": [sale_event(i) for i in range(4)]}
+        raise AssertionError(f"unexpected {path}")
+
+    async def fake_collection_core(slug):
+        # sales24h reads 0 (stale) despite the real events above.
+        return _strong_collection(slug) | {"sales24h": 0, "vol1d": 0}
+
+    async def fake_top_offer(client, slug):
+        return None
+
+    async def fake_wash_clean(client, slug):
+        return True
+
+    posted_titles = []
+
+    async def fake_post(client, channel_id, embed, content=None):
+        posted_titles.append(embed["description"])
+        return True
+
+    async def fake_tracked_slugs(client):
+        return []
+
+    async def fake_seen_has(client, slug):
+        return False
+
+    async def fake_mark_seen(client, slug):
+        return None
+
+    async def fake_alert_state_get(client, slug, alert_type):
+        return None
+
+    async def fake_alert_state_set(client, slug, alert_type, value):
+        return None
+
+    with patch.object(main, "time") as mock_time, \
+         patch.object(main, "_opensea_get", new=fake_opensea_get), \
+         patch.object(main, "_nft_mint_radar_recently_seen", new=fake_seen_has), \
+         patch.object(main, "_nft_mint_radar_mark_seen", new=fake_mark_seen), \
+         patch.object(main, "_nft_collection_core", new=fake_collection_core), \
+         patch.object(main, "_opensea_get_top_offer", new=fake_top_offer), \
+         patch.object(main, "_nft_scope_clears_wash_check", new=fake_wash_clean), \
+         patch.object(main, "_nft_poll_tracked_slugs", new=fake_tracked_slugs), \
+         patch.object(main, "_nft_alert_state_get", new=fake_alert_state_get), \
+         patch.object(main, "_nft_alert_state_set", new=fake_alert_state_set), \
+         patch.object(main, "_post_channel_message", new=fake_post):
+        mock_time.time.return_value = now
+        async with main.httpx.AsyncClient() as client:
+            posted = await main._nft_scope_scan(client)
+
+    # sales24h=0 alone would normally ALSO fail the separate mandatory
+    # real-activity gate (has_real_activity), independent of whether
+    # rapid activity got detected - both halves of the fix have to work
+    # together for this to actually post: the check has to run, AND the
+    # mandatory gate has to accept rapid_activity as valid proof on its
+    # own when the stats field hasn't caught up yet.
+    assert posted == ["stale-stats-mint"]
+    assert any("verified sale" in t for t in posted_titles)
