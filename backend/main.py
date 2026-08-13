@@ -2242,7 +2242,18 @@ async def _get_opensea_key(client: httpx.AsyncClient, force_refresh: bool = Fals
         res.raise_for_status()
         data = res.json()
         _opensea_key = data["api_key"]
-        _opensea_key_expiry = time.time() + 29 * 24 * 3600
+        # Use OpenSea's own expires_at rather than assuming a fixed TTL -
+        # a hardcoded 29-day guess here previously way overshot the real
+        # ~7-day lifetime these anonymous keys actually get, so the cached
+        # key silently went stale for weeks before anything noticed (a
+        # live 401), at which point every concurrent request scrambled to
+        # mint a replacement at once and blew through OpenSea's real
+        # per-IP rate limit. Fall back to a conservative 6 days only if
+        # the field is ever missing/unparseable.
+        try:
+            _opensea_key_expiry = datetime.fromisoformat(data["expires_at"].replace("Z", "+00:00")).timestamp()
+        except (KeyError, ValueError, TypeError, AttributeError):
+            _opensea_key_expiry = time.time() + 6 * 24 * 3600
         await _supabase_write_opensea_key(client, _opensea_key, _opensea_key_expiry)
         return _opensea_key
     except (httpx.HTTPError, KeyError, ValueError):
