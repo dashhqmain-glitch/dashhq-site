@@ -2175,6 +2175,7 @@ async def _wallet_card_core(raw: str) -> dict:
 _opensea_key: str | None = None
 _opensea_key_expiry: float = 0
 _OPENSEA_KEY_TABLE = "opensea_key_cache"
+_OPENSEA_MINT_COOLDOWN_SECONDS = 300
 
 
 async def _supabase_read_opensea_key(client: httpx.AsyncClient, margin: float = 3600) -> tuple[str, float] | None:
@@ -2232,6 +2233,30 @@ async def _get_opensea_key(client: httpx.AsyncClient, force_refresh: bool = Fals
         if shared:
             _opensea_key, _opensea_key_expiry = shared
             return _opensea_key
+
+    # OpenSea's anonymous key-mint endpoint has its own strict per-IP rate
+    # limit, tighter than and separate from the per-key request limit.
+    # Every 401 used to trigger its own immediate mint attempt - fine in
+    # isolation, but NFT Scope's poller alone fans out across ~20
+    # chain/metric combinations per run, so one expired key turned into a
+    # burst of ~20 mint attempts within seconds, each 429ing and keeping
+    # the shared IP rate-limited with no room to ever recover (confirmed
+    # live in production logs). This caps mint *attempts* - not successes
+    # - to one per cooldown window, shared across every concurrent
+    # instance via the same Supabase-backed cooldown NFT Scope already
+    # uses elsewhere. Fails open (allows the attempt) if the cooldown
+    # check itself can't be read, since the real risk here is over-
+    # minting, not under-minting.
+    try:
+        attempt_state = await _nft_alert_state_get(client, "__opensea__", "key_mint_attempt")
+    except httpx.HTTPError:
+        attempt_state = None
+    if not _nft_alert_cooled_down(attempt_state, cooldown_seconds=_OPENSEA_MINT_COOLDOWN_SECONDS):
+        return None
+    try:
+        await _nft_alert_state_set(client, "__opensea__", "key_mint_attempt", 0)
+    except httpx.HTTPError:
+        pass
 
     # force_refresh skips both caches on purpose - a caller only sets it
     # after OpenSea itself has just 401'd the "current" key, so re-reading
