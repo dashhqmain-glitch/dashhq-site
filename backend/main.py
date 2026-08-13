@@ -599,6 +599,31 @@ async def notify(request: Request, message: str = Query(..., min_length=1, max_l
     return {"configured": True, "posted": posted}
 
 
+# How far ahead of the real ~29-day expiry the daily refresh cron starts
+# trying to mint a replacement OpenSea key. Wide on purpose: the anonymous
+# key-issuance endpoint is rate-limited per IP, so one calm scheduled
+# attempt a day, days ahead of the deadline, gets several free retries
+# before it's actually needed - instead of the key silently expiring and
+# every concurrent user request racing to mint a replacement at once,
+# which is what took /pnl and NFT search/discover down together.
+_OPENSEA_REFRESH_MARGIN = 5 * 24 * 3600
+
+
+@app.get("/cron/refresh-opensea-key")
+async def refresh_opensea_key(request: Request):
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        still_fresh = await _supabase_read_opensea_key(client, margin=_OPENSEA_REFRESH_MARGIN)
+        if still_fresh:
+            return {"refreshed": False, "reason": "still fresh"}
+        key = await _get_opensea_key(client, force_refresh=True)
+
+    return {"refreshed": bool(key)}
+
+
 @app.get("/cron/test-monitor-channel")
 async def test_monitor_channel(request: Request, channel_id: str = Query(None, min_length=1, max_length=32)):
     # Verifies a channel is actually postable end-to-end - env var
@@ -2152,7 +2177,7 @@ _opensea_key_expiry: float = 0
 _OPENSEA_KEY_TABLE = "opensea_key_cache"
 
 
-async def _supabase_read_opensea_key(client: httpx.AsyncClient) -> tuple[str, float] | None:
+async def _supabase_read_opensea_key(client: httpx.AsyncClient, margin: float = 3600) -> tuple[str, float] | None:
     if not (settings.supabase_url and settings.supabase_service_role_key):
         return None
     try:
@@ -2169,7 +2194,7 @@ async def _supabase_read_opensea_key(client: httpx.AsyncClient) -> tuple[str, fl
         if not rows:
             return None
         expiry_ts = datetime.fromisoformat(rows[0]["expires_at"].replace("Z", "+00:00")).timestamp()
-        if time.time() >= expiry_ts - 3600:
+        if time.time() >= expiry_ts - margin:
             return None
         return rows[0]["api_key"], expiry_ts
     except (httpx.HTTPError, ValueError, KeyError, IndexError):
@@ -2197,6 +2222,8 @@ async def _supabase_write_opensea_key(client: httpx.AsyncClient, api_key: str, e
 
 async def _get_opensea_key(client: httpx.AsyncClient, force_refresh: bool = False) -> str | None:
     global _opensea_key, _opensea_key_expiry
+    if settings.opensea_api_key:
+        return settings.opensea_api_key
     if not force_refresh and _opensea_key and time.time() < _opensea_key_expiry - 3600:
         return _opensea_key
 
@@ -2228,6 +2255,27 @@ async def _get_opensea_key(client: httpx.AsyncClient, force_refresh: bool = Fals
         if shared:
             _opensea_key, _opensea_key_expiry = shared
             return _opensea_key
+        # Every OpenSea-backed feature (/pnl, /nft, NFT Scope, watchlist
+        # alerts) is dead until this recovers, and it previously went
+        # unnoticed until users hit it and complained in Discord. Alert
+        # ops directly instead of relying on someone spotting it live.
+        # Best-effort: a failed alert must never mask the original error.
+        try:
+            await _post_channel_message(client, settings.discord_ops_alert_channel_id, {
+                "title": "🚨 OpenSea key acquisition failed",
+                "description": (
+                    "Could not mint or read a cached OpenSea API key. "
+                    "/pnl, /nft search & discover, NFT Scope, and watchlist "
+                    "alerts are all down until this recovers - likely "
+                    "OpenSea rate-limiting the anonymous key endpoint for "
+                    "our shared IP. See function logs for the exact error."
+                ),
+                "color": EMBED_COLOR_BAD,
+                "footer": {"text": "Dash HQ Toolkit · OpenSea"},
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+        except httpx.HTTPError:
+            pass
         return None
 
 

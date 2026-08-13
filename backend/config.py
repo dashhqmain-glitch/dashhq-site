@@ -65,6 +65,14 @@ class Settings(BaseSettings):
     x_client_secret: str = ""
     x_redirect_uri: str = "https://www.dashhq.site/auth/x/callback"
 
+    # Optional real OpenSea developer key (docs.opensea.io/reference/api-keys).
+    # When set, this is used directly and the app never touches OpenSea's
+    # anonymous /v2/auth/keys self-issuance endpoint at all - that endpoint
+    # is IP-rate-limited and shared across however many other callers sit
+    # behind the same egress IP, which is what took every OpenSea-backed
+    # feature down at once. Leave blank to keep using the anonymous flow.
+    opensea_api_key: str = ""
+
     model_config = {"env_file": ".env"}
 
 

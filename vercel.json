@@ -30,6 +30,7 @@
     { "src": "/(.*)",         "dest": "/$1"           }
   ],
   "crons": [
-    { "path": "/cron/sync-members", "schedule": "0 6 * * *" }
+    { "path": "/cron/sync-members", "schedule": "0 6 * * *" },
+    { "path": "/cron/refresh-opensea-key", "schedule": "0 12 * * *" }
   ]
 }
