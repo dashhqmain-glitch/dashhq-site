@@ -5093,7 +5093,7 @@ async def _cmd_nft(query: str) -> dict:
     }
 
 
-async def _pnl_render_core(collection_query: str, mint_price_raw, amount_minted: int, x_username: str) -> bytes:
+async def _pnl_render_core(collection_query: str, mint_price_raw, amount_minted: int, x_username: str, exit_price_raw=None) -> bytes:
     results = await _nft_search_core(collection_query)
     if not results:
         raise HTTPException(status_code=404, detail=f'No OpenSea results for "{collection_query}".')
@@ -5105,6 +5105,10 @@ async def _pnl_render_core(collection_query: str, mint_price_raw, amount_minted:
 
     async with httpx.AsyncClient(timeout=15) as client:
         mint_price = await _parse_eth_amount(client, mint_price_raw, "mint price")
+        # Optional - a user who already sold wants PnL against what they
+        # actually got, not whatever the floor has drifted to since. Omit
+        # it and the card falls back to live floor price, same as before.
+        exit_price = await _parse_eth_amount(client, exit_price_raw, "exit price") if exit_price_raw else None
         try:
             history = await _nft_recent_snapshots(client, slug, limit=200)
         except httpx.HTTPError:
@@ -5132,6 +5136,7 @@ async def _pnl_render_core(collection_query: str, mint_price_raw, amount_minted:
         "amount_minted": amount_minted,
         "fp": c.get("floor") or 0.0,
         "ath": ath,
+        "exit_price": exit_price,
         "symbol": c.get("symbol") or "ETH",
         "eth_usd": c.get("listingUsdRate") or 0,
     }
@@ -5448,8 +5453,9 @@ async def _handle_toolkit_command(payload: dict) -> dict:
             collection = opts.get("collection", "")
             mint_price_raw = opts.get("mint_price", "0")
             amount_minted = int(opts.get("amount_minted", 1))
+            exit_price_raw = opts.get("exit_price")
             x_username = (opts.get("x_username") or member_user.get("global_name") or member_user.get("username") or "citizen").strip()
-            png_bytes = await _pnl_render_core(collection, mint_price_raw, amount_minted, x_username)
+            png_bytes = await _pnl_render_core(collection, mint_price_raw, amount_minted, x_username, exit_price_raw)
             await _discord_edit_original_with_file(token, "pnl.png", png_bytes)
         except Exception as exc:
             if not isinstance(exc, HTTPException):

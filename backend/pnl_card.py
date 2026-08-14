@@ -228,10 +228,16 @@ def render_pnl_card(data: dict, project_thumb_bytes: bytes | None = None) -> byt
     fp = float(data["fp"])
     ath = float(data.get("ath") or fp)
     eth_usd = float(data.get("eth_usd") or 0)
+    exit_price = data.get("exit_price")
+    is_realized = exit_price is not None
+    # An actual sale price (if given) is what PnL should be measured
+    # against - the live floor is only a stand-in for citizens who haven't
+    # sold yet and want to see where they'd stand right now.
+    sale_price = float(exit_price) if is_realized else fp
 
-    pnl_eth = (fp - mint_price) * amount
-    pnl_pct = ((fp - mint_price) / mint_price * 100) if mint_price > 0 else 0.0
-    multiplier = (fp / mint_price) if mint_price > 0 else 0.0
+    pnl_eth = (sale_price - mint_price) * amount
+    pnl_pct = ((sale_price - mint_price) / mint_price * 100) if mint_price > 0 else 0.0
+    multiplier = (sale_price / mint_price) if mint_price > 0 else 0.0
     pnl_usd = pnl_eth * eth_usd
 
     # Floor prices arrive from OpenSea as floats, so a genuine tie can land
@@ -239,10 +245,11 @@ def render_pnl_card(data: dict, project_thumb_bytes: bytes | None = None) -> byt
     # representation, not a real price difference. A tiny epsilon keeps
     # true ties labeled BREAK EVEN instead of flipping on noise.
     _EPS = 1e-9
+    verdict_kind = "REALIZED" if is_realized else "UNREALIZED"
     if pnl_eth > _EPS:
-        accent, verdict = GREEN, "REALIZED PROFIT"
+        accent, verdict = GREEN, f"{verdict_kind} PROFIT"
     elif pnl_eth < -_EPS:
-        accent, verdict = RED, "REALIZED LOSS"
+        accent, verdict = RED, f"{verdict_kind} LOSS"
     else:
         accent, verdict = BLUE, "BREAK EVEN"
     sign = "+" if pnl_eth > _EPS else ("-" if pnl_eth < -_EPS else "")
@@ -401,7 +408,7 @@ def render_pnl_card(data: dict, project_thumb_bytes: bytes | None = None) -> byt
     # ── Footer: two centered lines ─────────────────────────────────────
     footer_font = _font("JetBrainsMono-Regular.ttf", 20)
     sep = "   ·   "
-    parts = [(f"{mint_price:.4f} → {fp:.4f} {symbol}", MUTED2), (sep, MUTED2), (f"{pnl_pct:+.1f}%", accent)]
+    parts = [(f"{mint_price:.4f} → {sale_price:.4f} {symbol}", MUTED2), (sep, MUTED2), (f"{pnl_pct:+.1f}%", accent)]
     if eth_usd:
         parts += [(sep, MUTED2), (f"{symbol} ${eth_usd:,.2f}", MUTED2)]
     total_fw = sum(_tw(draw, t, footer_font) for t, _ in parts)
