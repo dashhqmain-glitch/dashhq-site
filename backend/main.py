@@ -4484,6 +4484,7 @@ _NFT_SCOPE_FOLLOWUP_DUE_MIN_SECONDS = 25 * 60
 _NFT_SCOPE_FOLLOWUP_DUE_MAX_SECONDS = 40 * 60  # window is wider than the 5-min poll cadence so a due post is never skipped between cycles
 _NFT_SCOPE_FOLLOWUP_MIN_FLOOR_GAIN_PCT = 10
 _NFT_SCOPE_FOLLOWUP_MAX_CHECKS_PER_CYCLE = 15  # bounds the extra OpenSea/Supabase spend this adds per poll
+_NFT_SCOPE_FOLLOWUP_TIME_BUDGET_SECONDS = 40  # skip this phase outright once a cycle has already burned this much of Vercel's 60s cap
 
 
 async def _nft_scope_due_followups(client: httpx.AsyncClient) -> list[dict]:
@@ -4668,6 +4669,18 @@ async def nft_poll(request: Request):
     # Each phase isolated - if the schema.sql migration hasn't been run yet
     # (a separate manual step from deploying this code) or OpenSea hiccups
     # mid-cycle, one phase failing shouldn't take the other down with it.
+    #
+    # This route runs under Vercel's 60s function timeout (vercel.json). The
+    # follow-up phase runs last, after three passes whose own cost already
+    # scales with how many candidates show up this cycle (a busy fresh-mint
+    # pass alone has run past 100 API calls) - so on a slow cycle it's the
+    # one at risk of getting truncated mid-request by a hard kill rather
+    # than failing cleanly. Skipping it outright once the budget is mostly
+    # spent is strictly better than risking a kill mid-POST, which could
+    # post a follow-up and get killed before the row marking it sent is
+    # written - the exact same slug would then be eligible to double-post
+    # on the next cycle.
+    start = time.time()
     errors = []
     async with httpx.AsyncClient(timeout=20) as client:
         try:
@@ -4683,11 +4696,14 @@ async def nft_poll(request: Request):
             except (httpx.HTTPError, KeyError) as e:
                 logger.exception("nft-poll: NFT Scope phase failed")
                 scoped, errors = [], errors + [f"nft_scope: {e}"]
-            try:
-                followups = await _nft_scope_followup_pass(client)
-            except (httpx.HTTPError, KeyError) as e:
-                logger.exception("nft-poll: NFT Scope follow-up phase failed")
-                followups, errors = [], errors + [f"nft_scope_followups: {e}"]
+            if time.time() - start < _NFT_SCOPE_FOLLOWUP_TIME_BUDGET_SECONDS:
+                try:
+                    followups = await _nft_scope_followup_pass(client)
+                except (httpx.HTTPError, KeyError) as e:
+                    logger.exception("nft-poll: NFT Scope follow-up phase failed")
+                    followups, errors = [], errors + [f"nft_scope_followups: {e}"]
+            else:
+                errors.append("nft_scope_followups: skipped - cycle already past its time budget")
         pruned = await _prune_old_snapshots(client)
 
     return {"watchlist_alerts": alerted, "nft_scope_posts": scoped, "nft_scope_followups": followups, "pruned_old_snapshots": pruned, "errors": errors}
