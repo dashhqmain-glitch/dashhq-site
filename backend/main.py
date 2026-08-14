@@ -4468,6 +4468,116 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
     return posted
 
 
+# Every call above is a single snapshot - "here's what's true right now" -
+# with no record of whether it actually kept going. That means the channel
+# has no accountability trail, and a user watching a "possible sweep" call
+# has no way to tell, without leaving Discord, whether it was real or fizzled
+# a few minutes later. This closes that loop: every post already writes a
+# `nft_scope_any_post` row (slug, floor at post time, posted_at) as part of
+# its own cooldown bookkeeping - reused here, no new write path - and once
+# that post is 25-40 min old, its floor and sale activity get checked again
+# exactly once. Only posts if the move actually continued (floor up 10%+ or
+# sales still accelerating); a fizzle gets marked done and stays silent, on
+# purpose - nobody asked for the bot to announce its own misses, and a
+# stream of "never mind" posts would just train people to ignore it.
+_NFT_SCOPE_FOLLOWUP_DUE_MIN_SECONDS = 25 * 60
+_NFT_SCOPE_FOLLOWUP_DUE_MAX_SECONDS = 40 * 60  # window is wider than the 5-min poll cadence so a due post is never skipped between cycles
+_NFT_SCOPE_FOLLOWUP_MIN_FLOOR_GAIN_PCT = 10
+_NFT_SCOPE_FOLLOWUP_MAX_CHECKS_PER_CYCLE = 15  # bounds the extra OpenSea/Supabase spend this adds per poll
+
+
+async def _nft_scope_due_followups(client: httpx.AsyncClient) -> list[dict]:
+    if not (settings.supabase_url and settings.supabase_service_role_key):
+        return []
+    now = datetime.now(timezone.utc)
+    window_start = (now - timedelta(seconds=_NFT_SCOPE_FOLLOWUP_DUE_MAX_SECONDS)).isoformat()
+    window_end = (now - timedelta(seconds=_NFT_SCOPE_FOLLOWUP_DUE_MIN_SECONDS)).isoformat()
+    try:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/nft_alert_state",
+            headers=_supabase_headers(),
+            params=[
+                ("alert_type", "eq.nft_scope_any_post"),
+                ("last_alerted_at", f"gte.{window_start}"),
+                ("last_alerted_at", f"lte.{window_end}"),
+                ("select", "slug,last_value,last_alerted_at"),
+                ("limit", str(_NFT_SCOPE_FOLLOWUP_MAX_CHECKS_PER_CYCLE * 3)),  # over-fetch; most will already be marked done below
+            ],
+        )
+        res.raise_for_status()
+        return res.json()
+    except httpx.HTTPError:
+        return []
+
+
+def _nft_scope_followup_embed(c: dict, floor_then: float, floor_now: float, pct_change: float | None, rapid_activity: dict | None, minutes_ago: int) -> dict:
+    symbol = c.get("symbol") or "ETH"
+    lines = []
+    if pct_change is not None and pct_change > 0:
+        lines.append(f"Floor is up **{pct_change:.0f}%** since this was flagged {minutes_ago} min ago - {floor_then:.4f} → {floor_now:.4f} {symbol}.")
+    if rapid_activity and rapid_activity.get("is_sharp"):
+        lines.append(
+            f"Still moving: {rapid_activity['sharp_count']} sale(s) in just the last {rapid_activity['sharp_window_minutes']} min, "
+            f"part of a {rapid_activity['count']}-sale burst from {rapid_activity['unique_buyers']} distinct buyer(s)."
+        )
+    elif rapid_activity:
+        lines.append(f"Still trading: {rapid_activity['count']} verified sale(s) in the last {rapid_activity['window_minutes']} min.")
+    lines.append("")
+    lines.append("*Follow-up on an earlier NFT Scope call, not a new signal. Heuristic read from public data - not financial advice. DYOR before any trade. NFA.*")
+    return {
+        "title": f"📈 NFT Scope · Still Cooking — {c['name']}",
+        "url": c.get("openseaUrl"),
+        "description": "\n".join(lines),
+        "color": EMBED_COLOR_GOOD,
+        "fields": [
+            {"name": "Floor Then", "value": f"{floor_then:.4f} {symbol}", "inline": True},
+            {"name": "Floor Now", "value": f"{floor_now:.4f} {symbol}", "inline": True},
+            {"name": "Elapsed", "value": f"{minutes_ago} min", "inline": True},
+        ],
+        "thumbnail": {"url": c["image"]} if c.get("image") else None,
+        "footer": {"text": f"{TOOLKIT_FOOTER['text']} · NFT Scope"},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def _nft_scope_followup_pass(client: httpx.AsyncClient) -> list[str]:
+    due = await _nft_scope_due_followups(client)
+    posted: list[str] = []
+    checked = 0
+    for row in due:
+        if checked >= _NFT_SCOPE_FOLLOWUP_MAX_CHECKS_PER_CYCLE:
+            break
+        slug = row.get("slug")
+        if not slug:
+            continue
+        try:
+            if await _nft_alert_state_get(client, slug, "nft_scope_followup_sent") is not None:
+                continue
+            checked += 1
+            floor_then = row.get("last_value") or 0
+            posted_at = datetime.fromisoformat(row["last_alerted_at"].replace("Z", "+00:00"))
+            minutes_ago = int((datetime.now(timezone.utc) - posted_at).total_seconds() // 60)
+            c = await _nft_collection_core(slug)
+            floor_now = c.get("floor") or 0
+            pct_change = ((floor_now - floor_then) / floor_then * 100) if floor_then > 0 else None
+            rapid_activity = await _detect_rapid_activity(client, slug)
+            worth_followup = (pct_change is not None and pct_change >= _NFT_SCOPE_FOLLOWUP_MIN_FLOOR_GAIN_PCT) or (rapid_activity and rapid_activity.get("is_sharp"))
+            if worth_followup and await _nft_scope_clears_wash_check(client, slug):
+                delivered = await _post_channel_message(
+                    client, settings.discord_nft_scope_channel_id,
+                    _nft_scope_followup_embed(c, floor_then, floor_now, pct_change, rapid_activity, minutes_ago),
+                )
+                if delivered:
+                    posted.append(slug)
+            await _nft_alert_state_set(client, slug, "nft_scope_followup_sent", floor_now)
+        except HTTPException:
+            continue
+        except (httpx.HTTPError, KeyError, ZeroDivisionError, TypeError):
+            logger.exception("nft-scope: follow-up check failed for %s", slug)
+            continue
+    return posted
+
+
 def _nft_channel_explainer_embed() -> dict:
     return {
         "title": "📌 How this channel works",
@@ -4566,15 +4676,21 @@ async def nft_poll(request: Request):
             logger.exception("nft-poll: watchlist alert phase failed")
             alerted, errors = [], errors + [f"watchlist_alerts: {e}"]
         scoped = []
+        followups = []
         if settings.nft_scope_enabled:
             try:
                 scoped = await _nft_scope_scan(client)
             except (httpx.HTTPError, KeyError) as e:
                 logger.exception("nft-poll: NFT Scope phase failed")
                 scoped, errors = [], errors + [f"nft_scope: {e}"]
+            try:
+                followups = await _nft_scope_followup_pass(client)
+            except (httpx.HTTPError, KeyError) as e:
+                logger.exception("nft-poll: NFT Scope follow-up phase failed")
+                followups, errors = [], errors + [f"nft_scope_followups: {e}"]
         pruned = await _prune_old_snapshots(client)
 
-    return {"watchlist_alerts": alerted, "nft_scope_posts": scoped, "pruned_old_snapshots": pruned, "errors": errors}
+    return {"watchlist_alerts": alerted, "nft_scope_posts": scoped, "nft_scope_followups": followups, "pruned_old_snapshots": pruned, "errors": errors}
 
 
 @app.get("/toolkit/nft-discover")
