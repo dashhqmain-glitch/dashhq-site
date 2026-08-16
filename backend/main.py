@@ -2648,6 +2648,24 @@ async def _nft_recent_snapshots(client: httpx.AsyncClient, slug: str, limit: int
     return res.json()
 
 
+async def _nft_first_snapshot(client: httpx.AsyncClient, slug: str) -> dict | None:
+    # The earliest row NFT Scope (or /watchlist polling) ever recorded for
+    # this slug - the "floor when we first saw it" baseline a floor-
+    # multiple call needs. Oldest-first, limit 1, deliberately a separate
+    # query from _nft_recent_snapshots (which is newest-first and capped
+    # at a small window) rather than trying to reuse it, since the first
+    # sighting can be arbitrarily far back within the 30-day retention
+    # window.
+    res = await client.get(
+        f"{settings.supabase_url}/rest/v1/nft_snapshot_history",
+        headers=_supabase_headers(),
+        params={"slug": f"eq.{slug}", "select": "floor,captured_at", "order": "captured_at.asc", "limit": "1"},
+    )
+    res.raise_for_status()
+    rows = res.json()
+    return rows[0] if rows else None
+
+
 async def _nft_alert_state_get(client: httpx.AsyncClient, slug: str, alert_type: str) -> dict | None:
     res = await client.get(
         f"{settings.supabase_url}/rest/v1/nft_alert_state",
@@ -3773,7 +3791,24 @@ def _detect_fake_offer(c: dict, top_offer_amount: float | None) -> str | None:
     return None
 
 
-def _detect_abnormal_turnover(c: dict) -> str | None:
+_NFT_SCOPE_TURNOVER_CORROBORATION_MIN_BUYERS = 2
+
+
+def _nft_scope_turnover_elevated(c: dict) -> bool:
+    # Cheap, sync pre-check so callers only pay for the wash_analysis fetch
+    # below on the rare candidate that actually needs it - most candidates
+    # never get anywhere near these ratios.
+    sales = c.get("sales24h") or 0
+    if sales <= 0:
+        return False
+    supply = c.get("totalSupply")
+    owners = c.get("owners")
+    turnover = (sales / supply) if supply and supply > 0 else None
+    flips_per_owner = (sales / owners) if owners and owners > 0 else None
+    return (turnover is not None and turnover >= 0.4) or (flips_per_owner is not None and flips_per_owner >= 5)
+
+
+def _detect_abnormal_turnover(c: dict, wash_analysis: dict | None = None) -> tuple[bool, str] | None:
     # A large wallet-graph wash-trading operation (dozens+ of sybil
     # wallets, many different token IDs) can dodge the pairwise/cluster/
     # token-diversity checks in _analyze_wash_trading entirely, since
@@ -3781,31 +3816,64 @@ def _detect_abnormal_turnover(c: dict) -> str | None:
     # But it can't hide the arithmetic: real collections essentially
     # never see a large fraction of their entire supply change hands in
     # a single day, and they don't see current holders each flip their
-    # token multiple times in a day either. A collection where 24h sales
-    # approach or exceed its own supply, or run far ahead of its current
-    # owner count, is trading against itself no matter how many distinct
-    # wallets are involved.
+    # token multiple times in a day either.
+    #
+    # BUT the exact same arithmetic is also what a genuine viral sweep on a
+    # small-supply collection looks like - a real degen mania where dozens
+    # of distinct buyers pile in fast produces the same "40% of supply
+    # traded today" number as a wash-trading ring. Treating this as an
+    # unconditional block meant the highest-conviction real plays this bot
+    # exists to catch could score well on everything else and still get
+    # silently vetoed - confirmed as the actual root cause of NFT Scope
+    # missing genuine high-volume surges.
+    #
+    # wash_analysis has to come from the SAME ~24h window sales24h itself
+    # describes (see _nft_scope_wash_analysis) - a short rapid-activity
+    # burst (as little as 5 sales in 30 min) proves nothing about a claim
+    # spanning a full day's 1000+ sales, and using it as corroboration was
+    # tried and rejected: it let a documented real wash-trading case
+    # (sales == total supply, a small burst dict trivially "diverse" on
+    # its own tiny sample) slip straight through. A window-matched check
+    # is what actually holds up - _analyze_wash_trading's self-trade/
+    # reciprocal/cluster/token-diversity checks run against a same-day
+    # sample, not a slice too small to mean anything about the whole.
+    # Still nothing loosens by default: no wash_analysis provided -> stays
+    # exactly as conservative as before.
     sales = c.get("sales24h") or 0
     if sales <= 0:
         return None
     supply = c.get("totalSupply")
-    if supply and supply > 0:
-        turnover = sales / supply
-        if turnover >= 0.4:
-            return (
-                f"{sales} sales against only {supply} total supply ({turnover:.0%} of the entire "
-                "collection changed hands in 24h) - real collections don't turn over like this; "
-                "this is the signature of scripted wash trading, not genuine demand"
-            )
     owners = c.get("owners")
-    if owners and owners > 0:
-        flips_per_owner = sales / owners
-        if flips_per_owner >= 5:
-            return (
-                f"{sales} sales across only {owners} current owners (~{flips_per_owner:.1f} flips per "
-                "holder in 24h) - way beyond organic trading, looks like scripted churn among a small set of wallets"
-            )
-    return None
+    turnover = (sales / supply) if supply and supply > 0 else None
+    flips_per_owner = (sales / owners) if owners and owners > 0 else None
+    elevated = (turnover is not None and turnover >= 0.4) or (flips_per_owner is not None and flips_per_owner >= 5)
+    if not elevated:
+        return None
+
+    corroborated = (
+        wash_analysis is not None
+        and not wash_analysis.get("suspicious")
+        and (wash_analysis.get("unique_buyers") or 0) >= _NFT_SCOPE_TURNOVER_CORROBORATION_MIN_BUYERS
+    )
+    detail = f"{sales} sales" + (f" against {supply} total supply ({turnover:.0%} turnover)" if turnover is not None else "")
+    if corroborated:
+        return (
+            False,
+            f"⚡ {detail} in 24h, verified wash-clean across {wash_analysis['unique_buyers']} distinct buyer(s) "
+            "over the same window - high turnover here is a real, broad-based sweep, not wash trading"
+        )
+    if turnover is not None and turnover >= 0.4:
+        return (
+            True,
+            f"{sales} sales against only {supply} total supply ({turnover:.0%} of the entire "
+            "collection changed hands in 24h) - real collections don't turn over like this; "
+            "this is the signature of scripted wash trading, not genuine demand"
+        )
+    return (
+        True,
+        f"{sales} sales across only {owners} current owners (~{flips_per_owner:.1f} flips per "
+        "holder in 24h) - way beyond organic trading, looks like scripted churn among a small set of wallets"
+    )
 
 
 _NFT_SCOPE_BLUE_CHIP_OWNERS_THRESHOLD = 2500  # already-established collections everyone knows, not secondary-play alpha
@@ -3883,7 +3951,61 @@ def _momentum_points(c: dict, history: list[dict]) -> tuple[int, list[str]]:
     return points, reasons
 
 
-def _nft_scope_score(c: dict, top_offer_amount: float | None, history: list[dict] | None = None, rapid_activity: dict | None = None) -> dict:
+_NFT_SCOPE_VELOCITY_MIN_PCT = 15  # floor jump vs. the immediately-prior snapshot worth calling out on its own
+_NFT_SCOPE_VELOCITY_POINTS = 10
+# (floor multiple since the first snapshot NFT Scope ever recorded, bonus points) -
+# checked highest-first, first qualifying tier wins. This is the direct answer to
+# "collections that ran from a near-zero floor to $200+" - that IS a floor multiple,
+# and until this existed nothing in the scoring model measured it at all.
+_NFT_SCOPE_MULTIPLE_TIERS = [(50, 25), (20, 20), (10, 15), (5, 10), (2, 5)]
+
+
+def _nft_scope_surge_points(c: dict, history: list[dict] | None, first_snapshot: dict | None) -> tuple[int, list[str], float | None]:
+    # Fast-triggering, and deliberately separate from _momentum_points
+    # above - that one needs 6 snapshots (~30 min of history) before it'll
+    # say anything at all, built for confirming a SUSTAINED trend. A real
+    # degen mover doesn't wait around to build up a trend before it's
+    # worth flagging, and NFT Scope now writes a snapshot for every
+    # candidate it evaluates with real activity (not just /watchlist'd
+    # ones - see _nft_scope_scan), so even a collection nobody's tracking
+    # yet can have a first-seen baseline and a velocity reading from as
+    # little as one prior sighting.
+    reasons: list[str] = []
+    points = 0
+    floor = c.get("floor")
+    floor_multiple: float | None = None
+
+    if first_snapshot and floor is not None:
+        first_floor = first_snapshot.get("floor")
+        if first_floor and first_floor > 0:
+            multiple = floor / first_floor
+            for threshold, bonus in _NFT_SCOPE_MULTIPLE_TIERS:
+                if multiple >= threshold:
+                    points += bonus
+                    floor_multiple = multiple
+                    first_seen_date = (first_snapshot.get("captured_at") or "")[:10] or "an earlier scan"
+                    symbol = c.get("symbol") or "ETH"
+                    reasons.append(
+                        f"🚀🚀 Up {multiple:.1f}x from the {first_floor:.4f} {symbol} floor NFT Scope first "
+                        f"recorded on {first_seen_date} - already proving out, not a theory"
+                    )
+                    break
+
+    if history and floor is not None:
+        prev_floor = (history[0] or {}).get("floor")  # history is newest-first; index 0 is the immediately-prior poll
+        if prev_floor and prev_floor > 0:
+            pct = (floor - prev_floor) / prev_floor * 100
+            if pct >= _NFT_SCOPE_VELOCITY_MIN_PCT:
+                points += _NFT_SCOPE_VELOCITY_POINTS
+                reasons.append(f"⚡ Floor jumped {pct:.0f}% since the last poll cycle just minutes ago - moving in real time")
+
+    return points, reasons, floor_multiple
+
+
+def _nft_scope_score(
+    c: dict, top_offer_amount: float | None, history: list[dict] | None = None,
+    rapid_activity: dict | None = None, first_snapshot: dict | None = None, wash_analysis: dict | None = None,
+) -> dict:
     supply = c.get("totalSupply")
     owners = c.get("owners")
     sales = c.get("sales24h") or 0
@@ -3950,6 +4072,18 @@ def _nft_scope_score(c: dict, top_offer_amount: float | None, history: list[dict
         points += momentum_points
         reasons.extend(momentum_reasons)
 
+    # Surge (0-35) - the primary driver for a genuine early degen play, not
+    # a minor supplement. A brand-new stealth pump has none of the
+    # "project substance" points above yet (no socials, no description -
+    # there's been no time) and its owner/supply ratio can look thin
+    # during an early concentrated sweep even though that's exactly what
+    # real early conviction looks like. This is what lets a verified,
+    # wash-clean price/volume surge clear a high tier on its own merits
+    # instead of needing blue-chip-style polish it hasn't had time to earn.
+    surge_points, surge_reasons, floor_multiple = _nft_scope_surge_points(c, history, first_snapshot)
+    points += surge_points
+    reasons.extend(surge_reasons)
+
     # Rapid activity (0-10) - an early, fast-reacting supplement to the
     # snapshot-based momentum above, not a replacement or a shortcut
     # around it. It only ever ADDS points on top of every other check
@@ -3978,9 +4112,20 @@ def _nft_scope_score(c: dict, top_offer_amount: float | None, history: list[dict
                 f"{rapid_activity['sharp_window_minutes']} min - this is happening right now, not winding down"
             )
 
-    turnover_reason = _detect_abnormal_turnover(c)
-    if turnover_reason:
-        red_flags.append(turnover_reason)
+    turnover_result = _detect_abnormal_turnover(c, wash_analysis)
+    turnover_blocks = False
+    if turnover_result:
+        turnover_blocked, turnover_message = turnover_result
+        if turnover_blocked:
+            red_flags.append(turnover_message)
+            turnover_blocks = True
+        else:
+            # Corroborated by a wash-clean rapid-activity burst with real
+            # buyer diversity - reclassified from a red flag into one of
+            # the strongest bullish signals available, since it's proof of
+            # broad, fast, genuine demand rather than a slow accumulation.
+            points += 15
+            reasons.append(turnover_message)
 
     blue_chip_reason = _detect_blue_chip(c)
     if blue_chip_reason:
@@ -3993,7 +4138,7 @@ def _nft_scope_score(c: dict, top_offer_amount: float | None, history: list[dict
     # "lots of sales" and "many owners" are exactly what those numbers
     # look like from the outside; the third would score highest of all,
     # since a blue chip legitimately aces every soft signal).
-    blocked = fake_offer_reason is not None or turnover_reason is not None or blue_chip_reason is not None
+    blocked = fake_offer_reason is not None or turnover_blocks or blue_chip_reason is not None
 
     # A description, social links, a category, even a listed floor price
     # cost a scammer nothing to fake and don't require a single other
@@ -4030,8 +4175,13 @@ def _nft_scope_score(c: dict, top_offer_amount: float | None, history: list[dict
         tier, risk_tier = "none", "⚪ Not Enough Signal"
 
     return {
-        "score": points, "reasons": reasons, "red_flags": red_flags, "risk_tier": risk_tier,
-        "tier": tier, "blocked": blocked, "has_real_activity": has_real_activity,
+        # Capped for display - the surge/momentum/rapid-activity/turnover-
+        # corroboration dimensions can legitimately stack past 100 for a
+        # genuinely huge mover clearing several of them at once, but the
+        # embed shows this as "X/100" and tiers are all <=100 anyway, so
+        # capping here changes nothing about which tier anything lands in.
+        "score": min(points, 100), "reasons": reasons, "red_flags": red_flags, "risk_tier": risk_tier,
+        "tier": tier, "blocked": blocked, "has_real_activity": has_real_activity, "floor_multiple": floor_multiple,
     }
 
 
@@ -4080,6 +4230,18 @@ def _nft_scope_analyst_take(c: dict, score: dict, rapid_activity: dict | None, k
     supply = c.get("totalSupply")
     sales = c.get("sales24h") or 0
 
+    floor_multiple = score.get("floor_multiple")
+    if floor_multiple and rapid_activity and rapid_activity.get("is_sharp"):
+        return (
+            f"{name}{chain_clause} is already up {floor_multiple:.1f}x from where NFT Scope first tracked it, AND "
+            f"still accelerating right now - {rapid_activity['sharp_count']} sale(s) landed in just the last "
+            f"{rapid_activity['sharp_window_minutes']} minutes. This is the shape of a real run, not a one-off spike."
+        )
+    if floor_multiple:
+        return (
+            f"{name}{chain_clause} is up {floor_multiple:.1f}x from the floor NFT Scope first recorded it at - "
+            "this one's already proving out, worth watching for continuation, not a cold call."
+        )
     if rapid_activity and rapid_activity.get("is_sharp"):
         return (
             f"{name}{chain_clause} is moving right now - {rapid_activity['sharp_count']} sale(s) landed in just the "
@@ -4147,6 +4309,11 @@ def _nft_scope_embed(c: dict, score: dict, top_offer_amount: float | None, kind:
         {"name": "Age", "value": _nft_scope_age_text(c.get("createdDate")) or "-", "inline": True},
         {"name": "Category", "value": c.get("category") or "-", "inline": True},
     ]
+    # Its own field, not just a line buried in "Why it's on the radar" -
+    # this is the single most scannable fact for a degen audience deciding
+    # whether to look closer, so it gets equal billing with Floor/Top Offer.
+    if score.get("floor_multiple"):
+        fields.append({"name": "Since First Seen", "value": f"🚀 {score['floor_multiple']:.1f}x", "inline": True})
     return {
         "title": f"{title_prefix} — {c['name']}",
         "url": c.get("openseaUrl"),
@@ -4243,6 +4410,46 @@ async def _nft_scope_clears_wash_check(client: httpx.AsyncClient, slug: str) -> 
     return not _analyze_wash_trading(recent)["suspicious"]
 
 
+async def _nft_scope_wash_analysis(client: httpx.AsyncClient, slug: str) -> dict | None:
+    # Separate from _nft_scope_clears_wash_check above (which only returns
+    # a bool and only runs post-score, on candidates that already cleared
+    # the bar) - this returns the full _analyze_wash_trading result,
+    # fetched BEFORE scoring, specifically so _detect_abnormal_turnover can
+    # use its unique_buyers/suspicious verdict to decide whether elevated
+    # turnover is a real sweep or wash trading. Only ever called when
+    # _nft_scope_turnover_elevated(c) is already true, so this doesn't add
+    # cost to the common case where turnover isn't even in question. None
+    # (not "clean") on a fetch error - _detect_abnormal_turnover treats
+    # missing evidence as "stay conservative," not "assume innocent."
+    try:
+        recent = await _fetch_recent_sale_events(client, slug, window_seconds=86400, limit=50)
+    except httpx.HTTPError:
+        return None
+    if not recent:
+        return None
+    return _analyze_wash_trading(recent)
+
+
+async def _nft_scope_snapshot_signals(client: httpx.AsyncClient, slug: str) -> tuple[list[dict], dict | None]:
+    # Feeds _nft_scope_surge_points: recent history for the "jumped since
+    # the last poll" velocity reading, and the very first snapshot ever
+    # recorded for the "up Nx since we first saw it" reading. Both are
+    # bonus signals on top of everything else, never a requirement -
+    # fails safe to "no signal" on any error rather than blocking a
+    # candidate over a Supabase hiccup.
+    history: list[dict] = []
+    first_snapshot: dict | None = None
+    try:
+        history = await _nft_recent_snapshots(client, slug, limit=30)
+    except httpx.HTTPError:
+        pass
+    try:
+        first_snapshot = await _nft_first_snapshot(client, slug)
+    except httpx.HTTPError:
+        pass
+    return history, first_snapshot
+
+
 async def _nft_scope_top_offer_amount(client: httpx.AsyncClient, slug: str, c: dict) -> float | None:
     try:
         top_offer_raw = await _opensea_get_top_offer(client, slug)
@@ -4306,7 +4513,9 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
                 # entirely. _detect_rapid_activity reads raw sale events
                 # directly instead, which don't have this lag.
                 rapid_activity = await _detect_rapid_activity(client, slug)
-                score = _nft_scope_score(c, top_offer_amount, rapid_activity=rapid_activity)
+                history, first_snapshot = await _nft_scope_snapshot_signals(client, slug)
+                wash_analysis = await _nft_scope_wash_analysis(client, slug) if _nft_scope_turnover_elevated(c) else None
+                score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis)
                 if (
                     len(fresh_posted) < limits["fresh_max"]
                     and _nft_scope_worth_posting(score)
@@ -4318,6 +4527,16 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
                         fresh_posted.append(slug)
                         await _nft_scope_mark_posted(client, slug, c.get("floor") or 0)
                         await _nft_scope_mark_fresh_posted(client, slug)
+                # Record a snapshot for anything with real, verified
+                # activity - not just what someone happens to /watchlist.
+                # Previously this data only ever existed for collections a
+                # citizen manually tracked, so a stealth play NFT Scope
+                # itself discovered first had no floor history of its own
+                # to measure a future surge against - no "first seen at X"
+                # baseline, no velocity reading, nothing. This is the
+                # foundation the surge scoring above depends on.
+                if score["has_real_activity"]:
+                    await _nft_store_snapshot(client, c)
                 # Mark seen regardless of score or whether the post cap
                 # was already hit - re-eligible after the recheck cooldown
                 # above, not gone forever, so a mint that's quiet today but
@@ -4417,22 +4636,25 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
             # Not gated on c["sales24h"] > 0 - see the fresh-mint pass for
             # why (that stat can lag reality for a fast-moving mint).
             rapid_activity = await _detect_rapid_activity(client, slug)
-            # Trending collections often already have snapshot
-            # history from watchlist polling even if nobody
-            # explicitly /monitor'd them - use it for momentum
-            # scoring if it happens to exist, harmless if not.
-            history = None
-            try:
-                history = await _nft_recent_snapshots(client, slug, limit=30)
-            except httpx.HTTPError:
-                history = None
-            score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity)
+            # Trending collections often already have snapshot history
+            # from watchlist polling or a prior NFT Scope evaluation even
+            # if nobody explicitly /monitor'd them - used both for the
+            # sustained-trend momentum score and the faster surge
+            # (velocity / floor-multiple-since-first-seen) score below.
+            history, first_snapshot = await _nft_scope_snapshot_signals(client, slug)
+            wash_analysis = await _nft_scope_wash_analysis(client, slug) if _nft_scope_turnover_elevated(c) else None
+            score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis)
             if _nft_scope_worth_posting(score) and await _nft_scope_clears_wash_check(client, slug):
                 delivered = await _post_channel_message(client, settings.discord_nft_scope_channel_id, _nft_scope_embed(c, score, top_offer_amount, "trending", rapid_activity=rapid_activity))
                 if delivered:
                     trending_posted.append(slug)
                     await _nft_alert_state_set(client, slug, "nft_scope_trending_post", c.get("floor") or 0)
                     await _nft_scope_mark_posted(client, slug, c.get("floor") or 0)
+            # Record a snapshot for anything with real, verified activity -
+            # see the fresh-mint pass above for why this now happens for
+            # every candidate evaluated here too, not just /watchlist'd ones.
+            if score["has_real_activity"]:
+                await _nft_store_snapshot(client, c)
             # Mark as scanned regardless of outcome - rate-limits
             # re-checking this specific candidate, it doesn't mean
             # "never again" the way the fresh-mint seen-table does.
@@ -4484,7 +4706,17 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
             # Not gated on c["sales24h"] > 0 - see the fresh-mint pass for
             # why (that stat can lag reality for a fast-moving mint).
             rapid_activity = await _detect_rapid_activity(client, slug)
-            score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity)
+            # No snapshot write here (unlike the other two passes) -
+            # _nft_poll_watchlist_alerts already wrote one for every
+            # tracked slug earlier in this same poll cycle, before
+            # _nft_scope_scan ever runs.
+            first_snapshot = None
+            try:
+                first_snapshot = await _nft_first_snapshot(client, slug)
+            except httpx.HTTPError:
+                pass
+            wash_analysis = await _nft_scope_wash_analysis(client, slug) if _nft_scope_turnover_elevated(c) else None
+            score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis)
             if _nft_scope_worth_posting(score) and await _nft_scope_clears_wash_check(client, slug):
                 delivered = await _post_channel_message(client, settings.discord_nft_scope_channel_id, _nft_scope_embed(c, score, top_offer_amount, "momentum", rapid_activity=rapid_activity))
                 if delivered:

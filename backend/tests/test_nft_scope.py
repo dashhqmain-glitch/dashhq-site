@@ -128,22 +128,26 @@ def test_wash_handles_empty_and_malformed_input():
 def test_turnover_blocks_real_case_cashcatforex():
     # Live false-positive: 1267 sales against 1267 total supply in 24h.
     c = {"totalSupply": 1267, "owners": 131, "sales24h": 1267}
-    reason = main._detect_abnormal_turnover(c)
-    assert reason is not None
+    result = main._detect_abnormal_turnover(c)
+    assert result is not None
+    blocked, reason = result
+    assert blocked is True
     assert "changed hands" in reason or "turned over" in reason.lower()
 
 
 def test_turnover_blocks_real_case_trwnat():
     # Live false-positive: 10 sales against 10 total supply in 24h.
     c = {"totalSupply": 10, "owners": 10, "sales24h": 10}
-    assert main._detect_abnormal_turnover(c) is not None
+    result = main._detect_abnormal_turnover(c)
+    assert result is not None and result[0] is True
 
 
 def test_turnover_catches_high_flips_per_owner_even_with_large_supply():
     # A big supply dilutes the sales/supply ratio, but sales/owners still
     # reveals churn among the actual current holder set.
     c = {"totalSupply": 100_000, "owners": 20, "sales24h": 150}
-    assert main._detect_abnormal_turnover(c) is not None
+    result = main._detect_abnormal_turnover(c)
+    assert result is not None and result[0] is True
 
 
 def test_turnover_normal_activity_not_flagged():
@@ -154,6 +158,45 @@ def test_turnover_normal_activity_not_flagged():
 def test_turnover_handles_missing_and_zero_data():
     assert main._detect_abnormal_turnover({"sales24h": 0}) is None
     assert main._detect_abnormal_turnover({"sales24h": 50}) is None  # no supply/owners data at all
+
+
+def test_turnover_stays_blocked_without_wash_analysis_even_at_extreme_ratio():
+    # No corroborating evidence provided at all (the default, and what
+    # every one of the "real scam call" tests above exercises) -> exactly
+    # as conservative as before this change, regardless of how extreme.
+    c = {"totalSupply": 1267, "owners": 131, "sales24h": 1267}
+    result = main._detect_abnormal_turnover(c, wash_analysis=None)
+    assert result is not None and result[0] is True
+
+
+def test_turnover_stays_blocked_even_with_wash_analysis_if_it_says_suspicious():
+    c = {"totalSupply": 1267, "owners": 131, "sales24h": 1267}
+    dirty = {"suspicious": True, "unique_buyers": 40, "unique_sellers": 30}
+    result = main._detect_abnormal_turnover(c, wash_analysis=dirty)
+    assert result is not None and result[0] is True
+
+
+def test_turnover_stays_blocked_if_corroborating_sample_has_too_few_distinct_buyers():
+    c = {"totalSupply": 500, "owners": 50, "sales24h": 250}  # 50% turnover
+    thin = {"suspicious": False, "unique_buyers": 1, "unique_sellers": 20}
+    result = main._detect_abnormal_turnover(c, wash_analysis=thin)
+    assert result is not None and result[0] is True
+
+
+def test_turnover_unblocked_and_reclassified_bullish_when_corroborated_clean():
+    # A real, wash-clean sweep on a small-supply collection: the same
+    # elevated turnover ratio as the scam cases above, but backed by a
+    # same-window wash analysis with real buyer diversity and no
+    # suspicious patterns. This is the actual bug fix - this exact shape
+    # (high turnover + genuine broad buying) was being silently vetoed
+    # before, which is confirmed as a real cause of missed surges.
+    c = {"totalSupply": 500, "owners": 50, "sales24h": 250}  # 50% turnover
+    clean = {"suspicious": False, "unique_buyers": 30, "unique_sellers": 45}
+    result = main._detect_abnormal_turnover(c, wash_analysis=clean)
+    assert result is not None
+    blocked, reason = result
+    assert blocked is False
+    assert "real, broad-based sweep" in reason
 
 
 # ── _detect_blue_chip (NFT Scope is for secondary plays, not majors) ────
@@ -683,3 +726,125 @@ def test_pass_limits_scale_up_when_healthy_and_contract_when_not():
     assert healthy["fresh_max"] >= base["fresh_max"]
     assert healthy["trending_max"] >= base["trending_max"]
     assert healthy["momentum_max"] >= base["momentum_max"]
+
+
+# ── _nft_scope_surge_points (floor-multiple-since-first-seen + velocity) ──
+# The direct fix for "collections that ran from a near-zero floor to
+# $200+ weren't getting caught" - nothing in the scoring model measured a
+# floor multiple at all before this existed.
+
+def test_surge_points_zero_with_no_signals():
+    points, reasons, multiple = main._nft_scope_surge_points(strong_collection(floor=0.05), None, None)
+    assert points == 0
+    assert reasons == []
+    assert multiple is None
+
+
+def test_surge_points_rewards_a_big_floor_multiple_since_first_seen():
+    c = strong_collection(floor=0.5)  # 50x a 0.01 first-seen floor
+    first_snapshot = {"floor": 0.01, "captured_at": "2026-08-01T00:00:00+00:00"}
+    points, reasons, multiple = main._nft_scope_surge_points(c, None, first_snapshot)
+    assert points == 25  # top tier: 50x+
+    assert multiple == 50.0
+    assert any("50.0x" in r and "2026-08-01" in r for r in reasons)
+
+
+def test_surge_points_tiers_scale_with_multiple_size():
+    first_snapshot = {"floor": 1.0, "captured_at": "2026-08-01"}
+    p_2x, _, m_2x = main._nft_scope_surge_points(strong_collection(floor=2.0), None, first_snapshot)
+    p_10x, _, m_10x = main._nft_scope_surge_points(strong_collection(floor=10.0), None, first_snapshot)
+    assert 0 < p_2x < p_10x
+    assert m_2x == 2.0 and m_10x == 10.0
+
+
+def test_surge_points_ignores_a_multiple_below_the_smallest_tier():
+    c = strong_collection(floor=0.011)  # only 1.1x - real but not call-worthy on its own
+    first_snapshot = {"floor": 0.01, "captured_at": "2026-08-01"}
+    points, reasons, multiple = main._nft_scope_surge_points(c, None, first_snapshot)
+    assert points == 0
+    assert multiple is None
+
+
+def test_surge_points_rewards_a_sharp_jump_since_the_last_poll():
+    c = strong_collection(floor=0.12)  # +20% vs the immediately-prior snapshot
+    history = [{"floor": 0.10}, {"floor": 0.09}]  # newest-first
+    points, reasons, multiple = main._nft_scope_surge_points(c, history, None)
+    assert points == main._NFT_SCOPE_VELOCITY_POINTS
+    assert any("jumped" in r and "20%" in r for r in reasons)
+    assert multiple is None  # velocity and multiple are independent signals
+
+
+def test_surge_points_ignores_a_small_move_since_the_last_poll():
+    c = strong_collection(floor=0.101)  # +1% - noise, not a signal
+    history = [{"floor": 0.10}]
+    points, reasons, multiple = main._nft_scope_surge_points(c, history, None)
+    assert points == 0
+    assert reasons == []
+
+
+def test_surge_points_stack_multiple_and_velocity_together():
+    c = strong_collection(floor=0.6)  # 60x first-seen AND +20% vs last poll
+    first_snapshot = {"floor": 0.01, "captured_at": "2026-08-01"}
+    history = [{"floor": 0.5}]
+    points, reasons, multiple = main._nft_scope_surge_points(c, history, first_snapshot)
+    assert points == 25 + main._NFT_SCOPE_VELOCITY_POINTS
+    assert len(reasons) == 2
+    assert multiple == 60.0
+
+
+def test_nft_scope_score_surfaces_floor_multiple_and_boosts_score():
+    c = strong_collection(floor=0.5)
+    first_snapshot = {"floor": 0.01, "captured_at": "2026-08-01"}
+    with_surge = main._nft_scope_score(c, None, first_snapshot=first_snapshot)
+    without_surge = main._nft_scope_score(c, None, first_snapshot=None)
+    assert with_surge["floor_multiple"] == 50.0
+    assert without_surge["floor_multiple"] is None
+    assert with_surge["score"] > without_surge["score"]
+    assert main._nft_scope_worth_posting(with_surge)
+
+
+def test_nft_scope_score_caps_displayed_score_at_100_even_when_everything_stacks():
+    # A genuinely huge mover can clear distribution + trading + substance +
+    # momentum + surge + rapid-activity all at once - the embed shows this
+    # as "X/100", so the returned score must never exceed that regardless
+    # of how many dimensions stack.
+    c = strong_collection(floor=0.5, owners=400, totalSupply=500, sales24h=20, vol1d=5)
+    first_snapshot = {"floor": 0.005, "captured_at": "2026-08-01"}  # 100x
+    history = history_from([0.3, 0.35, 0.4], "floor")
+    rapid = {"count": 8, "unique_buyers": 6, "unique_sellers": 5, "window_minutes": 30, "price_surge_pct": 40, "is_sharp": True, "sharp_count": 3, "sharp_window_minutes": 5}
+    score = main._nft_scope_score(c, 0.6, history=history, rapid_activity=rapid, first_snapshot=first_snapshot)
+    assert score["score"] <= 100
+
+
+# ── Analyst-take headline leads with the floor multiple when present ────
+
+def test_analyst_take_leads_with_floor_multiple_when_present():
+    c = strong_collection(floor=0.5)
+    score = main._nft_scope_score(c, None, first_snapshot={"floor": 0.01, "captured_at": "2026-08-01"})
+    take = main._nft_scope_analyst_take(c, score, None, "trending")
+    assert "50.0x" in take
+
+
+def test_analyst_take_combines_multiple_and_sharp_activity():
+    c = strong_collection(floor=0.5)
+    score = main._nft_scope_score(c, None, first_snapshot={"floor": 0.01, "captured_at": "2026-08-01"})
+    sharp = {"count": 5, "unique_buyers": 4, "unique_sellers": 3, "window_minutes": 30, "is_sharp": True, "sharp_count": 2, "sharp_window_minutes": 5}
+    take = main._nft_scope_analyst_take(c, score, sharp, "trending")
+    assert "50.0x" in take
+    assert "accelerating" in take.lower() or "still" in take.lower()
+
+
+def test_embed_gets_a_dedicated_field_for_the_floor_multiple():
+    c = strong_collection(floor=0.5)
+    with_multiple = main._nft_scope_score(c, None, first_snapshot={"floor": 0.01, "captured_at": "2026-08-01"})
+    without_multiple = main._nft_scope_score(c, None, first_snapshot=None)
+
+    embed_with = main._nft_scope_embed(c, with_multiple, None, "trending")
+    embed_without = main._nft_scope_embed(c, without_multiple, None, "trending")
+
+    field_names_with = [f["name"] for f in embed_with["fields"]]
+    field_names_without = [f["name"] for f in embed_without["fields"]]
+    assert "Since First Seen" in field_names_with
+    assert "Since First Seen" not in field_names_without
+    multiple_field = next(f for f in embed_with["fields"] if f["name"] == "Since First Seen")
+    assert "50.0x" in multiple_field["value"]

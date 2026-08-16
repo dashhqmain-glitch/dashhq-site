@@ -60,6 +60,12 @@ async def test_trending_pass_finds_a_strong_established_collection_outside_the_o
     async def fake_recent_snapshots(client, slug, limit=30):
         return []
 
+    async def fake_first_snapshot(client, slug):
+        return None
+
+    async def fake_store_snapshot(client, c):
+        return None
+
     posted_titles = []
 
     async def fake_post_channel_message(client, channel_id, embed, content=None):
@@ -84,6 +90,8 @@ async def test_trending_pass_finds_a_strong_established_collection_outside_the_o
          patch.object(main, "_nft_collection_core", new=fake_collection_core), \
          patch.object(main, "_opensea_get_top_offer", new=fake_top_offer), \
          patch.object(main, "_nft_recent_snapshots", new=fake_recent_snapshots), \
+         patch.object(main, "_nft_first_snapshot", new=fake_first_snapshot), \
+         patch.object(main, "_nft_store_snapshot", new=fake_store_snapshot), \
          patch.object(main, "_nft_scope_clears_wash_check", new=fake_wash_clean), \
          patch.object(main, "_nft_poll_tracked_slugs", new=fake_tracked_slugs), \
          patch.object(main, "_nft_alert_state_get", new=fake_alert_state_get), \
