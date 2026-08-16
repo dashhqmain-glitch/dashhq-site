@@ -3211,13 +3211,22 @@ async def _cmd_monitor_response(payload: dict, discord_user_id: str) -> dict:
                     params={"discord_user_id": f"eq.{discord_user_id}"},
                 )
                 try:
-                    await client.delete(
+                    price_del_res = await client.delete(
                         f"{settings.supabase_url}/rest/v1/nft_price_alerts",
                         headers=_supabase_headers(prefer="return=minimal"),
                         params={"discord_user_id": f"eq.{discord_user_id}"},
                     )
+                    price_del_res.raise_for_status()
                 except httpx.HTTPError:
-                    pass
+                    # Silently swallowed before - this meant a real failure
+                    # here left price-target rows in place while the user
+                    # still saw "Cleared everything" below and kept getting
+                    # DMs for something they were told was gone. Logged now
+                    # so a real failure is at least visible, even though the
+                    # response still reports success (a Supabase hiccup on
+                    # one of two tables shouldn't turn an otherwise-working
+                    # clear into a hard error for the user).
+                    logger.exception("Failed to clear /monitor price targets for %s", discord_user_id)
             plural = "s" if len(subscribed_slugs) != 1 else ""
             embed = {"title": "🔕 Cleared everything", "description": f"Removed monitoring for all {len(subscribed_slugs)} collection{plural}. You won't get any more /monitor alerts.", "color": EMBED_COLOR_GOOD, "footer": TOOLKIT_FOOTER}
             return {"embeds": [_clean_embed(embed)], "flags": 64}
@@ -3256,7 +3265,9 @@ async def _cmd_monitor_response(payload: dict, discord_user_id: str) -> dict:
                 )
                 price_res.raise_for_status()
             except httpx.HTTPError:
-                pass
+                # See the clear-everything branch above for why this is
+                # logged instead of silently passed.
+                logger.exception("Failed to clear /monitor price targets for %s/%s", discord_user_id, target_slug)
         embed = {"title": f"🔕 Cleared: {target_slug}", "description": "You won't get any /monitor alerts for this collection.", "color": EMBED_COLOR_GOOD, "footer": TOOLKIT_FOOTER}
         return {"embeds": [_clean_embed(embed)], "flags": 64}
 
@@ -3376,10 +3387,32 @@ async def _handle_monitor_select(payload: dict) -> dict:
                 headers=_supabase_headers(prefer="resolution=merge-duplicates,return=minimal"),
                 json=[{"discord_user_id": discord_user_id, "slug": slug, "event_type": e} for e in selected],
             )
+        # Deselecting everything used to only clear event-type subscriptions
+        # (floor/supply/sweep/volume) and leave any /monitor price target for
+        # this same slug untouched - the confirmation below still claimed
+        # "you won't get any /monitor alerts for this collection", which was
+        # false whenever a price target existed, and that target kept firing
+        # DMs after someone believed they'd cleared it. A price target is a
+        # /monitor alert too, so clearing "everything for this collection"
+        # has to include it.
+        price_cleared = 0
+        if not selected:
+            try:
+                price_res = await client.delete(
+                    f"{settings.supabase_url}/rest/v1/nft_price_alerts",
+                    headers=_supabase_headers(prefer="return=representation"),
+                    params={"discord_user_id": f"eq.{discord_user_id}", "slug": f"eq.{slug}"},
+                )
+                price_res.raise_for_status()
+                price_cleared = len(price_res.json())
+            except httpx.HTTPError:
+                logger.exception("Failed to clear /monitor price targets for %s/%s", discord_user_id, slug)
 
     if selected:
         labels = [_NFT_MONITOR_LABELS.get(e, e) for e in selected]
         desc = "You'll get a DM when any of these happen:\n" + "\n".join(f"• {l}" for l in labels)
+    elif price_cleared:
+        desc = f"Cleared - including {price_cleared} price target alert{'s' if price_cleared != 1 else ''}. You won't get any /monitor alerts for this collection."
     else:
         desc = "Cleared - you won't get any /monitor alerts for this collection."
     embed = {"title": "🔔 Monitor settings saved", "description": desc, "color": EMBED_COLOR_GOOD, "footer": TOOLKIT_FOOTER}
