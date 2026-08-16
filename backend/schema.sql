@@ -321,5 +321,3 @@ from nft_wallet_realized_trades
 where pnl_pct is not null
 group by wallet;
 
-alter table nft_smart_wallets enable row level security;
-
