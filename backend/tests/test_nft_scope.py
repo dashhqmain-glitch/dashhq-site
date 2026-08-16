@@ -848,3 +848,62 @@ def test_embed_gets_a_dedicated_field_for_the_floor_multiple():
     assert "Since First Seen" not in field_names_without
     multiple_field = next(f for f in embed_with["fields"] if f["name"] == "Since First Seen")
     assert "50.0x" in multiple_field["value"]
+
+
+# ── _nft_scope_accumulation_signal (leading indicator, not confirmation) ──
+# Research-grounded: real whale accumulation builds slowly over
+# days/weeks BEFORE it moves price - volume/sales climbing while the
+# floor is still quiet is a distinct, earlier signal than momentum
+# (which needs the floor itself already trending) or surge (which needs
+# a move that's already happened).
+
+def test_accumulation_signal_needs_history():
+    points, reasons = main._nft_scope_accumulation_signal(strong_collection(), None)
+    assert points == 0 and reasons == []
+
+
+def test_accumulation_signal_needs_the_same_minimum_snapshots_as_momentum():
+    short_history = history_from([1, 2, 3], "volume_1d")  # fewer than _NFT_SCOPE_MOMENTUM_MIN_SNAPSHOTS
+    points, reasons = main._nft_scope_accumulation_signal(strong_collection(vol1d=4, sales24h=10, floor=0.05), short_history)
+    assert points == 0
+
+
+def test_accumulation_signal_fires_on_rising_volume_and_sales_with_a_quiet_floor():
+    n = main._NFT_SCOPE_MOMENTUM_MIN_SNAPSHOTS
+    history = [
+        {"volume_1d": 1 + i * 0.5, "sales_1d": 2 + i, "floor": 0.05} for i in range(n)
+    ]  # oldest-first construction, reversed below to match newest-first storage
+    history = list(reversed(history))
+    c = strong_collection(vol1d=1 + n * 0.5, sales24h=2 + n, floor=0.051)  # floor barely moved
+    points, reasons = main._nft_scope_accumulation_signal(c, history)
+    assert points == main._NFT_SCOPE_ACCUMULATION_POINTS
+    assert any("accumulation" in r.lower() for r in reasons)
+
+
+def test_accumulation_signal_does_not_fire_once_the_floor_has_already_broken_out():
+    # Same rising volume/sales, but the floor has ALREADY moved a lot -
+    # this is a confirmed move now (Surge's job), not a leading signal.
+    n = main._NFT_SCOPE_MOMENTUM_MIN_SNAPSHOTS
+    history = list(reversed([{"volume_1d": 1 + i * 0.5, "sales_1d": 2 + i, "floor": 0.05 + i * 0.02} for i in range(n)]))
+    c = strong_collection(vol1d=1 + n * 0.5, sales24h=2 + n, floor=0.3)  # floor already up ~500%
+    points, _ = main._nft_scope_accumulation_signal(c, history)
+    assert points == 0
+
+
+def test_accumulation_signal_requires_both_volume_and_sales_trending_up():
+    n = main._NFT_SCOPE_MOMENTUM_MIN_SNAPSHOTS
+    # Volume rising, sales flat - not aligned, shouldn't fire.
+    history = list(reversed([{"volume_1d": 1 + i * 0.5, "sales_1d": 5, "floor": 0.05} for i in range(n)]))
+    c = strong_collection(vol1d=1 + n * 0.5, sales24h=5, floor=0.05)
+    points, _ = main._nft_scope_accumulation_signal(c, history)
+    assert points == 0
+
+
+def test_nft_scope_score_includes_accumulation_points():
+    n = main._NFT_SCOPE_MOMENTUM_MIN_SNAPSHOTS
+    history = list(reversed([{"volume_1d": 1 + i * 0.5, "sales_1d": 2 + i, "floor": 0.05, "owners": 300} for i in range(n)]))
+    c = strong_collection(vol1d=1 + n * 0.5, sales24h=2 + n, floor=0.051)
+    with_history = main._nft_scope_score(c, None, history=history)
+    without_history = main._nft_scope_score(c, None, history=None)
+    assert with_history["score"] > without_history["score"]
+    assert any("accumulation" in r.lower() for r in with_history["reasons"])

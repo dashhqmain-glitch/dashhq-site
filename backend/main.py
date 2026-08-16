@@ -3913,6 +3913,51 @@ def _trend_up(values: list[float], min_len: int) -> tuple[bool, float]:
     return False, 0.0
 
 
+_NFT_SCOPE_ACCUMULATION_POINTS = 12
+_NFT_SCOPE_ACCUMULATION_MAX_FLOOR_PCT = 15  # floor has to still look quiet for this to be a LEADING signal, not a late one
+
+
+def _nft_scope_accumulation_signal(c: dict, history: list[dict] | None) -> tuple[int, list[str]]:
+    # Research-grounded, not a guess: real whale accumulation tends to
+    # build slowly over days/weeks BEFORE it moves price - sustained
+    # buying pressure while sellers haven't caught on yet, not a single
+    # dramatic entry. That means volume and sales climbing while the floor
+    # is STILL comparatively flat is itself a real, distinct signal - the
+    # quiet phase before a move, not confirmation one is already happening
+    # (that's what the Surge dimension below is for). Needs the same
+    # 6-snapshot minimum as _momentum_points to trust any of this as a
+    # trend rather than noise.
+    if not history:
+        return 0, []
+    min_len = _NFT_SCOPE_MOMENTUM_MIN_SNAPSHOTS
+
+    volumes = [h["volume_1d"] for h in history if h.get("volume_1d") is not None]
+    if c.get("vol1d") is not None:
+        volumes = [c["vol1d"]] + volumes
+    vol_up, vol_pct = _trend_up(volumes, min_len)
+
+    sales_hist = [h["sales_1d"] for h in history if h.get("sales_1d") is not None]
+    if c.get("sales24h") is not None:
+        sales_hist = [c["sales24h"]] + sales_hist
+    sales_up, _ = _trend_up(sales_hist, min_len)
+
+    floors = [h["floor"] for h in history if h.get("floor") is not None]
+    if c.get("floor") is not None:
+        floors = [c["floor"]] + floors
+    floor_up, floor_pct = _trend_up(floors, min_len)
+
+    if vol_up and sales_up and (not floor_up or floor_pct < _NFT_SCOPE_ACCUMULATION_MAX_FLOOR_PCT):
+        return (
+            _NFT_SCOPE_ACCUMULATION_POINTS,
+            [
+                f"📊 Volume (+{vol_pct:.0f}%) and sales both quietly building over recent snapshots while the "
+                "floor's barely moved yet - the accumulation pattern that often precedes a real breakout, "
+                "worth watching closely before it's obvious to everyone else"
+            ],
+        )
+    return 0, []
+
+
 def _momentum_points(c: dict, history: list[dict]) -> tuple[int, list[str]]:
     # history is newest-first (captured_at desc). A real secondary play
     # is backed by MULTIPLE aligned trends, not price moving alone - a
@@ -4071,6 +4116,14 @@ def _nft_scope_score(
         momentum_points, momentum_reasons = _momentum_points(c, history)
         points += momentum_points
         reasons.extend(momentum_reasons)
+
+    # Accumulation (0-12) - a LEADING signal distinct from momentum/surge:
+    # volume and sales quietly climbing while the floor hasn't broken out
+    # yet, the research-backed shape of real accumulation before a move
+    # rather than confirmation one is already underway.
+    accumulation_points, accumulation_reasons = _nft_scope_accumulation_signal(c, history)
+    points += accumulation_points
+    reasons.extend(accumulation_reasons)
 
     # Surge (0-35) - the primary driver for a genuine early degen play, not
     # a minor supplement. A brand-new stealth pump has none of the
