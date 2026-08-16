@@ -196,3 +196,130 @@ create index if not exists nft_price_alerts_slug_idx on nft_price_alerts (slug);
 
 alter table nft_price_alerts enable row level security;
 
+-- Wallets seen buying during a verified, wash-clean burst at the moment
+-- NFT Scope called out a collection (any of the fresh/trending/momentum
+-- passes) - a permanent record of "who was in early," kept regardless of
+-- whether that specific call proved out. This is the raw evidence trail;
+-- the nft_smart_wallets view below is what actually gets checked against
+-- future candidates.
+create table if not exists nft_scope_call_buyers (
+  slug           text not null,
+  buyer          text not null,
+  floor_at_call  numeric,
+  called_at      timestamptz not null default now(),
+  primary key (slug, buyer)
+);
+
+create index if not exists nft_scope_call_buyers_slug_idx on nft_scope_call_buyers (slug);
+create index if not exists nft_scope_call_buyers_buyer_idx on nft_scope_call_buyers (buyer);
+
+alter table nft_scope_call_buyers enable row level security;
+
+-- One row per slug once its floor is confirmed to have multiplied
+-- meaningfully since NFT Scope first tracked it (see the surge scoring's
+-- floor-multiple-since-first-seen). This is what "proves" a call right,
+-- kept separate from who bought in so a wallet's track record can be
+-- computed by joining the two, not by overwriting a single "best proof"
+-- per wallet.
+create table if not exists nft_scope_proved_slugs (
+  slug        text primary key,
+  multiple    numeric not null,
+  proved_at   timestamptz not null default now()
+);
+
+alter table nft_scope_proved_slugs enable row level security;
+
+-- Wallet win-rate view, not a table anyone writes to directly - a
+-- wallet's smart-money credibility has to be its resolved TRACK RECORD
+-- across every call it's been part of, not a single lucky hit and
+-- explicitly not wallet balance: a big wallet buying into everything
+-- indiscriminately must not outscore a smaller wallet that's actually
+-- right more often. Only counts calls at least 14 days old in the
+-- denominator - a call NFT Scope made yesterday hasn't had a fair chance
+-- to prove out yet, and counting it as a "loss" this early would punish
+-- a wallet's most recent (and most relevant) activity the hardest.
+create or replace view nft_smart_wallets as
+select
+  b.buyer as address,
+  count(distinct b.slug) as total_calls,
+  count(distinct p.slug) as proved_calls,
+  case when count(distinct b.slug) > 0
+    then round(count(distinct p.slug)::numeric / count(distinct b.slug), 3)
+    else 0 end as win_rate,
+  max(p.multiple) as best_multiple,
+  max(p.proved_at) as last_proved_at
+from nft_scope_call_buyers b
+left join nft_scope_proved_slugs p on p.slug = b.slug
+where b.called_at < now() - interval '14 days'
+group by b.buyer;
+
+-- The broader, always-on half of wallet tracking: every verified sale
+-- event NFT Scope observes while doing its normal work (rapid-activity
+-- checks, wash-trade checks - it fetches raw sale events dozens of times
+-- per poll cycle regardless) gets logged here too, for free - zero extra
+-- OpenSea calls, this only persists data already being fetched. This is
+-- what lets a wallet's real, ground-truth trading history get
+-- reconstructed across EVERYTHING NFT Scope has ever seen, not just
+-- collections it personally called out (that's what nft_smart_wallets
+-- above covers - the two are complementary). Primary key is the natural
+-- identity of a sale, so re-observing the same event across overlapping
+-- fetch windows or later poll cycles just harmlessly overwrites - no
+-- unbounded growth from repeat sightings of the same trade.
+create table if not exists nft_sale_events_log (
+  slug       text not null,
+  token_id   text not null,
+  buyer      text not null,
+  seller     text not null,
+  price      numeric,
+  symbol     text,
+  event_at   timestamptz not null,
+  logged_at  timestamptz not null default now(),
+  primary key (slug, token_id, buyer, seller, event_at)
+);
+
+create index if not exists nft_sale_events_log_buyer_idx on nft_sale_events_log (buyer);
+create index if not exists nft_sale_events_log_token_idx on nft_sale_events_log (slug, token_id, event_at);
+
+alter table nft_sale_events_log enable row level security;
+
+-- Ground-truth realized trades: a wallet that bought a specific token and
+-- was LATER seen selling that exact same token, matched from the log
+-- above - actual profit/loss, not an estimate. A wallet can appear more
+-- than once per token if it round-tripped it multiple times; that's
+-- intentional, each is a separate realized trade.
+create or replace view nft_wallet_realized_trades as
+select
+  buy.buyer as wallet,
+  buy.slug,
+  buy.token_id,
+  buy.price as buy_price,
+  sell.price as sell_price,
+  buy.event_at as bought_at,
+  sell.event_at as sold_at,
+  case when buy.price is not null and buy.price > 0 and sell.price is not null
+    then round(((sell.price - buy.price) / buy.price)::numeric, 4)
+    else null end as pnl_pct
+from nft_sale_events_log buy
+join nft_sale_events_log sell
+  on sell.slug = buy.slug
+  and sell.token_id = buy.token_id
+  and sell.seller = buy.buyer
+  and sell.event_at > buy.event_at;
+
+-- Per-wallet realized win rate, across every trade this bot has directly
+-- observed resolve - buys early, sells for profit, this is the metric
+-- that actually captures that, not balance and not a single hit.
+create or replace view nft_wallet_pnl_stats as
+select
+  wallet as address,
+  count(*) as total_trades,
+  count(*) filter (where pnl_pct > 0) as winning_trades,
+  round((count(*) filter (where pnl_pct > 0))::numeric / count(*), 3) as win_rate,
+  max(pnl_pct) as best_trade_pct,
+  round(avg(pnl_pct)::numeric, 4) as avg_trade_pct
+from nft_wallet_realized_trades
+where pnl_pct is not null
+group by wallet;
+
+alter table nft_smart_wallets enable row level security;
+

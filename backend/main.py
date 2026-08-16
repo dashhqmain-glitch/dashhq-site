@@ -2882,9 +2882,50 @@ def _sweep_embed(c: dict, sweep: dict) -> dict:
     }
 
 
+async def _nft_log_sale_events(client: httpx.AsyncClient, slug: str, events: list[dict]) -> None:
+    # The passive, always-on half of wallet tracking: persists whatever
+    # sale events were already fetched (for rapid-activity/wash-trade
+    # checks - this data exists either way) so a wallet's realized
+    # buy-then-sell profit can be reconstructed later, entirely from data
+    # already being pulled. Zero extra OpenSea calls. Best-effort - never
+    # raises, never blocks or slows the caller who actually needs these
+    # events right now.
+    rows = []
+    for e in events:
+        nft = e.get("nft")
+        token_id = nft.get("identifier") if isinstance(nft, dict) else None
+        buyer, seller, event_at = e.get("buyer"), e.get("seller"), e.get("event_timestamp")
+        if not (token_id and buyer and seller and event_at):
+            continue
+        price, symbol = None, None
+        payment = e.get("payment")
+        if payment:
+            try:
+                price = int(payment["quantity"]) / (10 ** payment.get("decimals", 18))
+                symbol = payment.get("symbol")
+            except (TypeError, ValueError, KeyError):
+                pass
+        rows.append({
+            "slug": slug, "token_id": str(token_id), "buyer": buyer, "seller": seller,
+            "price": price, "symbol": symbol,
+            "event_at": datetime.fromtimestamp(event_at, tz=timezone.utc).isoformat(),
+        })
+    if not rows:
+        return
+    try:
+        await client.post(
+            f"{settings.supabase_url}/rest/v1/nft_sale_events_log",
+            headers=_supabase_headers(prefer="resolution=merge-duplicates,return=minimal"),
+            json=rows,
+        )
+    except httpx.HTTPError:
+        logger.exception("Failed to log sale events for %s", slug)
+
+
 async def _fetch_recent_sale_events(client: httpx.AsyncClient, slug: str, window_seconds: int, limit: int = 50) -> list[dict]:
     data = await _opensea_get(client, f"/events/collection/{slug}", {"event_type": "sale", "limit": limit})
     events = (data or {}).get("asset_events") or []
+    await _nft_log_sale_events(client, slug, events)
     now = time.time()
     return [e for e in events if now - (e.get("event_timestamp") or 0) <= window_seconds]
 
@@ -3661,6 +3702,17 @@ _NFT_SCOPE_MOMENTUM_MAX_POSTS = 1
 _NFT_SCOPE_SURGE_MAX_POSTS = 3  # per-pass ceiling when OpenSea is healthy AND demand is genuinely there
 _NFT_SCOPE_MOMENTUM_MIN_SNAPSHOTS = 6   # ~30 min of history minimum before trusting a trend
 _NFT_SCOPE_MOMENTUM_SCAN_LIMIT = 25  # base; doubles in surge mode, see _nft_scope_pass_limits
+_NFT_SCOPE_HOLDINGS_MAX_POSTS = 1
+# Real ceiling here isn't "how many wallets exist" - it's OpenSea's request
+# budget and Vercel's 60s function timeout, both shared with passes 1-3 in
+# the SAME cycle (see _NFT_SCOPE_HOLDINGS_TIME_BUDGET_SECONDS). 20 wallets x
+# up to 200 held items each is a real, comprehensive look at what proven
+# wallets hold, not an arbitrary small slice - verified 200 is accepted by
+# OpenSea's account/nfts endpoint before picking this number.
+_NFT_SCOPE_HOLDINGS_WALLET_SAMPLE = 20  # top proven-good wallets sampled per cycle for their current holdings
+_NFT_SCOPE_HOLDINGS_PER_WALLET_LIMIT = 200  # how many of each sampled wallet's held items to pull
+_NFT_SCOPE_HOLDINGS_SCAN_BUDGET = 30  # base cap on distinct held collections actually evaluated per cycle; doubles in surge mode
+_NFT_SCOPE_HOLDINGS_SCAN_COOLDOWN_SECONDS = 3600  # 1 hour - a collection several good wallets hold doesn't need re-evaluating every 5 min
 _NFT_SCOPE_TRENDING_LIMIT = 50  # per chain per source - wider discovery pool, more distinct candidates to round-robin over. This
 # is a free widening (one listing call per source per chain either way, just a bigger `limit`
 # param) - it does NOT cost extra evaluations. Combined with the post-cooldown skip above (which
@@ -3760,15 +3812,19 @@ def _nft_scope_pass_limits(healthy: bool) -> dict:
             "fresh_max": _NFT_SCOPE_SURGE_MAX_POSTS,
             "trending_max": _NFT_SCOPE_SURGE_MAX_POSTS,
             "momentum_max": _NFT_SCOPE_SURGE_MAX_POSTS,
+            "holdings_max": _NFT_SCOPE_SURGE_MAX_POSTS,
             "trending_scan_budget": _NFT_SCOPE_TRENDING_SCAN_BUDGET * 2,
             "momentum_scan_limit": _NFT_SCOPE_MOMENTUM_SCAN_LIMIT * 2,
+            "holdings_scan_budget": _NFT_SCOPE_HOLDINGS_SCAN_BUDGET * 2,
         }
     return {
         "fresh_max": _NFT_SCOPE_FRESH_MAX_POSTS,
         "trending_max": _NFT_SCOPE_TRENDING_MAX_POSTS,
         "momentum_max": _NFT_SCOPE_MOMENTUM_MAX_POSTS,
+        "holdings_max": _NFT_SCOPE_HOLDINGS_MAX_POSTS,
         "trending_scan_budget": _NFT_SCOPE_TRENDING_SCAN_BUDGET,
         "momentum_scan_limit": _NFT_SCOPE_MOMENTUM_SCAN_LIMIT,
+        "holdings_scan_budget": _NFT_SCOPE_HOLDINGS_SCAN_BUDGET,
     }
 
 
@@ -4050,6 +4106,7 @@ def _nft_scope_surge_points(c: dict, history: list[dict] | None, first_snapshot:
 def _nft_scope_score(
     c: dict, top_offer_amount: float | None, history: list[dict] | None = None,
     rapid_activity: dict | None = None, first_snapshot: dict | None = None, wash_analysis: dict | None = None,
+    smart_wallet_hits: list[dict] | None = None,
 ) -> dict:
     supply = c.get("totalSupply")
     owners = c.get("owners")
@@ -4136,6 +4193,14 @@ def _nft_scope_score(
     surge_points, surge_reasons, floor_multiple = _nft_scope_surge_points(c, history, first_snapshot)
     points += surge_points
     reasons.extend(surge_reasons)
+
+    # Smart wallets (0-20) - self-validating, not a guess: a current buyer
+    # who was also recorded buying early into a PAST NFT Scope call that
+    # later actually multiplied. Grows more reliable over time as more
+    # calls resolve, entirely from data this bot already collects.
+    smart_points, smart_reasons = _nft_scope_smart_wallet_points(smart_wallet_hits)
+    points += smart_points
+    reasons.extend(smart_reasons)
 
     # Rapid activity (0-10) - an early, fast-reacting supplement to the
     # snapshot-based momentum above, not a replacement or a shortcut
@@ -4284,6 +4349,14 @@ def _nft_scope_analyst_take(c: dict, score: dict, rapid_activity: dict | None, k
     sales = c.get("sales24h") or 0
 
     floor_multiple = score.get("floor_multiple")
+    convergence_reason = next((r for r in score["reasons"] if "converging" in r.lower()), None)
+    if convergence_reason:
+        count_match = re.search(r"(\d+) separate", convergence_reason)
+        count_clause = f"{count_match.group(1)} separate wallets with" if count_match else "Multiple wallets with"
+        return (
+            f"{count_clause} a proven track record are buying into {name}{chain_clause} at the same time - "
+            "independent strong hands converging like this is a much stronger tell than any single buyer, proven or not."
+        )
     if floor_multiple and rapid_activity and rapid_activity.get("is_sharp"):
         return (
             f"{name}{chain_clause} is already up {floor_multiple:.1f}x from where NFT Scope first tracked it, AND "
@@ -4326,6 +4399,7 @@ def _nft_scope_embed(c: dict, score: dict, top_offer_amount: float | None, kind:
         "fresh": "🧭 NFT Scope · New Mint",
         "trending": "🧭 NFT Scope · Trending Pick",
         "momentum": "🧭 NFT Scope · Momentum Building",
+        "holdings": "🧭 NFT Scope · Quiet Accumulation",
     }.get(kind, "🧭 NFT Scope")
     lines = [f"*{_nft_scope_analyst_take(c, score, rapid_activity, kind)}*"]
     lines.append("")
@@ -4444,6 +4518,13 @@ async def _detect_rapid_activity(client: httpx.AsyncClient, slug: str) -> dict |
         "is_sharp": is_sharp,
         "sharp_count": len(sharp_window_events),
         "sharp_window_minutes": _NFT_SCOPE_RAPID_SHARP_WINDOW_SECONDS // 60,
+        # The actual wallet addresses behind unique_buyers, not just the
+        # count - powers the smart-wallet tracking below (who's buying
+        # right now, cross-checked against wallets that bought early into
+        # a PAST NFT Scope call that later proved out). Computed directly
+        # from the same already-fetched, already-wash-checked event data,
+        # no extra call.
+        "buyer_addresses": sorted({e["buyer"] for e in recent if e.get("buyer")}),
     }
 
 
@@ -4483,6 +4564,203 @@ async def _nft_scope_wash_analysis(client: httpx.AsyncClient, slug: str) -> dict
     return _analyze_wash_trading(recent)
 
 
+# ── Smart-wallet tracking - self-validating "who's actually good at this,"
+# not "who's rich" ──────────────────────────────────────────────────────
+# Built entirely from data this bot already collects (no external wallet-
+# analytics API, no new account, no cost): every time NFT Scope calls out
+# a collection on a verified rapid-activity burst, the buyers behind that
+# burst get recorded (nft_scope_call_buyers). If that collection's floor
+# later actually multiplies (per the surge scoring's first-seen tracking),
+# the SLUG gets marked proved (nft_scope_proved_slugs). A wallet's credit
+# is its WIN RATE across every call it's been part of - proved_calls /
+# total_calls, computed by the nft_smart_wallets view (see schema.sql) -
+# deliberately NOT wallet balance and NOT a single lucky hit: a big wallet
+# buying into everything indiscriminately must not outscore a smaller one
+# that's actually right more often. Only counted once it has a real
+# sample size AND a real hit rate, both enforced server-side by the query
+# below, so a wallet with one lucky 2-for-2 doesn't outrank one with a
+# proven 8-for-20.
+_NFT_SCOPE_PROVED_MULTIPLE_THRESHOLD = 5  # floor multiple that counts as "this call actually proved out"
+_NFT_SCOPE_SMART_WALLET_MIN_SAMPLE = 3  # sample size floor - below this, a "100% win rate" is just noise
+_NFT_SCOPE_SMART_WALLET_MIN_WIN_RATE = 0.3
+_NFT_SCOPE_SMART_WALLET_BONUS_POINTS = 20
+_NFT_SCOPE_CONVERGENCE_POINTS_PER_WALLET = 8
+_NFT_SCOPE_CONVERGENCE_POINTS_CAP = 24  # multiple proven wallets converging is strong, but shouldn't dominate the whole score on its own
+
+
+async def _nft_scope_record_call_buyers(client: httpx.AsyncClient, slug: str, floor: float | None, rapid_activity: dict | None) -> None:
+    # Called whenever NFT Scope actually posts about a slug with a
+    # verified burst behind it - best-effort, never blocks a post over a
+    # Supabase hiccup, and a no-op when there's nothing to record.
+    buyer_addresses = (rapid_activity or {}).get("buyer_addresses") or []
+    if not buyer_addresses:
+        return
+    try:
+        await client.post(
+            f"{settings.supabase_url}/rest/v1/nft_scope_call_buyers",
+            headers=_supabase_headers(prefer="resolution=merge-duplicates,return=minimal"),
+            json=[{"slug": slug, "buyer": addr, "floor_at_call": floor} for addr in buyer_addresses],
+        )
+    except httpx.HTTPError:
+        logger.exception("Failed to record call buyers for %s", slug)
+
+
+async def _nft_scope_mark_slug_proved(client: httpx.AsyncClient, slug: str, multiple: float) -> None:
+    # Fired once scoring confirms a big floor multiple for a slug (see
+    # _nft_scope_surge_points) - marks the SLUG as proved, which feeds
+    # every wallet that bought early into it via the nft_smart_wallets
+    # view's join, not just whoever happened to be buying at this exact
+    # moment. Upsert (merge-duplicates on the slug PK) so a later, even
+    # bigger multiple just updates the record rather than duplicating it.
+    try:
+        await client.post(
+            f"{settings.supabase_url}/rest/v1/nft_scope_proved_slugs",
+            headers=_supabase_headers(prefer="resolution=merge-duplicates,return=minimal"),
+            json=[{"slug": slug, "multiple": multiple}],
+        )
+    except httpx.HTTPError:
+        logger.exception("Failed to mark %s as a proved slug", slug)
+
+
+async def _nft_scope_smart_wallet_hits(client: httpx.AsyncClient, rapid_activity: dict | None) -> list[dict]:
+    # Only ever called when rapid_activity actually has buyer addresses to
+    # check (the caller gates on this), so this costs nothing on the far
+    # more common candidate with no burst at all. Merges two complementary
+    # sources into one normalized shape: nft_smart_wallets (bought early
+    # into a collection NFT Scope itself called out, which later proved
+    # out) and nft_wallet_pnl_stats (realized profit on ANY trade this bot
+    # has observed resolve, regardless of whether NFT Scope called it) -
+    # the second is broader and starts accumulating signal from day one,
+    # the first is a tighter, NFT-Scope-specific track record. The win-
+    # rate/sample-size bar is enforced server-side in both queries, not
+    # after the fact in Python - a wallet that doesn't clear it was never
+    # a hit in the first place. A wallet present in both sources is
+    # de-duplicated, keeping whichever shows the stronger win rate.
+    buyer_addresses = (rapid_activity or {}).get("buyer_addresses") or []
+    if not buyer_addresses:
+        return []
+    in_filter = f"in.({','.join(buyer_addresses)})"
+    hits: dict[str, dict] = {}
+    try:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/nft_smart_wallets",
+            headers=_supabase_headers(),
+            params={
+                "address": in_filter,
+                "total_calls": f"gte.{_NFT_SCOPE_SMART_WALLET_MIN_SAMPLE}",
+                "win_rate": f"gte.{_NFT_SCOPE_SMART_WALLET_MIN_WIN_RATE}",
+                "select": "address,total_calls,proved_calls,win_rate,best_multiple",
+            },
+        )
+        res.raise_for_status()
+        for row in res.json():
+            hits[row["address"]] = {
+                "address": row["address"], "sample": row["total_calls"], "wins": row["proved_calls"],
+                "win_rate": row["win_rate"], "best_pct": (row.get("best_multiple") or 1) - 1,
+            }
+    except httpx.HTTPError:
+        pass
+    try:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/nft_wallet_pnl_stats",
+            headers=_supabase_headers(),
+            params={
+                "address": in_filter,
+                "total_trades": f"gte.{_NFT_SCOPE_SMART_WALLET_MIN_SAMPLE}",
+                "win_rate": f"gte.{_NFT_SCOPE_SMART_WALLET_MIN_WIN_RATE}",
+                "select": "address,total_trades,winning_trades,win_rate,best_trade_pct",
+            },
+        )
+        res.raise_for_status()
+        for row in res.json():
+            candidate = {
+                "address": row["address"], "sample": row["total_trades"], "wins": row["winning_trades"],
+                "win_rate": row["win_rate"], "best_pct": row.get("best_trade_pct") or 0,
+            }
+            existing = hits.get(row["address"])
+            if not existing or candidate["win_rate"] > existing["win_rate"]:
+                hits[row["address"]] = candidate
+    except httpx.HTTPError:
+        pass
+    return list(hits.values())
+
+
+def _nft_scope_smart_wallet_points(smart_wallet_hits: list[dict] | None) -> tuple[int, list[str]]:
+    # Deliberately doesn't name wallets, addresses, or the tracking
+    # mechanism itself in anything user-facing - this is an internal
+    # confidence signal, not a methodology disclosure. It only ever raises
+    # a score that still has to clear every other gate on its own merits.
+    if not smart_wallet_hits:
+        return 0, []
+    reasons: list[str] = []
+    points = _NFT_SCOPE_SMART_WALLET_BONUS_POINTS
+    best = max(smart_wallet_hits, key=lambda h: h.get("win_rate") or 0)
+    reasons.append(
+        f"🧠 Backed by buy-side activity with a strong track record on past calls ({best['wins']}/{best['sample']}, "
+        f"{best['win_rate']:.0%} hit rate) - proven follow-through, not just distinct buyers"
+    )
+    distinct = len(smart_wallet_hits)
+    if distinct >= 2:
+        points += min(distinct * _NFT_SCOPE_CONVERGENCE_POINTS_PER_WALLET, _NFT_SCOPE_CONVERGENCE_POINTS_CAP)
+        reasons.append(
+            f"👥 {distinct} separate proven track records are converging on this at the same time - "
+            "multiple independent strong hands agreeing is a much stronger tell than any one acting alone"
+        )
+    return points, reasons
+
+
+async def _nft_scope_top_wallets(client: httpx.AsyncClient, limit: int) -> list[str]:
+    # Pulls the best-performing wallets across both win-rate sources -
+    # "who's proven good overall," a different question than
+    # _nft_scope_smart_wallet_hits ("do any of THESE specific addresses
+    # check out"). Feeds the holdings-scan pass: what are these wallets
+    # holding RIGHT NOW, independent of whether they're currently buying
+    # anything. Same min-sample/min-win-rate bar as everywhere else this
+    # is used, so this never samples an unproven or one-lucky-hit wallet.
+    addresses: set[str] = set()
+    for table in ("nft_wallet_pnl_stats", "nft_smart_wallets"):
+        sample_col = "total_trades" if table == "nft_wallet_pnl_stats" else "total_calls"
+        try:
+            res = await client.get(
+                f"{settings.supabase_url}/rest/v1/{table}",
+                headers=_supabase_headers(),
+                params={
+                    sample_col: f"gte.{_NFT_SCOPE_SMART_WALLET_MIN_SAMPLE}",
+                    "win_rate": f"gte.{_NFT_SCOPE_SMART_WALLET_MIN_WIN_RATE}",
+                    "select": "address", "order": "win_rate.desc", "limit": str(limit),
+                },
+            )
+            res.raise_for_status()
+            addresses |= {row["address"] for row in res.json()}
+        except httpx.HTTPError:
+            continue
+    return list(addresses)
+
+
+async def _nft_scope_wallet_holdings(client: httpx.AsyncClient, address: str, limit: int = _NFT_SCOPE_HOLDINGS_PER_WALLET_LIMIT) -> list[str]:
+    # Reuses the exact OpenSea endpoint /wallet already relies on for
+    # X-Ray's collection breakdown - proven, no new integration. "People
+    # holding good stuff tend to buy some good stuff early": a collection
+    # several proven wallets are quietly holding is itself a leading
+    # signal, independent of whether it's moved by any volume/floor
+    # metric yet.
+    try:
+        key = await _get_opensea_key(client)
+        if not key:
+            return []
+        res = await client.get(
+            f"https://api.opensea.io/api/v2/chain/ethereum/account/{address}/nfts",
+            params={"limit": limit},
+            headers={"X-API-KEY": key},
+        )
+        if res.status_code != 200:
+            return []
+        nfts = res.json().get("nfts") or []
+        return sorted({n["collection"] for n in nfts if n.get("collection")})
+    except (httpx.HTTPError, ValueError):
+        return []
+
+
 async def _nft_scope_snapshot_signals(client: httpx.AsyncClient, slug: str) -> tuple[list[dict], dict | None]:
     # Feeds _nft_scope_surge_points: recent history for the "jumped since
     # the last poll" velocity reading, and the very first snapshot ever
@@ -4516,7 +4794,11 @@ async def _nft_scope_top_offer_amount(client: httpx.AsyncClient, slug: str, c: d
         return None
 
 
+_NFT_SCOPE_HOLDINGS_TIME_BUDGET_SECONDS = 40  # skip pass 4 outright once passes 1-3 have already burned this much of Vercel's 60s cap
+
+
 async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) -> list[str]:
+    scan_start = time.time()
     posted: list[str] = []
 
     # Self-adjusting posting slots / scan budgets: expands toward the
@@ -4568,7 +4850,10 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
                 rapid_activity = await _detect_rapid_activity(client, slug)
                 history, first_snapshot = await _nft_scope_snapshot_signals(client, slug)
                 wash_analysis = await _nft_scope_wash_analysis(client, slug) if _nft_scope_turnover_elevated(c) else None
-                score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis)
+                smart_wallet_hits = await _nft_scope_smart_wallet_hits(client, rapid_activity) if rapid_activity else []
+                score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis, smart_wallet_hits=smart_wallet_hits)
+                if score.get("floor_multiple") and score["floor_multiple"] >= _NFT_SCOPE_PROVED_MULTIPLE_THRESHOLD:
+                    await _nft_scope_mark_slug_proved(client, slug, score["floor_multiple"])
                 if (
                     len(fresh_posted) < limits["fresh_max"]
                     and _nft_scope_worth_posting(score)
@@ -4580,6 +4865,7 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
                         fresh_posted.append(slug)
                         await _nft_scope_mark_posted(client, slug, c.get("floor") or 0)
                         await _nft_scope_mark_fresh_posted(client, slug)
+                        await _nft_scope_record_call_buyers(client, slug, c.get("floor"), rapid_activity)
                 # Record a snapshot for anything with real, verified
                 # activity - not just what someone happens to /watchlist.
                 # Previously this data only ever existed for collections a
@@ -4696,13 +4982,17 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
             # (velocity / floor-multiple-since-first-seen) score below.
             history, first_snapshot = await _nft_scope_snapshot_signals(client, slug)
             wash_analysis = await _nft_scope_wash_analysis(client, slug) if _nft_scope_turnover_elevated(c) else None
-            score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis)
+            smart_wallet_hits = await _nft_scope_smart_wallet_hits(client, rapid_activity) if rapid_activity else []
+            score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis, smart_wallet_hits=smart_wallet_hits)
+            if score.get("floor_multiple") and score["floor_multiple"] >= _NFT_SCOPE_PROVED_MULTIPLE_THRESHOLD:
+                await _nft_scope_mark_slug_proved(client, slug, score["floor_multiple"])
             if _nft_scope_worth_posting(score) and await _nft_scope_clears_wash_check(client, slug):
                 delivered = await _post_channel_message(client, settings.discord_nft_scope_channel_id, _nft_scope_embed(c, score, top_offer_amount, "trending", rapid_activity=rapid_activity))
                 if delivered:
                     trending_posted.append(slug)
                     await _nft_alert_state_set(client, slug, "nft_scope_trending_post", c.get("floor") or 0)
                     await _nft_scope_mark_posted(client, slug, c.get("floor") or 0)
+                    await _nft_scope_record_call_buyers(client, slug, c.get("floor"), rapid_activity)
             # Record a snapshot for anything with real, verified activity -
             # see the fresh-mint pass above for why this now happens for
             # every candidate evaluated here too, not just /watchlist'd ones.
@@ -4769,12 +5059,16 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
             except httpx.HTTPError:
                 pass
             wash_analysis = await _nft_scope_wash_analysis(client, slug) if _nft_scope_turnover_elevated(c) else None
-            score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis)
+            smart_wallet_hits = await _nft_scope_smart_wallet_hits(client, rapid_activity) if rapid_activity else []
+            score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis, smart_wallet_hits=smart_wallet_hits)
+            if score.get("floor_multiple") and score["floor_multiple"] >= _NFT_SCOPE_PROVED_MULTIPLE_THRESHOLD:
+                await _nft_scope_mark_slug_proved(client, slug, score["floor_multiple"])
             if _nft_scope_worth_posting(score) and await _nft_scope_clears_wash_check(client, slug):
                 delivered = await _post_channel_message(client, settings.discord_nft_scope_channel_id, _nft_scope_embed(c, score, top_offer_amount, "momentum", rapid_activity=rapid_activity))
                 if delivered:
                     await _nft_alert_state_set(client, slug, "nft_scope_momentum", c.get("floor") or 0)
                     await _nft_scope_mark_posted(client, slug, c.get("floor") or 0)
+                    await _nft_scope_record_call_buyers(client, slug, c.get("floor"), rapid_activity)
                     momentum_posted.append(slug)
         except HTTPException:
             continue
@@ -4782,6 +5076,79 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
             logger.exception("nft-scope: momentum check failed for %s", slug)
             continue
     posted.extend(momentum_posted)
+
+    # ── Pass 4: smart-wallet holdings - what proven-good wallets are
+    # accumulating RIGHT NOW, entirely independent of whether it's
+    # trending by any conventional volume/floor metric yet. "People
+    # holding good stuff tend to buy some good stuff early" - a collection
+    # several proven wallets are quietly holding is itself a leading
+    # signal, arguably earlier than anything the other three passes can
+    # see. Reserved slot, same reasoning as the other passes.
+    #
+    # Deliberately NOT "post whatever a good wallet happens to hold" - a
+    # proven wallet's bag is mostly old positions sitting flat, not
+    # signal. This only ever posts a held collection that ALSO clears a
+    # real, independently-verified recent-movement bar (a floor multiple,
+    # an active rapid-activity burst, or the accumulation signal) on top
+    # of every other standard gate - "gone up from low to high recently,"
+    # not "sitting in a good wallet."
+    #
+    # Runs last, after three passes whose own cost already scales with
+    # cycle demand - skipped outright once the cycle's already spent most
+    # of its share of Vercel's 60s function budget, same reasoning as the
+    # NFT Scope follow-up pass.
+    holdings_posted: list[str] = []
+    if time.time() - scan_start < _NFT_SCOPE_HOLDINGS_TIME_BUDGET_SECONDS:
+        try:
+            good_wallets = await _nft_scope_top_wallets(client, _NFT_SCOPE_HOLDINGS_WALLET_SAMPLE)
+        except httpx.HTTPError:
+            good_wallets = []
+        random.shuffle(good_wallets)
+        candidate_slugs: set[str] = set()
+        for wallet in good_wallets:
+            held = await _nft_scope_wallet_holdings(client, wallet)
+            candidate_slugs.update(held)
+        candidate_slugs_list = list(candidate_slugs)
+        random.shuffle(candidate_slugs_list)
+        holdings_scanned = 0
+        for slug in candidate_slugs_list:
+            if len(holdings_posted) >= limits["holdings_max"] or holdings_scanned >= limits["holdings_scan_budget"]:
+                break
+            try:
+                scan_state = await _nft_alert_state_get(client, slug, "nft_scope_holdings_scan")
+                if not _nft_alert_cooled_down(scan_state, cooldown_seconds=_NFT_SCOPE_HOLDINGS_SCAN_COOLDOWN_SECONDS):
+                    continue
+                if await _nft_scope_recently_posted(client, slug):
+                    await _nft_alert_state_set(client, slug, "nft_scope_holdings_scan", 0)
+                    continue
+                holdings_scanned += 1
+                c = await _nft_collection_core(slug)
+                top_offer_amount = await _nft_scope_top_offer_amount(client, slug, c)
+                rapid_activity = await _detect_rapid_activity(client, slug)
+                history, first_snapshot = await _nft_scope_snapshot_signals(client, slug)
+                wash_analysis = await _nft_scope_wash_analysis(client, slug) if _nft_scope_turnover_elevated(c) else None
+                smart_wallet_hits = await _nft_scope_smart_wallet_hits(client, rapid_activity) if rapid_activity else []
+                score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis, smart_wallet_hits=smart_wallet_hits)
+                if score.get("floor_multiple") and score["floor_multiple"] >= _NFT_SCOPE_PROVED_MULTIPLE_THRESHOLD:
+                    await _nft_scope_mark_slug_proved(client, slug, score["floor_multiple"])
+                has_recent_movement = bool(score.get("floor_multiple")) or rapid_activity is not None or any(
+                    "accumulation" in r.lower() or "jumped" in r.lower() for r in score["reasons"]
+                )
+                if has_recent_movement and _nft_scope_worth_posting(score) and await _nft_scope_clears_wash_check(client, slug):
+                    delivered = await _post_channel_message(client, settings.discord_nft_scope_channel_id, _nft_scope_embed(c, score, top_offer_amount, "holdings", rapid_activity=rapid_activity))
+                    if delivered:
+                        holdings_posted.append(slug)
+                        await _nft_scope_mark_posted(client, slug, c.get("floor") or 0)
+                        await _nft_scope_record_call_buyers(client, slug, c.get("floor"), rapid_activity)
+                if score["has_real_activity"]:
+                    await _nft_store_snapshot(client, c)
+                await _nft_alert_state_set(client, slug, "nft_scope_holdings_scan", c.get("floor") or 0)
+            except HTTPException:
+                continue
+            except (httpx.HTTPError, KeyError, ZeroDivisionError, TypeError):
+                logger.exception("nft-scope: holdings check failed for %s", slug)
+                continue
+    posted.extend(holdings_posted)
 
     return posted
 
@@ -4978,6 +5345,26 @@ async def _prune_old_snapshots(client: httpx.AsyncClient) -> bool:
         return False
 
 
+_SALE_EVENTS_LOG_RETENTION_DAYS = 180  # much longer than snapshot history on purpose - a wallet's track record is only as
+# good as how much realized-trade history backs it, and pruning this as aggressively as the 5-min snapshot table would
+# erase months of proof behind an otherwise-earned win rate. Still bounded, not literally forever - nft_sale_events_log
+# has no other cleanup and would otherwise grow unbounded exactly like nft_snapshot_history did before this pattern existed.
+
+
+async def _prune_old_sale_events(client: httpx.AsyncClient) -> bool:
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=_SALE_EVENTS_LOG_RETENTION_DAYS)).isoformat()
+    try:
+        res = await client.delete(
+            f"{settings.supabase_url}/rest/v1/nft_sale_events_log",
+            headers=_supabase_headers(prefer="return=minimal"),
+            params={"event_at": f"lt.{cutoff}"},
+        )
+        return res.status_code < 300
+    except httpx.HTTPError:
+        logger.exception("nft-poll: sale event log pruning failed")
+        return False
+
+
 @app.get("/cron/nft-poll")
 async def nft_poll(request: Request):
     expected = f"Bearer {settings.nft_cron_secret}"
@@ -5023,8 +5410,12 @@ async def nft_poll(request: Request):
             else:
                 errors.append("nft_scope_followups: skipped - cycle already past its time budget")
         pruned = await _prune_old_snapshots(client)
+        pruned_sale_events = await _prune_old_sale_events(client)
 
-    return {"watchlist_alerts": alerted, "nft_scope_posts": scoped, "nft_scope_followups": followups, "pruned_old_snapshots": pruned, "errors": errors}
+    return {
+        "watchlist_alerts": alerted, "nft_scope_posts": scoped, "nft_scope_followups": followups,
+        "pruned_old_snapshots": pruned, "pruned_old_sale_events": pruned_sale_events, "errors": errors,
+    }
 
 
 @app.get("/toolkit/nft-discover")
