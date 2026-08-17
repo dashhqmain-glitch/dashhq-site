@@ -4903,11 +4903,31 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
     # structurally favors big blue-chips (a single high-floor sale
     # outweighs dozens of trades on a smaller collection), which is
     # exactly the "only ever big projects" bias this was built to fix.
-    # twenty_four_hour_sales ranks by transaction COUNT instead, which
-    # favors collections lots of people are actually trading right now,
-    # cheap or expensive. Deduped by slug before the expensive per-
+    # one_day_change ranks by floor % GAIN instead of level - verified
+    # live that OpenSea ignores order_direction on this field and always
+    # returns biggest-gainers-first (confirmed identical results for
+    # asc/desc, top result a huge positive change, never a crash) - which
+    # is actually the right bias for this bot specifically: NFT Scope
+    # exists to surface things worth buying, not things worth avoiding,
+    # so gainers-only here is a feature, not a limitation to work around.
+    # It surfaces real noise too (an illiquid collection's floor can
+    # swing hard on a single relisting with nothing behind it) - that's
+    # fine, the same mandatory real-activity + wash-check gates every
+    # other candidate goes through downstream are what actually separate
+    # a real mover from a one-listing blip, same as they already do for
+    # the other two sources. Deduped by slug before the expensive per-
     # candidate checks, so this costs a couple extra cheap listing calls
     # per chain, not proportionally more real work.
+    #
+    # NOTE (verified live): OpenSea silently renamed twenty_four_hour_volume
+    # to one_day_volume at some point and dropped twenty_four_hour_sales
+    # (a sales-COUNT ranking) entirely with no direct replacement - both
+    # of the old names now 400 with "Unknown order-by." That means 2 of
+    # these 3 sources had been silently returning nothing for an unknown
+    # stretch of time before this was caught, since the fetch here fails
+    # open (empty list) rather than erroring loudly. If OpenSea renames
+    # things again, this is the first place to check - a 0-collection
+    # result for a source that used to return plenty is the tell.
     trending_posted: list[str] = []
     trending_scanned = 0  # counts actual evaluations (past the cooldown gate), not just discovery
     # Fetch every (chain, source) listing FIRST, before evaluating anything -
@@ -4920,7 +4940,7 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
     # widened to cover chains too - is what actually gets the scan budget
     # spread across the whole discovery surface instead of camping on
     # whichever chain happens to be listed first.
-    sources = ("seven_day_volume", "twenty_four_hour_volume", "twenty_four_hour_sales")
+    sources = ("seven_day_volume", "one_day_volume", "one_day_change")
     pairs = [(chain, source) for chain in _NFT_SCOPE_CHAINS for source in sources]
     random.shuffle(pairs)
     per_pair: dict[tuple[str, str], list[dict]] = {}
@@ -5365,6 +5385,27 @@ async def _prune_old_sale_events(client: httpx.AsyncClient) -> bool:
         return False
 
 
+async def _prune_old_call_buyers(client: httpx.AsyncClient) -> bool:
+    # nft_scope_call_buyers has the same unbounded-growth shape as
+    # nft_sale_events_log (every post with a rapid-activity burst adds
+    # rows, forever, with nothing else cleaning it up) - grows far slower
+    # since it only writes on an actual post, not every wash-check fetch,
+    # but "slower" isn't "never." Same 180-day window as the sale events
+    # log, for the same reason: a wallet's NFT-Scope-specific track
+    # record needs real history behind it to mean anything.
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=_SALE_EVENTS_LOG_RETENTION_DAYS)).isoformat()
+    try:
+        res = await client.delete(
+            f"{settings.supabase_url}/rest/v1/nft_scope_call_buyers",
+            headers=_supabase_headers(prefer="return=minimal"),
+            params={"called_at": f"lt.{cutoff}"},
+        )
+        return res.status_code < 300
+    except httpx.HTTPError:
+        logger.exception("nft-poll: call buyers pruning failed")
+        return False
+
+
 @app.get("/cron/nft-poll")
 async def nft_poll(request: Request):
     expected = f"Bearer {settings.nft_cron_secret}"
@@ -5411,10 +5452,12 @@ async def nft_poll(request: Request):
                 errors.append("nft_scope_followups: skipped - cycle already past its time budget")
         pruned = await _prune_old_snapshots(client)
         pruned_sale_events = await _prune_old_sale_events(client)
+        pruned_call_buyers = await _prune_old_call_buyers(client)
 
     return {
         "watchlist_alerts": alerted, "nft_scope_posts": scoped, "nft_scope_followups": followups,
-        "pruned_old_snapshots": pruned, "pruned_old_sale_events": pruned_sale_events, "errors": errors,
+        "pruned_old_snapshots": pruned, "pruned_old_sale_events": pruned_sale_events,
+        "pruned_old_call_buyers": pruned_call_buyers, "errors": errors,
     }
 
 

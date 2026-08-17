@@ -280,3 +280,33 @@ async def test_prune_old_sale_events_fails_safe_on_error():
 
     result = await main._prune_old_sale_events(FakeClient())
     assert result is False
+
+
+# ── nft_scope_call_buyers pruning - same unbounded-growth shape, slower ────
+# growth rate (only writes on an actual post, not every wash-check fetch)
+# but still nothing else was cleaning it up.
+
+async def test_prune_old_call_buyers_deletes_with_the_right_cutoff_column():
+    calls = []
+
+    class FakeClient:
+        async def delete(self, url, headers=None, params=None):
+            calls.append((url, params))
+            return FakeRes(200)
+
+    result = await main._prune_old_call_buyers(FakeClient())
+    assert result is True
+    assert len(calls) == 1
+    url, params = calls[0]
+    assert url.endswith("/nft_scope_call_buyers")
+    assert "called_at" in params
+    assert params["called_at"].startswith("lt.")
+
+
+async def test_prune_old_call_buyers_fails_safe_on_error():
+    class FakeClient:
+        async def delete(self, url, headers=None, params=None):
+            raise main.httpx.HTTPError("boom")
+
+    result = await main._prune_old_call_buyers(FakeClient())
+    assert result is False

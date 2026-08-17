@@ -211,7 +211,7 @@ async def test_trending_pass_queries_both_7day_and_24h_volume_and_dedupes():
     # 7-day volume alone can be dominated by activity earlier in the week
     # and miss something hot RIGHT NOW - the 24h source closes that gap.
     _config_channel()
-    calls_by_order = {"seven_day_volume": 0, "twenty_four_hour_volume": 0, "twenty_four_hour_sales": 0}
+    calls_by_order = {"seven_day_volume": 0, "one_day_volume": 0, "one_day_change": 0}
 
     async def fake_opensea_get(client, path, params=None):
         if path == "/collections":
@@ -222,9 +222,9 @@ async def test_trending_pass_queries_both_7day_and_24h_volume_and_dedupes():
             calls_by_order[params["order_by"]] += 1
             if params["order_by"] == "seven_day_volume":
                 return {"collections": [{"collection": "only-in-7d"}]}
-            if params["order_by"] == "twenty_four_hour_volume":
+            if params["order_by"] == "one_day_volume":
                 return {"collections": [{"collection": "only-in-24h-volume"}]}
-            if params["order_by"] == "twenty_four_hour_sales":
+            if params["order_by"] == "one_day_change":
                 return {"collections": [{"collection": "only-in-24h-sales"}]}
         if path.startswith("/events/collection/"):
             return {"asset_events": []}
@@ -275,8 +275,8 @@ async def test_trending_pass_queries_both_7day_and_24h_volume_and_dedupes():
             await main._nft_scope_scan(client)
 
     assert calls_by_order["seven_day_volume"] == 1
-    assert calls_by_order["twenty_four_hour_volume"] == 1
-    assert calls_by_order["twenty_four_hour_sales"] == 1
+    assert calls_by_order["one_day_volume"] == 1
+    assert calls_by_order["one_day_change"] == 1
 
 
 async def test_trending_slot_is_not_structurally_biased_toward_any_single_discovery_source():
