@@ -19,12 +19,20 @@ create table if not exists members (
 
 create index if not exists members_is_active_idx on members (is_active);
 
+-- search_path pinned to empty: without this, the function resolves
+-- unqualified names against whatever search_path is active at CALL time,
+-- not definition time - a classic search-path-hijack vector (a malicious
+-- role could create an object earlier in their own search_path to shadow
+-- what this function resolves to). now() is a pg_catalog builtin, always
+-- resolvable regardless, so this is a pure hardening with no behavior
+-- change. Flagged by Supabase's linter as "Function Search Path Mutable."
 create or replace function set_updated_at() returns trigger as $$
 begin
   new.updated_at = now();
   return new;
 end;
-$$ language plpgsql;
+$$ language plpgsql
+set search_path = '';
 
 drop trigger if exists members_set_updated_at on members;
 create trigger members_set_updated_at
@@ -238,7 +246,18 @@ alter table nft_scope_proved_slugs enable row level security;
 -- denominator - a call NFT Scope made yesterday hasn't had a fair chance
 -- to prove out yet, and counting it as a "loss" this early would punish
 -- a wallet's most recent (and most relevant) activity the hardest.
-create or replace view nft_smart_wallets as
+--
+-- security_invoker = true: without this, a Postgres view defaults to
+-- running with its OWNER's privileges rather than the querying user's,
+-- which silently bypasses the RLS enabled on the underlying tables -
+-- flagged CRITICAL by Supabase's own linter. The backend's service-role
+-- key already bypasses RLS regardless (same as every other table here),
+-- so this changes nothing for it; what it fixes is that without this,
+-- anyone hitting PostgREST with just the public anon key could read
+-- every wallet address and win rate straight through the view, RLS or
+-- not. Same reasoning applies to every view below.
+create or replace view nft_smart_wallets
+  with (security_invoker = true) as
 select
   b.buyer as address,
   count(distinct b.slug) as total_calls,
@@ -302,7 +321,8 @@ alter table nft_sale_events_log enable row level security;
 --     move, not microsecond arbitrage. 15 minutes is long enough to
 --     exclude that noise, short enough not to exclude a genuine trader
 --     spotting and acting on a real mispricing.
-create or replace view nft_wallet_realized_trades as
+create or replace view nft_wallet_realized_trades
+  with (security_invoker = true) as
 select
   buy.buyer as wallet,
   buy.slug,
@@ -325,7 +345,8 @@ join nft_sale_events_log sell
 -- Per-wallet realized win rate, across every trade this bot has directly
 -- observed resolve - buys early, sells for profit, this is the metric
 -- that actually captures that, not balance and not a single hit.
-create or replace view nft_wallet_pnl_stats as
+create or replace view nft_wallet_pnl_stats
+  with (security_invoker = true) as
 select
   wallet as address,
   count(*) as total_trades,
@@ -354,7 +375,8 @@ group by wallet;
 -- and over. _nft_scope_filter_activity_spikes enforces a minimum
 -- distinct-seller ratio against this before ever calling something a
 -- spike.
-create or replace view nft_wallet_recent_activity as
+create or replace view nft_wallet_recent_activity
+  with (security_invoker = true) as
 select
   buyer as address,
   count(*) filter (where event_at > now() - interval '3 days') as recent_buys,
