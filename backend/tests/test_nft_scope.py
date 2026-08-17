@@ -959,6 +959,32 @@ def test_price_surge_never_bypasses_the_turnover_block():
     assert score["blocked"] and not main._nft_scope_worth_posting(score)
 
 
+def test_a_barely_qualifying_burst_scores_far_below_a_genuine_sweep():
+    # Confirmed live: "Guild of Grime" posted at 95/100 off a burst that
+    # barely cleared _NFT_SCOPE_RAPID_MIN_SALES (4 sales, 3 buyers) - the
+    # exact same flat rapid-activity credit (+10/+5/+5) a real sweep gets
+    # (50 sales, 19+ buyers). The point AWARD now scales with the burst's
+    # actual size, so these two shouldn't be anywhere close.
+    thin_burst = {"count": 4, "unique_buyers": 3, "unique_sellers": 3, "window_minutes": 30,
+                  "price_surge_pct": 27.0, "is_sharp": True, "sharp_count": 2, "sharp_window_minutes": 5}
+    real_sweep = {"count": 50, "unique_buyers": 19, "unique_sellers": 25, "window_minutes": 30,
+                  "price_surge_pct": 251.0, "is_sharp": True, "sharp_count": 13, "sharp_window_minutes": 5}
+    # A weak baseline (not strong_collection()'s already-high checklist
+    # score) so neither case saturates the display cap and compresses the
+    # real gap between a thin burst and a genuine sweep.
+    c = {"floor": 0.05, "totalSupply": 500, "owners": 10, "sales24h": 1, "vol1d": 0.05, "symbol": "ETH"}
+    score_thin = main._nft_scope_score(c, None, rapid_activity=thin_burst)
+    score_sweep = main._nft_scope_score(c, None, rapid_activity=real_sweep)
+    assert score_sweep["score"] > score_thin["score"] + 15
+    # The thin burst is too small to earn either sub-bonus - a 4-sale
+    # spread isn't a real "surge," and 2 sales in 5 min isn't evidence
+    # something is accelerating right now, just background noise.
+    assert not any("Price climbed" in r for r in score_thin["reasons"])
+    assert not any("happening right now" in r for r in score_thin["reasons"])
+    assert any("Price climbed" in r for r in score_sweep["reasons"])
+    assert any("happening right now" in r for r in score_sweep["reasons"])
+
+
 # ── rapid activity: sharp 5-min sub-window ("happening right now") ─────
 
 def sale_at(buyer, seller, when, token_id="1"):
@@ -1035,8 +1061,12 @@ async def test_sharp_window_independently_catches_a_cluster_the_diluted_outer_wi
 
 
 def test_sharp_signal_scores_higher_and_never_bypasses_hard_gates():
-    sharp = {"count": 3, "unique_buyers": 3, "unique_sellers": 3, "window_minutes": 30,
-             "price_surge_pct": 5.0, "is_sharp": True, "sharp_count": 2, "sharp_window_minutes": 5}
+    # sharp_count must clear _NFT_SCOPE_RAPID_SHARP_BONUS_MIN_SALES (3),
+    # not just _NFT_SCOPE_RAPID_SHARP_MIN_SALES (2, the bare minimum to
+    # detect "sharp" at all) - see the real false positive this scaling
+    # fixes above the rapid-activity scoring block.
+    sharp = {"count": 5, "unique_buyers": 5, "unique_sellers": 5, "window_minutes": 30,
+             "price_surge_pct": 5.0, "is_sharp": True, "sharp_count": 3, "sharp_window_minutes": 5}
     not_sharp = dict(sharp, is_sharp=False)
 
     score_sharp = main._nft_scope_score(strong_collection(), 0.06, rapid_activity=sharp)

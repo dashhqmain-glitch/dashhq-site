@@ -4441,28 +4441,52 @@ def _nft_scope_score(
     points += spike_points
     reasons.extend(spike_reasons)
 
-    # Rapid activity (0-10) - an early, fast-reacting supplement to the
+    # Rapid activity (0-20) - an early, fast-reacting supplement to the
     # snapshot-based momentum above, not a replacement or a shortcut
     # around it. It only ever ADDS points on top of every other check
     # still running in full (turnover, fake-offer, mandatory real
     # activity, final wash-check) - a burst of trading never lowers the
     # bar, it can only raise a score that still has to clear every gate
     # on its own merits.
+    #
+    # Confirmed live: a barely-qualifying burst (4 sales, 3 buyers - just
+    # above the 3-sale floor _detect_rapid_activity requires to fire at
+    # all) scored the exact same flat +10 as a genuine sweep (50 sales,
+    # 19+ buyers), then stacked the same +5/+5 surge/sharp bonuses on top
+    # (a 3-sale spread trivially clears the 15% surge threshold, and 2
+    # sales in 5 min trivially cleared the old sharp bar) for 95/100
+    # total - "Strongest Signals" on a burst that barely qualified as a
+    # signal at all. The MINIMUM to fire stays low on purpose (catching a
+    # real move AS it starts is the whole point), but the point AWARD now
+    # scales with how big the burst actually is instead of paying out the
+    # same flat credit for barely clearing the floor as for a real sweep.
     if rapid_activity:
-        points += 10
+        count, buyers = rapid_activity["count"], rapid_activity["unique_buyers"]
+        base_points = min(
+            _NFT_SCOPE_RAPID_MAX_BASE_POINTS,
+            _NFT_SCOPE_RAPID_BASE_POINTS + count * _NFT_SCOPE_RAPID_POINTS_PER_SALE + buyers * _NFT_SCOPE_RAPID_POINTS_PER_BUYER,
+        )
+        points += base_points
         reasons.append(
-            f"🚀 {rapid_activity['count']} verified sale(s) in the last {rapid_activity['window_minutes']} min "
-            f"from {rapid_activity['unique_buyers']} buyer(s)/{rapid_activity['unique_sellers']} seller(s) - "
+            f"🚀 {count} verified sale(s) in the last {rapid_activity['window_minutes']} min "
+            f"from {buyers} buyer(s)/{rapid_activity['unique_sellers']} seller(s) - "
             "activity accelerating right now, not just a 24h number catching up"
         )
         surge = rapid_activity.get("price_surge_pct")
-        if surge is not None and surge >= _NFT_SCOPE_RAPID_SURGE_THRESHOLD_PCT:
+        # Requires more than the bare 3-sale floor - a 3-sale spread
+        # trivially clears a 15% min/max gap on noise alone; a real
+        # surge needs enough sales behind it to mean something.
+        if surge is not None and surge >= _NFT_SCOPE_RAPID_SURGE_THRESHOLD_PCT and count >= _NFT_SCOPE_RAPID_SURGE_MIN_SALES:
             points += 5
             reasons.append(
                 f"💥 Price climbed {surge:.0f}% within that same burst - volume AND price moving together, "
                 "not just a busy but flat market"
             )
-        if rapid_activity.get("is_sharp"):
+        # Requires more than the structural minimum (2) used just to
+        # detect "sharp" at all - 2 sales landing in 5 minutes is
+        # ordinary background noise for plenty of collections, not
+        # evidence something is accelerating right now.
+        if rapid_activity.get("is_sharp") and rapid_activity["sharp_count"] >= _NFT_SCOPE_RAPID_SHARP_BONUS_MIN_SALES:
             points += 5
             reasons.append(
                 f"🔥 {rapid_activity['sharp_count']} of those sales landed in just the last "
@@ -4780,6 +4804,18 @@ _NFT_SCOPE_RAPID_MIN_SALES = 3
 _NFT_SCOPE_RAPID_SURGE_THRESHOLD_PCT = 15  # min/max sale price spread within the burst that counts as a real surge, not noise
 _NFT_SCOPE_RAPID_SHARP_WINDOW_SECONDS = 300  # 5 min - "this is happening right now", not just "recently"
 _NFT_SCOPE_RAPID_SHARP_MIN_SALES = 2  # lower bar than the 30-min window since the timeframe itself is the signal
+# Scoring weights for the burst's SIZE, not just whether it fired at all
+# (see the scoring comment above _nft_scope_score's rapid-activity block
+# for the real false positive this fixes - a 4-sale/3-buyer burst was
+# scoring identically to a 50-sale/19-buyer sweep). Buyers weighted
+# heavier than raw sale count - breadth of independent participants is a
+# stronger tell than the same handful of wallets trading repeatedly.
+_NFT_SCOPE_RAPID_BASE_POINTS = 4  # awarded just for clearing the minimum bar at all - real, but thin
+_NFT_SCOPE_RAPID_POINTS_PER_SALE = 0.4
+_NFT_SCOPE_RAPID_POINTS_PER_BUYER = 0.6
+_NFT_SCOPE_RAPID_MAX_BASE_POINTS = 20  # ceiling - a genuine sweep can meaningfully outscore a thin burst, but stays bounded
+_NFT_SCOPE_RAPID_SURGE_MIN_SALES = 5  # a 3-sale min/max spread is noise, not a surge - the bare _NFT_SCOPE_RAPID_MIN_SALES floor isn't enough
+_NFT_SCOPE_RAPID_SHARP_BONUS_MIN_SALES = 3  # the +5 bonus needs more than _NFT_SCOPE_RAPID_SHARP_MIN_SALES (which only detects "sharp" at all)
 
 
 async def _detect_rapid_activity(client: httpx.AsyncClient, slug: str) -> dict | None:
