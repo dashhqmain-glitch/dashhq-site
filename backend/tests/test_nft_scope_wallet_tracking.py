@@ -229,6 +229,8 @@ async def test_top_wallets_merges_and_dedups_across_both_tables():
                 return FakeRes(200, [{"address": "0xa"}, {"address": "0xb"}])
             if url.endswith("/nft_smart_wallets"):
                 return FakeRes(200, [{"address": "0xb"}, {"address": "0xc"}])
+            if url.endswith("/nft_wallet_recent_activity"):
+                return FakeRes(200, [])
             raise AssertionError(f"unexpected {url}")
 
     wallets = await main._nft_scope_top_wallets(FakeClient(), 10)
@@ -240,10 +242,44 @@ async def test_top_wallets_fails_safe_per_table():
         async def get(self, url, headers=None, params=None):
             if url.endswith("/nft_wallet_pnl_stats"):
                 raise main.httpx.HTTPError("boom")
+            if url.endswith("/nft_wallet_recent_activity"):
+                return FakeRes(200, [])
             return FakeRes(200, [{"address": "0xc"}])
 
     wallets = await main._nft_scope_top_wallets(FakeClient(), 10)
     assert wallets == ["0xc"]
+
+
+async def test_top_wallets_includes_currently_spiking_wallets_alongside_proven_ones():
+    # A wallet with no win-rate history yet but a real, diversity-verified
+    # activity spike must still be sampled - proven win rate alone would
+    # structurally never surface a wallet that's hot right now but hasn't
+    # built a track record.
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if url.endswith("/nft_wallet_pnl_stats") or url.endswith("/nft_smart_wallets"):
+                return FakeRes(200, [{"address": "0xproven"}])
+            if url.endswith("/nft_wallet_recent_activity"):
+                return FakeRes(200, [{"address": "0xhot", "recent_buys": 9, "recent_unique_sellers": 9, "baseline_buys": 0, "recent_volume": 3, "baseline_volume": 0}])
+            raise AssertionError(f"unexpected {url}")
+
+    wallets = await main._nft_scope_top_wallets(FakeClient(), 10)
+    assert set(wallets) == {"0xproven", "0xhot"}
+
+
+async def test_top_wallets_caps_the_merged_result_at_limit():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if url.endswith("/nft_wallet_pnl_stats"):
+                return FakeRes(200, [{"address": f"0x{i}"} for i in range(5)])
+            if url.endswith("/nft_smart_wallets"):
+                return FakeRes(200, [])
+            if url.endswith("/nft_wallet_recent_activity"):
+                return FakeRes(200, [])
+            raise AssertionError(f"unexpected {url}")
+
+    wallets = await main._nft_scope_top_wallets(FakeClient(), 3)
+    assert len(wallets) == 3
 
 
 async def test_wallet_holdings_returns_sorted_distinct_collections():
@@ -333,3 +369,144 @@ async def test_prune_old_call_buyers_fails_safe_on_error():
 
     result = await main._prune_old_call_buyers(FakeClient())
     assert result is False
+
+
+# ── _nft_scope_wallet_activity_spike_hits - "suddenly buying a lot" ─────
+# Distinct from win rate: fires on a wallet's own buying PACE changing,
+# even with zero resolved trades yet.
+
+async def test_activity_spike_hits_empty_with_no_buyer_addresses():
+    result = await main._nft_scope_wallet_activity_spike_hits(main.httpx.AsyncClient(), {"buyer_addresses": []})
+    assert result == []
+    result = await main._nft_scope_wallet_activity_spike_hits(main.httpx.AsyncClient(), None)
+    assert result == []
+
+
+async def test_activity_spike_hits_flags_a_real_spike_over_baseline():
+    # recent: 9 buys / 3 days = 3.0/day. baseline: 27 buys / 27 days = 1.0/day. ratio = 3.0 - right at the bar.
+    # 9 unique sellers for 9 buys = fully diverse, clears the counterparty check easily.
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            assert url.endswith("/nft_wallet_recent_activity")
+            return FakeRes(200, [{"address": "0xa", "recent_buys": 9, "recent_unique_sellers": 9, "baseline_buys": 27, "recent_volume": 5.0, "baseline_volume": 10.0}])
+
+    hits = await main._nft_scope_wallet_activity_spike_hits(FakeClient(), {"buyer_addresses": ["0xa"]})
+    assert len(hits) == 1
+    assert hits[0]["ratio"] == 3.0
+
+
+async def test_activity_spike_hits_excludes_a_ratio_below_the_bar():
+    # recent: 3 buys / 3 days = 1.0/day. baseline: 27 buys / 27 days = 1.0/day. ratio = 1.0 - no spike, steady pace.
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [{"address": "0xa", "recent_buys": 3, "recent_unique_sellers": 3, "baseline_buys": 27, "recent_volume": 1.0, "baseline_volume": 9.0}])
+
+    hits = await main._nft_scope_wallet_activity_spike_hits(FakeClient(), {"buyer_addresses": ["0xa"]})
+    assert hits == []
+
+
+async def test_activity_spike_hits_treats_zero_baseline_as_a_spike_without_a_ratio():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [{"address": "0xa", "recent_buys": 5, "recent_unique_sellers": 5, "baseline_buys": 0, "recent_volume": 2.0, "baseline_volume": 0}])
+
+    hits = await main._nft_scope_wallet_activity_spike_hits(FakeClient(), {"buyer_addresses": ["0xa"]})
+    assert len(hits) == 1
+    assert hits[0]["ratio"] is None
+    assert hits[0]["baseline_buys"] == 0
+
+
+async def test_activity_spike_hits_fails_safe_on_query_error():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            raise main.httpx.HTTPError("boom")
+
+    hits = await main._nft_scope_wallet_activity_spike_hits(FakeClient(), {"buyer_addresses": ["0xa"]})
+    assert hits == []
+
+
+# ── Counterparty diversity - the wash-trading guard the spike detector ──
+# needs, since raw buy count alone can't distinguish genuine broad buying
+# from a ring cycling trades among a few colluding wallets.
+
+async def test_activity_spike_hits_excludes_low_counterparty_diversity():
+    # 9 recent buys but only 2 distinct sellers - classic wash-ring shape
+    # (a handful of wallets cycling trades), not genuine broad buying.
+    # Would otherwise clear the ratio bar easily (9/3=3.0 vs 0 baseline).
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [{"address": "0xa", "recent_buys": 9, "recent_unique_sellers": 2, "baseline_buys": 0, "recent_volume": 5.0, "baseline_volume": 0}])
+
+    hits = await main._nft_scope_wallet_activity_spike_hits(FakeClient(), {"buyer_addresses": ["0xa"]})
+    assert hits == []
+
+
+async def test_activity_spike_hits_allows_borderline_diversity_at_the_bar():
+    # 6 buys, 3 distinct sellers = exactly 0.5 ratio, right at the minimum.
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [{"address": "0xa", "recent_buys": 6, "recent_unique_sellers": 3, "baseline_buys": 0, "recent_volume": 3.0, "baseline_volume": 0}])
+
+    hits = await main._nft_scope_wallet_activity_spike_hits(FakeClient(), {"buyer_addresses": ["0xa"]})
+    assert len(hits) == 1
+
+
+def test_activity_spike_points_zero_with_no_hits():
+    points, reasons = main._nft_scope_activity_spike_points([])
+    assert points == 0 and reasons == []
+    points, reasons = main._nft_scope_activity_spike_points(None)
+    assert points == 0 and reasons == []
+
+
+def test_activity_spike_points_awards_bonus_and_never_names_a_wallet():
+    hits = [{"address": "0xdeadbeef", "recent_buys": 6, "unique_sellers": 6, "baseline_buys": 20, "ratio": 4.5}]
+    points, reasons = main._nft_scope_activity_spike_points(hits)
+    assert points == main._NFT_SCOPE_ACTIVITY_SPIKE_BONUS_POINTS
+    assert len(reasons) == 1
+    assert "0x" not in reasons[0]
+    assert "6 purchases" in reasons[0]
+
+
+def test_activity_spike_points_calls_out_zero_baseline_distinctly():
+    hits = [{"address": "0xa", "recent_buys": 4, "unique_sellers": 4, "baseline_buys": 0, "ratio": None}]
+    points, reasons = main._nft_scope_activity_spike_points(hits)
+    assert points == main._NFT_SCOPE_ACTIVITY_SPIKE_BONUS_POINTS
+    assert "no prior buying history" in reasons[0]
+
+
+# ── _nft_scope_wallet_signals - combined, parallel fetch ─────────────────
+
+async def test_wallet_signals_empty_with_no_rapid_activity():
+    result = await main._nft_scope_wallet_signals(main.httpx.AsyncClient(), None)
+    assert result == ([], [])
+    result = await main._nft_scope_wallet_signals(main.httpx.AsyncClient(), {"buyer_addresses": []})
+    assert result == ([], [])
+
+
+async def test_wallet_signals_fetches_both_and_returns_them_combined():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if url.endswith("/nft_smart_wallets"):
+                return FakeRes(200, [{"address": "0xa", "total_calls": 4, "proved_calls": 2, "win_rate": 0.5, "best_multiple": 6.0}])
+            if url.endswith("/nft_wallet_pnl_stats"):
+                return FakeRes(200, [])
+            if url.endswith("/nft_wallet_recent_activity"):
+                return FakeRes(200, [{"address": "0xb", "recent_buys": 6, "recent_unique_sellers": 6, "baseline_buys": 0, "recent_volume": 1, "baseline_volume": 0}])
+            raise AssertionError(f"unexpected {url}")
+
+    smart_hits, spike_hits = await main._nft_scope_wallet_signals(FakeClient(), {"buyer_addresses": ["0xa", "0xb"]})
+    assert len(smart_hits) == 1 and smart_hits[0]["address"] == "0xa"
+    assert len(spike_hits) == 1 and spike_hits[0]["address"] == "0xb"
+
+
+# ── _nft_scope_score integration ──────────────────────────────────────────
+
+def test_score_includes_activity_spike_points():
+    from test_nft_scope import strong_collection
+    c = strong_collection()
+    spike = [{"address": "0xa", "recent_buys": 6, "unique_sellers": 6, "baseline_buys": 20, "ratio": 5.0}]
+    with_spike = main._nft_scope_score(c, None, activity_spike_hits=spike)
+    without_spike = main._nft_scope_score(c, None, activity_spike_hits=None)
+    assert with_spike["score"] > without_spike["score"]
+    assert any("accelerating" in r.lower() for r in with_spike["reasons"])
+    assert not any("0x" in r for r in with_spike["reasons"])

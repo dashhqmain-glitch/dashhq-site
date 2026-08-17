@@ -4112,7 +4112,7 @@ def _nft_scope_surge_points(c: dict, history: list[dict] | None, first_snapshot:
 def _nft_scope_score(
     c: dict, top_offer_amount: float | None, history: list[dict] | None = None,
     rapid_activity: dict | None = None, first_snapshot: dict | None = None, wash_analysis: dict | None = None,
-    smart_wallet_hits: list[dict] | None = None,
+    smart_wallet_hits: list[dict] | None = None, activity_spike_hits: list[dict] | None = None,
 ) -> dict:
     supply = c.get("totalSupply")
     owners = c.get("owners")
@@ -4207,6 +4207,15 @@ def _nft_scope_score(
     smart_points, smart_reasons = _nft_scope_smart_wallet_points(smart_wallet_hits)
     points += smart_points
     reasons.extend(smart_reasons)
+
+    # Activity spike (0-15) - a wallet suddenly buying far more, far
+    # faster, than its own normal pace, across ANY collection. Distinct
+    # from the win-rate signal above: this fires even for a wallet with
+    # zero resolved history yet, since it measures behavior CHANGE right
+    # now, not a settled track record.
+    spike_points, spike_reasons = _nft_scope_activity_spike_points(activity_spike_hits)
+    points += spike_points
+    reasons.extend(spike_reasons)
 
     # Rapid activity (0-10) - an early, fast-reacting supplement to the
     # snapshot-based momentum above, not a replacement or a shortcut
@@ -4628,24 +4637,7 @@ async def _nft_scope_mark_slug_proved(client: httpx.AsyncClient, slug: str, mult
         logger.exception("Failed to mark %s as a proved slug", slug)
 
 
-async def _nft_scope_smart_wallet_hits(client: httpx.AsyncClient, rapid_activity: dict | None) -> list[dict]:
-    # Only ever called when rapid_activity actually has buyer addresses to
-    # check (the caller gates on this), so this costs nothing on the far
-    # more common candidate with no burst at all. Merges two complementary
-    # sources into one normalized shape: nft_smart_wallets (bought early
-    # into a collection NFT Scope itself called out, which later proved
-    # out) and nft_wallet_pnl_stats (realized profit on ANY trade this bot
-    # has observed resolve, regardless of whether NFT Scope called it) -
-    # the second is broader and starts accumulating signal from day one,
-    # the first is a tighter, NFT-Scope-specific track record. The win-
-    # rate/sample-size bar is enforced server-side in both queries, not
-    # after the fact in Python - a wallet that doesn't clear it was never
-    # a hit in the first place. A wallet present in both sources is
-    # de-duplicated, keeping whichever shows the stronger win rate.
-    buyer_addresses = (rapid_activity or {}).get("buyer_addresses") or []
-    if not buyer_addresses:
-        return []
-    in_filter = f"in.({','.join(buyer_addresses)})"
+async def _nft_scope_call_buyer_track_records(client: httpx.AsyncClient, in_filter: str) -> dict[str, dict]:
     hits: dict[str, dict] = {}
     try:
         res = await client.get(
@@ -4666,6 +4658,11 @@ async def _nft_scope_smart_wallet_hits(client: httpx.AsyncClient, rapid_activity
             }
     except httpx.HTTPError:
         pass
+    return hits
+
+
+async def _nft_scope_realized_pnl_track_records(client: httpx.AsyncClient, in_filter: str) -> dict[str, dict]:
+    hits: dict[str, dict] = {}
     try:
         res = await client.get(
             f"{settings.supabase_url}/rest/v1/nft_wallet_pnl_stats",
@@ -4679,16 +4676,163 @@ async def _nft_scope_smart_wallet_hits(client: httpx.AsyncClient, rapid_activity
         )
         res.raise_for_status()
         for row in res.json():
-            candidate = {
+            hits[row["address"]] = {
                 "address": row["address"], "sample": row["total_trades"], "wins": row["winning_trades"],
                 "win_rate": row["win_rate"], "best_pct": row.get("best_trade_pct") or 0,
             }
-            existing = hits.get(row["address"])
-            if not existing or candidate["win_rate"] > existing["win_rate"]:
-                hits[row["address"]] = candidate
     except httpx.HTTPError:
         pass
+    return hits
+
+
+async def _nft_scope_smart_wallet_hits(client: httpx.AsyncClient, rapid_activity: dict | None) -> list[dict]:
+    # Only ever called when rapid_activity actually has buyer addresses to
+    # check (the caller gates on this), so this costs nothing on the far
+    # more common candidate with no burst at all. Merges two complementary
+    # sources into one normalized shape: nft_smart_wallets (bought early
+    # into a collection NFT Scope itself called out, which later proved
+    # out) and nft_wallet_pnl_stats (realized profit on ANY trade this bot
+    # has observed resolve, regardless of whether NFT Scope called it) -
+    # the second is broader and starts accumulating signal from day one,
+    # the first is a tighter, NFT-Scope-specific track record. Both
+    # queries run concurrently, not sequentially - same total request
+    # count, but only the slower of the two adds to wall-clock latency.
+    # The win-rate/sample-size bar is enforced server-side in both
+    # queries, not after the fact in Python - a wallet that doesn't clear
+    # it was never a hit in the first place. A wallet present in both
+    # sources is de-duplicated, keeping whichever shows the stronger win
+    # rate.
+    buyer_addresses = (rapid_activity or {}).get("buyer_addresses") or []
+    if not buyer_addresses:
+        return []
+    in_filter = f"in.({','.join(buyer_addresses)})"
+    call_hits, pnl_hits = await asyncio.gather(
+        _nft_scope_call_buyer_track_records(client, in_filter),
+        _nft_scope_realized_pnl_track_records(client, in_filter),
+    )
+    hits = dict(call_hits)
+    for address, candidate in pnl_hits.items():
+        existing = hits.get(address)
+        if not existing or candidate["win_rate"] > existing["win_rate"]:
+            hits[address] = candidate
     return list(hits.values())
+
+
+_NFT_SCOPE_ACTIVITY_SPIKE_RECENT_DAYS = 3
+_NFT_SCOPE_ACTIVITY_SPIKE_BASELINE_DAYS = 27  # matches nft_wallet_recent_activity's 30-day view window minus the 3-day recent slice
+_NFT_SCOPE_ACTIVITY_SPIKE_MIN_RECENT_BUYS = 3  # sample floor - a wallet going from 0 to 1 buy isn't a "spike," it's noise
+_NFT_SCOPE_ACTIVITY_SPIKE_MIN_RATIO = 3.0  # recent daily rate must be at least 3x the wallet's own baseline daily rate
+_NFT_SCOPE_ACTIVITY_SPIKE_MIN_SELLER_DIVERSITY = 0.5  # at least half the recent buys must be from genuinely distinct sellers
+_NFT_SCOPE_ACTIVITY_SPIKE_BONUS_POINTS = 15
+
+
+def _nft_scope_filter_activity_spikes(rows: list[dict]) -> list[dict]:
+    # Shared ratio/threshold logic for the activity-spike signal - reused
+    # by both the address-scoped check ("is THIS specific burst buyer
+    # spiking") and the discovery-scoped query ("who's spiking right now,
+    # regardless of whether they're in today's burst"), so the two never
+    # drift into judging "a spike" by different rules.
+    #
+    # Counterparty diversity is checked FIRST and is a hard requirement,
+    # not a scoring input - raw buy count alone can't tell a wallet
+    # genuinely buying broadly across the market apart from one cycling
+    # trades with a handful of colluding counterparties. A real spike
+    # buys from many different sellers; a wash ring buys from the same
+    # few, over and over, however many times it repeats. Without this, a
+    # sybil ring's self-dealing would look identical to genuine
+    # conviction - "hot wallet" and "wash ring" produce the exact same
+    # raw buy count on their own.
+    #
+    # Ratio math happens here, not in SQL, to keep a near-zero baseline
+    # from turning into a division-by-zero or a meaningless "infinite"
+    # spike.
+    hits = []
+    for row in rows:
+        recent_buys = row["recent_buys"]
+        unique_sellers = row.get("recent_unique_sellers") or 0
+        if recent_buys > 0 and (unique_sellers / recent_buys) < _NFT_SCOPE_ACTIVITY_SPIKE_MIN_SELLER_DIVERSITY:
+            continue  # concentrated on too few counterparties - reads as a wash ring, not genuine broad buying
+
+        baseline_buys = row.get("baseline_buys") or 0
+        recent_rate = recent_buys / _NFT_SCOPE_ACTIVITY_SPIKE_RECENT_DAYS
+        baseline_rate = baseline_buys / _NFT_SCOPE_ACTIVITY_SPIKE_BASELINE_DAYS
+        if baseline_rate <= 0:
+            ratio = None  # no prior baseline at all - a wallet appearing from nowhere is itself notable, not measured as a multiple
+        else:
+            ratio = recent_rate / baseline_rate
+            if ratio < _NFT_SCOPE_ACTIVITY_SPIKE_MIN_RATIO:
+                continue
+        hits.append({
+            "address": row["address"], "recent_buys": recent_buys, "unique_sellers": unique_sellers,
+            "baseline_buys": baseline_buys, "ratio": ratio,
+        })
+    return hits
+
+
+async def _nft_scope_wallet_activity_spike_hits(client: httpx.AsyncClient, rapid_activity: dict | None) -> list[dict]:
+    # Distinct signal from win rate on purpose: win rate needs trades to
+    # RESOLVE (a sale) before it means anything, so it's blind to a
+    # wallet that's suddenly buying aggressively RIGHT NOW with no track
+    # record yet. This looks at a wallet's own buying PACE instead -
+    # whether it's currently buying far more, far faster, across ANY
+    # collection, than its own recent normal - which catches exactly that
+    # case, including a wallet with zero resolved history.
+    buyer_addresses = (rapid_activity or {}).get("buyer_addresses") or []
+    if not buyer_addresses:
+        return []
+    try:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/nft_wallet_recent_activity",
+            headers=_supabase_headers(),
+            params={
+                "address": f"in.({','.join(buyer_addresses)})",
+                "recent_buys": f"gte.{_NFT_SCOPE_ACTIVITY_SPIKE_MIN_RECENT_BUYS}",
+                "select": "address,recent_buys,recent_unique_sellers,baseline_buys,recent_volume,baseline_volume",
+            },
+        )
+        res.raise_for_status()
+        return _nft_scope_filter_activity_spikes(res.json())
+    except httpx.HTTPError:
+        return []
+
+
+async def _nft_scope_spiking_wallets(client: httpx.AsyncClient, limit: int) -> list[str]:
+    # Extends the same spike detector into wallet DISCOVERY, not just
+    # scoring: nft_scope_top_wallets (below) only ever sampled already-
+    # proven win-rate wallets for the holdings pass, which structurally
+    # can never surface a wallet that's hot RIGHT NOW but hasn't built a
+    # track record yet - exactly the wallet this signal exists to catch
+    # elsewhere. Over-fetches by 3x on the DB side (cheap - it's Supabase,
+    # not OpenSea) since only some of the highest-recent-buys rows will
+    # actually clear the ratio bar once filtered.
+    try:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/nft_wallet_recent_activity",
+            headers=_supabase_headers(),
+            params={
+                "recent_buys": f"gte.{_NFT_SCOPE_ACTIVITY_SPIKE_MIN_RECENT_BUYS}",
+                "select": "address,recent_buys,recent_unique_sellers,baseline_buys,recent_volume,baseline_volume",
+                "order": "recent_buys.desc", "limit": str(limit * 3),
+            },
+        )
+        res.raise_for_status()
+        hits = _nft_scope_filter_activity_spikes(res.json())
+        return [h["address"] for h in hits[:limit]]
+    except httpx.HTTPError:
+        return []
+
+
+async def _nft_scope_wallet_signals(client: httpx.AsyncClient, rapid_activity: dict | None) -> tuple[list[dict], list[dict]]:
+    # Single entry point every pass calls instead of fetching each wallet
+    # signal separately - both run concurrently, so a candidate with a
+    # verified burst pays for the slower of the two lookups, not both
+    # stacked back to back.
+    if not (rapid_activity or {}).get("buyer_addresses"):
+        return [], []
+    return await asyncio.gather(
+        _nft_scope_smart_wallet_hits(client, rapid_activity),
+        _nft_scope_wallet_activity_spike_hits(client, rapid_activity),
+    )
 
 
 def _nft_scope_smart_wallet_points(smart_wallet_hits: list[dict] | None) -> tuple[int, list[str]]:
@@ -4715,6 +4859,25 @@ def _nft_scope_smart_wallet_points(smart_wallet_hits: list[dict] | None) -> tupl
     return points, reasons
 
 
+def _nft_scope_activity_spike_points(spike_hits: list[dict] | None) -> tuple[int, list[str]]:
+    # Same discretion as the win-rate signal above - no addresses, no
+    # methodology, just the read it supports.
+    if not spike_hits:
+        return 0, []
+    best = max(spike_hits, key=lambda h: h["recent_buys"])
+    if best["baseline_buys"] == 0:
+        detail = f"{best['recent_buys']} purchases in the last {_NFT_SCOPE_ACTIVITY_SPIKE_RECENT_DAYS} days from a wallet with no prior buying history in what's been observed"
+    else:
+        detail = f"{best['recent_buys']} purchases in the last {_NFT_SCOPE_ACTIVITY_SPIKE_RECENT_DAYS} days - a sharp jump from its own normal pace"
+    return (
+        _NFT_SCOPE_ACTIVITY_SPIKE_BONUS_POINTS,
+        [
+            f"📈 Buy-side activity here includes a wallet suddenly accelerating - {detail}, verified across "
+            f"{best['unique_sellers']} genuinely distinct counterparties (not a handful of wallets cycling the same trades), not steady background buying"
+        ],
+    )
+
+
 async def _nft_scope_top_wallets(client: httpx.AsyncClient, limit: int) -> list[str]:
     # Pulls the best-performing wallets across both win-rate sources -
     # "who's proven good overall," a different question than
@@ -4722,7 +4885,18 @@ async def _nft_scope_top_wallets(client: httpx.AsyncClient, limit: int) -> list[
     # check out"). Feeds the holdings-scan pass: what are these wallets
     # holding RIGHT NOW, independent of whether they're currently buying
     # anything. Same min-sample/min-win-rate bar as everywhere else this
-    # is used, so this never samples an unproven or one-lucky-hit wallet.
+    # is used, so this never samples an unproven or one-lucky-hit wallet
+    # from the win-rate sources - PROVEN good, not just active.
+    #
+    # Also merges in currently-spiking wallets (_nft_scope_spiking_wallets)
+    # - proven win rate alone structurally can't surface a wallet that's
+    # hot RIGHT NOW but hasn't built a track record yet, and that's
+    # exactly the kind of wallet worth knowing what it's currently
+    # holding. Capped back down to `limit` after merging (random, not a
+    # fixed source priority) so the win-rate sources and the spike source
+    # share the sample fairly instead of one silently crowding out the
+    # other, and so the downstream one-OpenSea-call-per-wallet holdings
+    # fetch stays bounded regardless of how many sources contribute.
     addresses: set[str] = set()
     for table in ("nft_wallet_pnl_stats", "nft_smart_wallets"):
         sample_col = "total_trades" if table == "nft_wallet_pnl_stats" else "total_calls"
@@ -4740,7 +4914,14 @@ async def _nft_scope_top_wallets(client: httpx.AsyncClient, limit: int) -> list[
             addresses |= {row["address"] for row in res.json()}
         except httpx.HTTPError:
             continue
-    return list(addresses)
+    try:
+        addresses |= set(await _nft_scope_spiking_wallets(client, limit))
+    except httpx.HTTPError:
+        pass
+    result = list(addresses)
+    if len(result) > limit:
+        result = random.sample(result, limit)
+    return result
 
 
 async def _nft_scope_wallet_holdings(client: httpx.AsyncClient, address: str, limit: int = _NFT_SCOPE_HOLDINGS_PER_WALLET_LIMIT) -> list[str]:
@@ -4856,8 +5037,8 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
                 rapid_activity = await _detect_rapid_activity(client, slug)
                 history, first_snapshot = await _nft_scope_snapshot_signals(client, slug)
                 wash_analysis = await _nft_scope_wash_analysis(client, slug) if _nft_scope_turnover_elevated(c) else None
-                smart_wallet_hits = await _nft_scope_smart_wallet_hits(client, rapid_activity) if rapid_activity else []
-                score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis, smart_wallet_hits=smart_wallet_hits)
+                smart_wallet_hits, activity_spike_hits = await _nft_scope_wallet_signals(client, rapid_activity)
+                score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis, smart_wallet_hits=smart_wallet_hits, activity_spike_hits=activity_spike_hits)
                 if score.get("floor_multiple") and score["floor_multiple"] >= _NFT_SCOPE_PROVED_MULTIPLE_THRESHOLD:
                     await _nft_scope_mark_slug_proved(client, slug, score["floor_multiple"])
                 if (
@@ -5008,8 +5189,8 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
             # (velocity / floor-multiple-since-first-seen) score below.
             history, first_snapshot = await _nft_scope_snapshot_signals(client, slug)
             wash_analysis = await _nft_scope_wash_analysis(client, slug) if _nft_scope_turnover_elevated(c) else None
-            smart_wallet_hits = await _nft_scope_smart_wallet_hits(client, rapid_activity) if rapid_activity else []
-            score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis, smart_wallet_hits=smart_wallet_hits)
+            smart_wallet_hits, activity_spike_hits = await _nft_scope_wallet_signals(client, rapid_activity)
+            score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis, smart_wallet_hits=smart_wallet_hits, activity_spike_hits=activity_spike_hits)
             if score.get("floor_multiple") and score["floor_multiple"] >= _NFT_SCOPE_PROVED_MULTIPLE_THRESHOLD:
                 await _nft_scope_mark_slug_proved(client, slug, score["floor_multiple"])
             if _nft_scope_worth_posting(score) and await _nft_scope_clears_wash_check(client, slug):
@@ -5085,8 +5266,8 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
             except httpx.HTTPError:
                 pass
             wash_analysis = await _nft_scope_wash_analysis(client, slug) if _nft_scope_turnover_elevated(c) else None
-            smart_wallet_hits = await _nft_scope_smart_wallet_hits(client, rapid_activity) if rapid_activity else []
-            score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis, smart_wallet_hits=smart_wallet_hits)
+            smart_wallet_hits, activity_spike_hits = await _nft_scope_wallet_signals(client, rapid_activity)
+            score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis, smart_wallet_hits=smart_wallet_hits, activity_spike_hits=activity_spike_hits)
             if score.get("floor_multiple") and score["floor_multiple"] >= _NFT_SCOPE_PROVED_MULTIPLE_THRESHOLD:
                 await _nft_scope_mark_slug_proved(client, slug, score["floor_multiple"])
             if _nft_scope_worth_posting(score) and await _nft_scope_clears_wash_check(client, slug):
@@ -5153,8 +5334,8 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
                 rapid_activity = await _detect_rapid_activity(client, slug)
                 history, first_snapshot = await _nft_scope_snapshot_signals(client, slug)
                 wash_analysis = await _nft_scope_wash_analysis(client, slug) if _nft_scope_turnover_elevated(c) else None
-                smart_wallet_hits = await _nft_scope_smart_wallet_hits(client, rapid_activity) if rapid_activity else []
-                score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis, smart_wallet_hits=smart_wallet_hits)
+                smart_wallet_hits, activity_spike_hits = await _nft_scope_wallet_signals(client, rapid_activity)
+                score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis, smart_wallet_hits=smart_wallet_hits, activity_spike_hits=activity_spike_hits)
                 if score.get("floor_multiple") and score["floor_multiple"] >= _NFT_SCOPE_PROVED_MULTIPLE_THRESHOLD:
                     await _nft_scope_mark_slug_proved(client, slug, score["floor_multiple"])
                 has_recent_movement = bool(score.get("floor_multiple")) or rapid_activity is not None or any(

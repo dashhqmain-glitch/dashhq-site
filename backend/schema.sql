@@ -337,3 +337,31 @@ from nft_wallet_realized_trades
 where pnl_pct is not null
 group by wallet;
 
+-- A wallet's own recent buying pace against its own baseline - a
+-- distinct signal from win rate, which needs trades to RESOLVE (sell)
+-- before it means anything. This catches a wallet suddenly buying much
+-- more, much faster, across ANY collection, RIGHT NOW - including a
+-- wallet with no resolved track record yet. Raw counts/volume for both
+-- windows, deliberately not a ratio - dividing by a near-zero baseline
+-- in SQL gets ugly fast (nulls, div-by-zero), so the spike ratio and its
+-- minimum-sample guard are computed application-side instead.
+--
+-- recent_unique_sellers exists specifically so a spike can't be confused
+-- with a wash-trading ring: raw buy COUNT alone can't tell a wallet
+-- genuinely buying broadly across the market apart from one cycling
+-- trades with a handful of colluding counterparties - a real spike buys
+-- from many different sellers, a wash ring buys from the same few over
+-- and over. _nft_scope_filter_activity_spikes enforces a minimum
+-- distinct-seller ratio against this before ever calling something a
+-- spike.
+create or replace view nft_wallet_recent_activity as
+select
+  buyer as address,
+  count(*) filter (where event_at > now() - interval '3 days') as recent_buys,
+  count(distinct seller) filter (where event_at > now() - interval '3 days') as recent_unique_sellers,
+  count(*) filter (where event_at > now() - interval '30 days' and event_at <= now() - interval '3 days') as baseline_buys,
+  coalesce(sum(price) filter (where event_at > now() - interval '3 days'), 0) as recent_volume,
+  coalesce(sum(price) filter (where event_at > now() - interval '30 days' and event_at <= now() - interval '3 days'), 0) as baseline_volume
+from nft_sale_events_log
+group by buyer;
+
