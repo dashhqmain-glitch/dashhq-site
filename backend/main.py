@@ -2999,7 +2999,17 @@ def _analyze_wash_trading(events: list[dict]) -> dict:
         if unique_tokens <= max(1, len(token_ids) // 3):
             reasons.append(f"Only {unique_tokens} distinct token(s) changed hands across {len(token_ids)} sales - repeatedly flipped, not organic spread")
 
-    return {"suspicious": bool(reasons), "reasons": reasons, "unique_buyers": len(buyers), "unique_sellers": len(sellers)}
+    return {
+        "suspicious": bool(reasons), "reasons": reasons, "unique_buyers": len(buyers), "unique_sellers": len(sellers),
+        # The buyer/seller counts above are only ever measured against
+        # THIS sample (capped at 50 events by _fetch_recent_sale_events),
+        # never against a collection's full-day sales count - a caller
+        # that wants to express diversity as a ratio has to divide by
+        # this, not by sales24h, or the ratio becomes impossible to clear
+        # for anything with more than ~100 sales/day (confirmed live:
+        # _detect_abnormal_turnover briefly did exactly that).
+        "sample_size": len(events),
+    }
 
 
 async def _detect_sweep(
@@ -3876,10 +3886,9 @@ def _detect_fake_offer(c: dict, top_offer_amount: float | None) -> str | None:
     return None
 
 
-_NFT_SCOPE_TURNOVER_CORROBORATION_MIN_BUYERS = 2  # floor - the real bar is the ratio below, this only guards tiny sale counts
-_NFT_SCOPE_TURNOVER_CORROBORATION_MIN_BUYER_RATIO = 0.5  # unique buyers must represent at least half the day's sales, not just clear a fixed head count
-_NFT_SCOPE_TURNOVER_HARD_CEILING = 0.5  # 50%+ of ENTIRE supply trading in 24h - no corroboration possible past this, regardless of buyer diversity
-_NFT_SCOPE_FLIPS_PER_OWNER_HARD_CEILING = 10  # double the already-elevated bar - no corroboration possible past this either
+_NFT_SCOPE_TURNOVER_CORROBORATION_MIN_BUYERS = 2  # floor - the real bar is the ratio below, this only guards tiny sample sizes
+_NFT_SCOPE_TURNOVER_CORROBORATION_MIN_BUYER_RATIO = 0.5  # unique buyers must represent at least half the SAMPLE, not just clear a fixed head count
+_NFT_SCOPE_TURNOVER_CORROBORATION_MIN_SELLER_RATIO = 0.5  # same bar on the seller side - a ring can look buyer-diverse while still cycling the same handful of sellers
 
 
 def _nft_scope_turnover_elevated(c: dict) -> bool:
@@ -3915,6 +3924,16 @@ def _detect_abnormal_turnover(c: dict, wash_analysis: dict | None = None) -> tup
     # silently vetoed - confirmed as the actual root cause of NFT Scope
     # missing genuine high-volume surges.
     #
+    # A flat absolute ceiling on the raw ratio was tried and reverted -
+    # confirmed live against "HoodBlockz," a genuinely organic mint that
+    # legitimately traded 139% of its entire supply in a day (30 unique
+    # buyers AND 29 unique sellers in a clean 50-event sample, zero self-
+    # trades) while its floor climbed for hours straight. There is no
+    # raw-ratio number that's simultaneously "impossible to fake" and
+    # "not also what a real hit mint looks like" - the actual tell is
+    # whether independent PEOPLE are on both sides of the trades, which
+    # is exactly what the diversity + structural checks below verify.
+    #
     # wash_analysis has to come from the SAME ~24h window sales24h itself
     # describes (see _nft_scope_wash_analysis) - a short rapid-activity
     # burst (as little as 5 sales in 30 min) proves nothing about a claim
@@ -3938,51 +3957,36 @@ def _detect_abnormal_turnover(c: dict, wash_analysis: dict | None = None) -> tup
     if not elevated:
         return None
 
-    # Confirmed live: 2+ distinct buyers was nowhere near enough of a bar.
-    # A collection with only 111 supply saw 65 sales in 24h (59% of its
-    # ENTIRE supply) reclassified as bullish on 31 "distinct" buyers -
-    # exactly the large-sybil-ring blind spot _analyze_wash_trading's own
-    # docstring already warned about (built to catch a small colluding
-    # ring, not a coordinated operation spreading trades across dozens of
-    # wallets that each only trade once or twice). Two hardenings:
-    #   1. An absolute ceiling past which NOTHING corroborates it away -
-    #      real collector communities do not turn over half their entire
-    #      supply in a single day, no matter how many distinct addresses
-    #      show up. A sufficiently resourced operation can always produce
-    #      "enough" distinct wallets to clear a fixed head-count bar.
-    #   2. Below that ceiling, the required buyer diversity now SCALES
-    #      with the sales count instead of a flat minimum - unique
-    #      buyers have to represent a real fraction of the day's sales,
-    #      not just clear a low fixed floor.
-    if turnover is not None and turnover >= _NFT_SCOPE_TURNOVER_HARD_CEILING:
-        return (
-            True,
-            f"{sales} sales against only {supply} total supply ({turnover:.0%} of the ENTIRE collection "
-            "changed hands in 24h) - no amount of buyer diversity makes this organic; this is beyond what "
-            "any real collector community does in a day"
-        )
-    if flips_per_owner is not None and flips_per_owner >= _NFT_SCOPE_FLIPS_PER_OWNER_HARD_CEILING:
-        return (
-            True,
-            f"{sales} sales across only {owners} current owners (~{flips_per_owner:.1f} flips per holder in "
-            "24h, well beyond the already-elevated bar) - no amount of buyer diversity makes this organic"
-        )
-
-    min_buyers_required = max(
-        _NFT_SCOPE_TURNOVER_CORROBORATION_MIN_BUYERS,
-        int(sales * _NFT_SCOPE_TURNOVER_CORROBORATION_MIN_BUYER_RATIO),
-    )
+    # Confirmed live: 2+ distinct buyers was nowhere near enough of a bar
+    # (a collection with only 111 supply saw 65 sales in 24h reclassified
+    # as bullish on 31 "distinct" buyers - the large-sybil-ring blind spot
+    # _analyze_wash_trading's own docstring already warned about, built to
+    # catch a small colluding ring, not a coordinated operation spreading
+    # trades across dozens of wallets that each only trade once or twice).
+    # Required diversity now scales with the SAMPLE SIZE (not the day's
+    # full sales count - confirmed live that comparing a >=50-capped
+    # sample's buyer count against sales24h in the thousands makes
+    # corroboration mathematically impossible for any high-volume mover,
+    # which is what actually blocked HoodBlockz above) and checks BOTH
+    # sides - a ring can pad buyer addresses while still recycling the
+    # same handful of sellers, or vice versa.
+    sample_size = wash_analysis.get("sample_size") if wash_analysis else None
+    min_buyers_required = max(_NFT_SCOPE_TURNOVER_CORROBORATION_MIN_BUYERS, int((sample_size or 0) * _NFT_SCOPE_TURNOVER_CORROBORATION_MIN_BUYER_RATIO))
+    min_sellers_required = max(_NFT_SCOPE_TURNOVER_CORROBORATION_MIN_BUYERS, int((sample_size or 0) * _NFT_SCOPE_TURNOVER_CORROBORATION_MIN_SELLER_RATIO))
     corroborated = (
         wash_analysis is not None
         and not wash_analysis.get("suspicious")
+        and bool(sample_size)
         and (wash_analysis.get("unique_buyers") or 0) >= min_buyers_required
+        and (wash_analysis.get("unique_sellers") or 0) >= min_sellers_required
     )
     detail = f"{sales} sales" + (f" against {supply} total supply ({turnover:.0%} turnover)" if turnover is not None else "")
     if corroborated:
         return (
             False,
             f"⚡ {detail} in 24h, verified wash-clean across {wash_analysis['unique_buyers']} distinct buyer(s) "
-            "over the same window - high turnover here is a real, broad-based sweep, not wash trading"
+            f"and {wash_analysis['unique_sellers']} distinct seller(s) in a same-window sample - high turnover "
+            "here is a real, broad-based sweep, not wash trading"
         )
     if turnover is not None and turnover >= 0.4:
         return (
@@ -3999,6 +4003,7 @@ def _detect_abnormal_turnover(c: dict, wash_analysis: dict | None = None) -> tup
 
 
 _NFT_SCOPE_BLUE_CHIP_OWNERS_THRESHOLD = 2500  # already-established collections everyone knows, not secondary-play alpha
+_NFT_SCOPE_BLUE_CHIP_MIN_AGE_DAYS = 150  # a raw owner count alone can't tell "famous for years" apart from "successful mint days ago"
 
 
 def _detect_blue_chip(c: dict) -> str | None:
@@ -4009,8 +4014,25 @@ def _detect_blue_chip(c: dict) -> str | None:
     # watching yet, not re-announcing CryptoPunks/BAYC/Pudgy Penguins
     # every time someone tracks them. A collection this broadly held
     # doesn't need an alpha call; it needs no introduction.
+    #
+    # BUT owner count alone can't distinguish that from a brand-new mint
+    # that simply sold out - a 4200-supply collection minting out clears
+    # 2,500+ owners within days by construction, not by being famous.
+    # Confirmed live: "Bulls Runners Genesis," 4 days old, 2,868 owners on
+    # 4,200 supply (68% distribution, real organic demand), silently
+    # blocked as an "already-established collection" before it had even
+    # had a week to exist. Age is what actually separates the two cases -
+    # required here the same way it already gates the lifetime-turnover
+    # check below. Unknown age does NOT default to blocking (unlike the
+    # turnover-ratio check) - a missing created_date is far more likely on
+    # an obscure/new listing than on an actual multi-year-famous
+    # collection, so treating it as "established" by default would
+    # recreate the exact failure mode this fix closes.
     owners = c.get("owners")
-    if owners and owners >= _NFT_SCOPE_BLUE_CHIP_OWNERS_THRESHOLD:
+    if not owners or owners < _NFT_SCOPE_BLUE_CHIP_OWNERS_THRESHOLD:
+        return None
+    age_days = _nft_scope_collection_age_days(c.get("createdDate"))
+    if age_days is not None and age_days >= _NFT_SCOPE_BLUE_CHIP_MIN_AGE_DAYS:
         return (
             f"{owners} owners - already an established, widely-held collection, not an emerging "
             "secondary play; NFT Scope is for what's still under the radar"

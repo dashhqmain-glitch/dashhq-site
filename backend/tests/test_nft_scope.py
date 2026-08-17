@@ -171,14 +171,14 @@ def test_turnover_stays_blocked_without_wash_analysis_even_at_extreme_ratio():
 
 def test_turnover_stays_blocked_even_with_wash_analysis_if_it_says_suspicious():
     c = {"totalSupply": 1267, "owners": 131, "sales24h": 1267}
-    dirty = {"suspicious": True, "unique_buyers": 40, "unique_sellers": 30}
+    dirty = {"suspicious": True, "unique_buyers": 40, "unique_sellers": 30, "sample_size": 50}
     result = main._detect_abnormal_turnover(c, wash_analysis=dirty)
     assert result is not None and result[0] is True
 
 
 def test_turnover_stays_blocked_if_corroborating_sample_has_too_few_distinct_buyers():
     c = {"totalSupply": 500, "owners": 50, "sales24h": 250}  # 50% turnover
-    thin = {"suspicious": False, "unique_buyers": 1, "unique_sellers": 20}
+    thin = {"suspicious": False, "unique_buyers": 1, "unique_sellers": 20, "sample_size": 50}
     result = main._detect_abnormal_turnover(c, wash_analysis=thin)
     assert result is not None and result[0] is True
 
@@ -186,17 +186,16 @@ def test_turnover_stays_blocked_if_corroborating_sample_has_too_few_distinct_buy
 def test_turnover_unblocked_and_reclassified_bullish_when_corroborated_clean():
     # A real, wash-clean sweep on a small-supply collection: elevated
     # turnover, same as the scam cases above, but backed by a same-window
-    # wash analysis with real buyer diversity and no suspicious patterns.
-    # This is the actual bug fix - this exact shape (high turnover +
-    # genuine broad buying) was being silently vetoed before, which is
-    # confirmed as a real cause of missed surges. Kept under the hard
-    # ceiling (_NFT_SCOPE_TURNOVER_HARD_CEILING) and with buyer diversity
-    # scaled to the sales count (_NFT_SCOPE_TURNOVER_CORROBORATION_MIN_BUYER_RATIO)
-    # - past either bar, nothing corroborates it away regardless of buyer
-    # count (see the hard-ceiling tests below), confirmed live against a
-    # 59%-of-supply-in-a-day sybil ring that cleared the old flat 2-buyer bar.
+    # wash analysis with real buyer AND seller diversity and no suspicious
+    # patterns. This is the actual bug fix - this exact shape (high
+    # turnover + genuine broad participation on both sides) was being
+    # silently vetoed before, which is confirmed as a real cause of missed
+    # surges. unique_buyers/unique_sellers can never exceed sample_size
+    # (the wash-analysis fetch is capped at 50 events) - these numbers
+    # mirror a real confirmed case (HoodBlockz: 30 buyers / 29 sellers in
+    # a clean 50-event sample, at 139% turnover on an 888-supply mint).
     c = {"totalSupply": 500, "owners": 50, "sales24h": 200}  # 40% turnover
-    clean = {"suspicious": False, "unique_buyers": 120, "unique_sellers": 150}
+    clean = {"suspicious": False, "unique_buyers": 30, "unique_sellers": 28, "sample_size": 50}
     result = main._detect_abnormal_turnover(c, wash_analysis=clean)
     assert result is not None
     blocked, reason = result
@@ -204,29 +203,71 @@ def test_turnover_unblocked_and_reclassified_bullish_when_corroborated_clean():
     assert "real, broad-based sweep" in reason
 
 
-def test_turnover_hard_ceiling_blocks_even_with_massive_buyer_diversity():
-    # Confirmed live: a 111-supply collection saw 65 sales in 24h (59% of
-    # its ENTIRE supply) reclassified as bullish because 31 "distinct"
-    # buyers cleared the old flat floor of 2. No amount of buyer diversity
-    # should corroborate away turnover this extreme - a sufficiently
-    # resourced sybil operation can always produce "enough" distinct
-    # wallets to clear a fixed head-count bar, so past this point the bar
-    # has to stop being about buyer count entirely.
+def test_turnover_extreme_ratio_still_reclassified_bullish_when_genuinely_diverse():
+    # Confirmed live: a flat ratio ceiling (block anything past 50%
+    # turnover, no matter what) was tried and reverted after it silently
+    # blocked "HoodBlockz," a real, organic mint that legitimately traded
+    # 139% of its entire supply in a day with clean, broad participation
+    # on both sides (30 buyers / 29 sellers, zero self-trades, in a
+    # 50-event sample) while its floor climbed for hours straight. There
+    # is no raw-ratio number that's both "impossible to fake" and "not
+    # also what a real hit mint looks like" - genuine buyer+seller
+    # diversity is the actual tell, at any ratio.
     c = {"totalSupply": 111, "owners": 40, "sales24h": 65}  # 59% turnover
-    clean = {"suspicious": False, "unique_buyers": 31, "unique_sellers": 35}
+    clean = {"suspicious": False, "unique_buyers": 30, "unique_sellers": 29, "sample_size": 50}
     result = main._detect_abnormal_turnover(c, wash_analysis=clean)
+    assert result is not None
+    blocked, reason = result
+    assert blocked is False
+
+
+def test_turnover_stays_blocked_when_buyer_diversity_is_thin_relative_to_the_sample():
+    # The unique-buyer count is a small fraction of the SAMPLE (not the
+    # day's full sales count - see test_turnover_ratio_denominator_uses_
+    # sample_size_not_full_day_sales below for why that distinction is
+    # the actual bug this replaced) - not enough to call it broad-based
+    # even though it clears the old flat floor of 2.
+    c = {"totalSupply": 1000, "owners": 200, "sales24h": 400}  # 40% turnover
+    thin = {"suspicious": False, "unique_buyers": 5, "unique_sellers": 40, "sample_size": 50}  # only 10% of the sample
+    result = main._detect_abnormal_turnover(c, wash_analysis=thin)
     assert result is not None
     blocked, reason = result
     assert blocked is True
 
 
-def test_turnover_stays_blocked_when_buyer_diversity_is_thin_relative_to_sales():
-    # Below the hard ceiling but the unique-buyer count is a small
-    # fraction of the day's sales - not enough to call it broad-based
-    # even though it clears the old flat floor of 2.
+def test_turnover_stays_blocked_when_seller_diversity_is_thin_even_if_buyers_look_diverse():
+    # A ring can pad buyer addresses while still recycling the same
+    # handful of sellers (or the reverse) - the diversity bar has to hold
+    # on BOTH sides, not just whichever one happens to look clean.
     c = {"totalSupply": 1000, "owners": 200, "sales24h": 400}  # 40% turnover
-    thin = {"suspicious": False, "unique_buyers": 20, "unique_sellers": 40}  # only 5% of sales
-    result = main._detect_abnormal_turnover(c, wash_analysis=thin)
+    thin_sellers = {"suspicious": False, "unique_buyers": 40, "unique_sellers": 4, "sample_size": 50}
+    result = main._detect_abnormal_turnover(c, wash_analysis=thin_sellers)
+    assert result is not None
+    blocked, reason = result
+    assert blocked is True
+
+
+def test_turnover_ratio_denominator_uses_sample_size_not_full_day_sales():
+    # The actual bug that blocked HoodBlockz: comparing a sample capped at
+    # 50 events against sales24h in the thousands makes corroboration
+    # mathematically impossible no matter how diverse the real sample is.
+    # 30/29 buyers/sellers in a 50-sample is genuinely diverse (60%/58%)
+    # even though it's a tiny fraction of 1233 full-day sales.
+    c = {"totalSupply": 888, "owners": 227, "sales24h": 1233}  # 139% turnover
+    clean = {"suspicious": False, "unique_buyers": 30, "unique_sellers": 29, "sample_size": 50}
+    result = main._detect_abnormal_turnover(c, wash_analysis=clean)
+    assert result is not None
+    blocked, reason = result
+    assert blocked is False
+
+
+def test_turnover_corroboration_requires_a_nonzero_sample_size():
+    # wash_analysis provided but with no sample_size (an older/malformed
+    # shape) must not corroborate anything - missing evidence stays
+    # conservative, it never defaults to "assume clean."
+    c = {"totalSupply": 500, "owners": 50, "sales24h": 200}
+    malformed = {"suspicious": False, "unique_buyers": 30, "unique_sellers": 28}
+    result = main._detect_abnormal_turnover(c, wash_analysis=malformed)
     assert result is not None
     blocked, reason = result
     assert blocked is True
@@ -234,21 +275,47 @@ def test_turnover_stays_blocked_when_buyer_diversity_is_thin_relative_to_sales()
 
 # ── _detect_blue_chip (NFT Scope is for secondary plays, not majors) ────
 
+_OLD_CREATED_DATE = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
+_RECENT_CREATED_DATE = (datetime.now(timezone.utc) - timedelta(days=4)).isoformat()
+
+
 def test_blue_chip_blocks_established_majors():
-    # Real owner counts in the ballpark of CryptoPunks/BAYC/Pudgy Penguins.
+    # Real owner counts in the ballpark of CryptoPunks/BAYC/Pudgy Penguins,
+    # on a collection old enough to actually be one.
     for owners in (3700, 6400, 5000):
-        c = {"owners": owners, "totalSupply": 10000}
+        c = {"owners": owners, "totalSupply": 10000, "createdDate": _OLD_CREATED_DATE}
         assert main._detect_blue_chip(c) is not None
 
 
 def test_blue_chip_does_not_flag_small_emerging_projects():
-    c = {"owners": 80, "totalSupply": 500}
+    c = {"owners": 80, "totalSupply": 500, "createdDate": _OLD_CREATED_DATE}
     assert main._detect_blue_chip(c) is None
 
 
 def test_blue_chip_threshold_boundary():
-    assert main._detect_blue_chip({"owners": main._NFT_SCOPE_BLUE_CHIP_OWNERS_THRESHOLD - 1}) is None
-    assert main._detect_blue_chip({"owners": main._NFT_SCOPE_BLUE_CHIP_OWNERS_THRESHOLD}) is not None
+    below = main._NFT_SCOPE_BLUE_CHIP_OWNERS_THRESHOLD - 1
+    at = main._NFT_SCOPE_BLUE_CHIP_OWNERS_THRESHOLD
+    assert main._detect_blue_chip({"owners": below, "createdDate": _OLD_CREATED_DATE}) is None
+    assert main._detect_blue_chip({"owners": at, "createdDate": _OLD_CREATED_DATE}) is not None
+
+
+def test_blue_chip_does_not_flag_a_recently_minted_collection_that_sold_out():
+    # Confirmed live: "Bulls Runners Genesis," 4 days old, 2,868 owners on
+    # 4,200 supply (68% distribution) - a large-supply mint clears the raw
+    # owner-count bar within days by construction, not by being famous.
+    # Age is what actually separates "sold out fast" from "established for
+    # years," so a young collection must not block here no matter how many
+    # owners a successful mint attracted.
+    c = {"owners": 2868, "totalSupply": 4200, "createdDate": _RECENT_CREATED_DATE}
+    assert main._detect_blue_chip(c) is None
+
+
+def test_blue_chip_does_not_flag_unknown_age_by_default():
+    # Missing created_date must NOT default to "assume established" - that
+    # would recreate the same failure mode for any obscure/new listing
+    # OpenSea hasn't backfilled a creation date for yet.
+    c = {"owners": 5000, "totalSupply": 10000}
+    assert main._detect_blue_chip(c) is None
 
 
 def test_blue_chip_handles_missing_data():
@@ -262,7 +329,7 @@ def test_score_blocks_blue_chip_even_with_perfect_soft_signals():
     # highest-scoring thing NFT Scope ever sees. The gate has to be a
     # hard block, not a deduction, or this is exactly the collection
     # that keeps winning every slot.
-    bayc_shaped = strong_collection(owners=6400, totalSupply=10000, sales24h=40, vol1d=50, floor=8.0)
+    bayc_shaped = strong_collection(owners=6400, totalSupply=10000, sales24h=40, vol1d=50, floor=8.0, createdDate=_OLD_CREATED_DATE)
     score = main._nft_scope_score(bayc_shaped, 8.5)
     assert score["blocked"] is True
     assert not main._nft_scope_worth_posting(score)
