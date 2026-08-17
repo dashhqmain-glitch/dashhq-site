@@ -261,6 +261,21 @@ def test_turnover_ratio_denominator_uses_sample_size_not_full_day_sales():
     assert blocked is False
 
 
+def test_turnover_ratio_tolerates_natural_sample_fluctuation_on_a_real_mover():
+    # Confirmed live: re-checking the SAME real, legitimate mover
+    # (HoodBlockz) minutes apart returned 30/50 buyers one time and 22/50
+    # the next - nothing about the collection changed, just which 50
+    # events the API happened to return. A 0.5 ratio bar made that a coin
+    # flip; 0.35 keeps both real observed samples on the "corroborated"
+    # side without needing the diversity to be pinned above half.
+    c = {"totalSupply": 888, "owners": 227, "sales24h": 1272}  # 143% turnover
+    thinner_sample = {"suspicious": False, "unique_buyers": 22, "unique_sellers": 29, "sample_size": 50}
+    result = main._detect_abnormal_turnover(c, wash_analysis=thinner_sample)
+    assert result is not None
+    blocked, reason = result
+    assert blocked is False
+
+
 def test_turnover_corroboration_requires_a_nonzero_sample_size():
     # wash_analysis provided but with no sample_size (an older/malformed
     # shape) must not corroborate anything - missing evidence stays

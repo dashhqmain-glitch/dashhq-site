@@ -3887,8 +3887,8 @@ def _detect_fake_offer(c: dict, top_offer_amount: float | None) -> str | None:
 
 
 _NFT_SCOPE_TURNOVER_CORROBORATION_MIN_BUYERS = 2  # floor - the real bar is the ratio below, this only guards tiny sample sizes
-_NFT_SCOPE_TURNOVER_CORROBORATION_MIN_BUYER_RATIO = 0.5  # unique buyers must represent at least half the SAMPLE, not just clear a fixed head count
-_NFT_SCOPE_TURNOVER_CORROBORATION_MIN_SELLER_RATIO = 0.5  # same bar on the seller side - a ring can look buyer-diverse while still cycling the same handful of sellers
+_NFT_SCOPE_TURNOVER_CORROBORATION_MIN_BUYER_RATIO = 0.35  # unique buyers must represent a real share of the SAMPLE, not just clear a fixed head count
+_NFT_SCOPE_TURNOVER_CORROBORATION_MIN_SELLER_RATIO = 0.35  # same bar on the seller side - a ring can look buyer-diverse while still cycling the same handful of sellers
 
 
 def _nft_scope_turnover_elevated(c: dict) -> bool:
@@ -3970,6 +3970,18 @@ def _detect_abnormal_turnover(c: dict, wash_analysis: dict | None = None) -> tup
     # which is what actually blocked HoodBlockz above) and checks BOTH
     # sides - a ring can pad buyer addresses while still recycling the
     # same handful of sellers, or vice versa.
+    #
+    # Ratio set to 0.35, not 0.5 - confirmed live watching the SAME real
+    # mover (HoodBlockz) cross both sides of a 0.5 bar minutes apart on
+    # nothing but which 50 events the sample happened to land on (30/50
+    # buyers one check, 22/50 the next) - a genuine mover shouldn't be a
+    # coin flip depending on API pagination timing. This isn't a real
+    # loss of protection: the original false positive this whole check
+    # exists for (a 111-supply ring) already cleared even a 0.5 bar on
+    # raw buyer count alone (31/65, or ~62% against a capped sample) - the
+    # ratio was never what actually stops a resourced ring, the
+    # wash_analysis.suspicious structural checks above are (self-trades,
+    # reciprocal pairs, closed clusters, token concentration).
     sample_size = wash_analysis.get("sample_size") if wash_analysis else None
     min_buyers_required = max(_NFT_SCOPE_TURNOVER_CORROBORATION_MIN_BUYERS, int((sample_size or 0) * _NFT_SCOPE_TURNOVER_CORROBORATION_MIN_BUYER_RATIO))
     min_sellers_required = max(_NFT_SCOPE_TURNOVER_CORROBORATION_MIN_BUYERS, int((sample_size or 0) * _NFT_SCOPE_TURNOVER_CORROBORATION_MIN_SELLER_RATIO))
