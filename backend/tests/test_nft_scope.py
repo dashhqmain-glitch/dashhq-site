@@ -10,6 +10,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
+import pytest
+
 import main
 
 
@@ -437,6 +439,51 @@ def test_declining_price_trend_handles_missing_data():
     assert main._detect_declining_price_trend({"vol30d": None, "sales30d": None}) is None
 
 
+# ── _detect_negligible_dollar_value - real false positive: a +1053% ─────
+# 1-day floor move scored 95/100 while the collection was worth an
+# average of ~$0.03/sale over its whole 8,321-sale history (confirmed
+# live: "ROBINHOOD PIXEL WASTE" - floor $0.86, 24h volume $249.93,
+# TOTAL lifetime volume $271.10). Every other gate here is ratio-based
+# and every one of them can look healthy on a near-worthless base.
+
+def test_negligible_dollar_value_blocks_a_structurally_worthless_collection():
+    # 8321 sales, 0.1431 ETH lifetime volume, ~$1900/ETH -> ~$0.033/sale.
+    c = {"salesTotal": 8321, "volTotal": 0.1431, "listingUsdRate": 1900.0}
+    assert main._detect_negligible_dollar_value(c) is not None
+
+
+def test_negligible_dollar_value_allows_a_real_cheap_collection():
+    # Same rough per-token ETH price range as plenty of legitimate cheap
+    # mints this session (HoodBlockz, Bulls Runners Genesis) - real
+    # dollar value per sale, just not a high absolute floor.
+    c = {"salesTotal": 1278, "volTotal": 17.5, "listingUsdRate": 1900.0}
+    assert main._detect_negligible_dollar_value(c) is None
+
+
+def test_negligible_dollar_value_requires_a_real_sample():
+    # 2 sales isn't enough to trust an average either way.
+    c = {"salesTotal": 2, "volTotal": 0.0001, "listingUsdRate": 1900.0}
+    assert main._detect_negligible_dollar_value(c) is None
+
+
+def test_negligible_dollar_value_handles_missing_data():
+    assert main._detect_negligible_dollar_value({}) is None
+    assert main._detect_negligible_dollar_value({"salesTotal": None, "volTotal": None}) is None
+    assert main._detect_negligible_dollar_value({"salesTotal": 100, "volTotal": 5.0, "listingUsdRate": None}) is None
+
+
+def test_score_blocks_negligible_dollar_value_even_with_a_huge_percent_move():
+    c = strong_collection(
+        owners=1487, totalSupply=7777, salesTotal=8321, sales24h=380, vol1d=0.132,
+        floor=0.00045, listingUsdRate=1900.0, volTotal=0.1431,
+    )
+    burst = {"count": 5, "unique_buyers": 5, "unique_sellers": 5, "window_minutes": 30}
+    score = main._nft_scope_score(c, None, rapid_activity=burst)
+    assert score["blocked"] is True
+    assert not main._nft_scope_worth_posting(score)
+    assert any("worthless in real dollar terms" in f for f in score["red_flags"])
+
+
 def test_score_blocks_declining_price_trend_even_with_a_live_burst():
     # The real false positive, reproduced end to end: a live rapid-
     # activity burst with a price surge inside it should not be enough
@@ -762,9 +809,9 @@ def test_embed_surfaces_chain_age_category_and_full_reason_list():
 
 def test_embed_stays_within_discord_description_limit_even_with_every_signal_firing():
     # Removing the old top-5 cap on reasons means a maximal case (every
-    # signal firing at once, plus red flags, plus a long description)
-    # needs to be checked against Discord's real 4096-char description
-    # cap instead of just trusted to fit.
+    # signal firing at once, plus red flags, plus a long description, plus
+    # the estimated-target and links sections) needs to be checked against
+    # Discord's real 4096-char description cap instead of just trusted to fit.
     c = strong_collection(
         name="Kitchen Sink", chain="ethereum", category="art", verified=True,
         description="B" * 280, twitter="x", discord="d", website="w",
@@ -774,8 +821,100 @@ def test_embed_stays_within_discord_description_limit_even_with_every_signal_fir
     sharp = {"count": 8, "unique_buyers": 6, "unique_sellers": 5, "window_minutes": 30,
              "price_surge_pct": 40.0, "is_sharp": True, "sharp_count": 4, "sharp_window_minutes": 5}
     score = main._nft_scope_score(c, 0.08, history=history, rapid_activity=sharp)
-    embed = main._nft_scope_embed(c, score, 0.08, "momentum", rapid_activity=sharp)
+    target = {"sample_size": 42, "low": 0.05, "mid": 0.15, "high": 0.45}
+    embed = main._nft_scope_embed(c, score, 0.08, "momentum", rapid_activity=sharp, estimated_target=target)
     assert len(embed["description"]) <= 4096
+
+
+# ── Estimated Target (NFA) - grounded in this bot's own resolved calls, ─
+# never a per-project guess. Only ever shown when a real sample of past
+# proved-out calls exists (_nft_scope_estimated_target enforces the
+# minimum sample size before returning anything at all).
+
+def test_embed_shows_estimated_target_range_when_provided():
+    c = strong_collection(floor=0.1, symbol="ETH")
+    score = main._nft_scope_score(c, None)
+    target = {"sample_size": 12, "low": 0.2, "mid": 0.5, "high": 1.1}
+    embed = main._nft_scope_embed(c, score, None, "trending", estimated_target=target)
+    assert "Estimated Target (NFA)" in embed["description"]
+    assert "0.2000" in embed["description"] and "1.1000" in embed["description"]
+    assert "12" in embed["description"]
+    assert "Not a prediction for THIS project" in embed["description"]
+
+
+def test_embed_omits_estimated_target_section_when_not_provided():
+    c = strong_collection()
+    score = main._nft_scope_score(c, None)
+    embed = main._nft_scope_embed(c, score, None, "trending", estimated_target=None)
+    assert "Estimated Target" not in embed["description"]
+
+
+def test_embed_shows_clickable_links_when_socials_present():
+    c = strong_collection(twitter="mycollection", discord="https://discord.gg/x", website="https://example.com")
+    score = main._nft_scope_score(c, None)
+    embed = main._nft_scope_embed(c, score, None, "trending")
+    assert "[Twitter/X](https://x.com/mycollection)" in embed["description"]
+    assert "[Discord](https://discord.gg/x)" in embed["description"]
+    assert "[Website](https://example.com)" in embed["description"]
+
+
+def test_embed_omits_links_line_when_no_socials():
+    c = strong_collection(twitter=None, discord=None, website=None)
+    score = main._nft_scope_score(c, None)
+    embed = main._nft_scope_embed(c, score, None, "trending")
+    assert "**Links**" not in embed["description"]
+
+
+def test_embed_shows_total_volume_field_when_available():
+    c = strong_collection(volTotal=123.456)
+    score = main._nft_scope_score(c, None)
+    embed = main._nft_scope_embed(c, score, None, "trending")
+    field_map = {f["name"]: f["value"] for f in embed["fields"]}
+    assert "123.46" in field_map["Total Volume"]
+
+
+async def test_estimated_target_requires_minimum_sample_size():
+    class FakeRes:
+        def json(self):
+            return [{"sample_size": 3, "p25_multiple": 1.5, "median_multiple": 2.0, "p75_multiple": 3.0}]
+
+        def raise_for_status(self):
+            pass
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes()
+
+    assert await main._nft_scope_estimated_target(FakeClient(), 0.1) is None
+
+
+async def test_estimated_target_computes_range_from_real_multiples():
+    class FakeRes:
+        def json(self):
+            return [{"sample_size": 20, "p25_multiple": 1.5, "median_multiple": 3.0, "p75_multiple": 6.0}]
+
+        def raise_for_status(self):
+            pass
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            assert "nft_scope_proved_multiple_stats" in url
+            return FakeRes()
+
+    result = await main._nft_scope_estimated_target(FakeClient(), 0.1)
+    assert result["sample_size"] == 20
+    assert result["low"] == pytest.approx(0.15)
+    assert result["mid"] == pytest.approx(0.30)
+    assert result["high"] == pytest.approx(0.60)
+
+
+async def test_estimated_target_handles_missing_floor_or_query_failure():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            raise main.httpx.HTTPError("boom")
+
+    assert await main._nft_scope_estimated_target(FakeClient(), None) is None
+    assert await main._nft_scope_estimated_target(FakeClient(), 0.1) is None
 
 
 # ── rapid activity: price-surge-within-the-burst extension ─────────────

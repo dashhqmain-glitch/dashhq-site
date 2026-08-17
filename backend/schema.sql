@@ -237,6 +237,22 @@ create table if not exists nft_scope_proved_slugs (
 
 alter table nft_scope_proved_slugs enable row level security;
 
+-- Powers the embed's "Estimated Target" field: the only honest basis for
+-- a forward-looking price estimate is this bot's own resolved track
+-- record, not a guess - the spread (p25/median/p75) is shown as a RANGE,
+-- deliberately not a single number, so it reads as "here's the historical
+-- spread of outcomes," not a promise. _nft_scope_estimated_target in
+-- main.py additionally requires a minimum sample size before showing
+-- anything at all - a handful of proved slugs isn't a distribution.
+create or replace view nft_scope_proved_multiple_stats
+  with (security_invoker = true) as
+select
+  count(*) as sample_size,
+  percentile_cont(0.25) within group (order by multiple) as p25_multiple,
+  percentile_cont(0.5) within group (order by multiple) as median_multiple,
+  percentile_cont(0.75) within group (order by multiple) as p75_multiple
+from nft_scope_proved_slugs;
+
 -- Wallet win-rate view, not a table anyone writes to directly - a
 -- wallet's smart-money credibility has to be its resolved TRACK RECORD
 -- across every call it's been part of, not a single lucky hit and

@@ -4097,6 +4097,37 @@ def _detect_already_traded_out(c: dict) -> str | None:
     return None
 
 
+_NFT_SCOPE_NEGLIGIBLE_AVG_PRICE_USD = 1.0  # below this, the collection is structurally worthless in real dollar terms
+_NFT_SCOPE_NEGLIGIBLE_MIN_SALES_SAMPLE = 5  # a 1-2 sale average is noise, not evidence either way
+
+
+def _detect_negligible_dollar_value(c: dict) -> str | None:
+    # Confirmed live: "ROBINHOOD PIXEL WASTE" scored 95/100 on a +1053%
+    # 1-day floor move - a real number, but entirely a percentage illusion
+    # on a near-zero base. Floor $0.86, 24h volume $249.93, TOTAL lifetime
+    # volume $271.10 across 8,321 sales - an average of roughly $0.03 per
+    # sale over its whole history. Every gate elsewhere here is ratio-
+    # based (turnover %, owner/supply %, price-change %) and every one of
+    # them can look perfectly healthy on a collection that's worth
+    # fractions of a cent per trade - none of them look at absolute
+    # dollar scale at all. This does, using the collection's own live USD
+    # rate (single-collection-scoped, not summed across currencies, so
+    # none of the cross-chain mixing risk that applies to wallet-level
+    # volume aggregation applies here).
+    sales_total = c.get("salesTotal")
+    vol_total = c.get("volTotal")
+    usd_rate = c.get("listingUsdRate")
+    if not sales_total or sales_total < _NFT_SCOPE_NEGLIGIBLE_MIN_SALES_SAMPLE or not vol_total or not usd_rate:
+        return None
+    avg_price_usd = (vol_total / sales_total) * usd_rate
+    if avg_price_usd < _NFT_SCOPE_NEGLIGIBLE_AVG_PRICE_USD:
+        return (
+            f"Average sale price across {sales_total:,} lifetime sales is only ~${avg_price_usd:.3f} - "
+            "structurally worthless in real dollar terms no matter how strong the percentage moves look"
+        )
+    return None
+
+
 _NFT_SCOPE_DECLINE_MIN_30D_SALES = 5  # below this, a 30-day average price is one or two data points, not a trend
 _NFT_SCOPE_DECLINE_1D_RATIO = 0.5  # today's average sale price is less than half the 30-day average
 _NFT_SCOPE_DECLINE_7D_RATIO = 0.8  # the 7-day window is already trending down too - not just one off day
@@ -4479,24 +4510,33 @@ def _nft_scope_score(
     if declining_trend_reason:
         red_flags.append(declining_trend_reason)
 
+    negligible_value_reason = _detect_negligible_dollar_value(c)
+    if negligible_value_reason:
+        red_flags.append(negligible_value_reason)
+
     # A detected fake offer, an abnormal supply/owner turnover, an
     # already-established blue chip, a collection that's already been
-    # extensively traded over its whole life, or one whose real sale
-    # prices are on a sustained multi-window decline is a hard stop, not
-    # a minor deduction - never recommend regardless of how high the rest
-    # of the score is (the first two can otherwise produce a HIGH score,
-    # since "lots of sales" and "many owners" are exactly what those
-    # numbers look like from the outside; the third and fourth would
-    # score highest of all, since an established/well-worn collection
+    # extensively traded over its whole life, one whose real sale prices
+    # are on a sustained multi-window decline, or one that's structurally
+    # worthless in real dollar terms is a hard stop, not a minor
+    # deduction - never recommend regardless of how high the rest of the
+    # score is (the first two can otherwise produce a HIGH score, since
+    # "lots of sales" and "many owners" are exactly what those numbers
+    # look like from the outside; the third and fourth would score
+    # highest of all, since an established/well-worn collection
     # legitimately aces every soft signal without being early in any
     # sense - confirmed live: low owner count let a heavily-traded
     # collection through the blue-chip check alone; the fifth confirmed
     # live: a cheap-sale burst climbing 286% within its own tiny window
     # scored 95/100 while the collection's real prices had been sliding
-    # for a month).
+    # for a month; the sixth confirmed live: a +1053% 1-day floor move
+    # scored 95/100 on a collection worth an average of ~$0.03/sale -
+    # every OTHER check here is ratio-based and every one of them can
+    # look healthy on a near-worthless base).
     blocked = (
         fake_offer_reason is not None or turnover_blocks or blue_chip_reason is not None
         or traded_out_reason is not None or declining_trend_reason is not None
+        or negligible_value_reason is not None
     )
 
     # A description, social links, a category, even a listed floor price
@@ -4648,7 +4688,10 @@ def _nft_scope_analyst_take(c: dict, score: dict, rapid_activity: dict | None, k
     return f"{name}{chain_clause} cleared every screening gate here on real, independently verified on-chain activity."
 
 
-def _nft_scope_embed(c: dict, score: dict, top_offer_amount: float | None, kind: str, rapid_activity: dict | None = None) -> dict:
+def _nft_scope_embed(
+    c: dict, score: dict, top_offer_amount: float | None, kind: str, rapid_activity: dict | None = None,
+    estimated_target: dict | None = None,
+) -> dict:
     symbol = c.get("symbol") or "ETH"
     title_prefix = {
         "fresh": "🧭 NFT Scope · New Mint",
@@ -4672,6 +4715,28 @@ def _nft_scope_embed(c: dict, score: dict, top_offer_amount: float | None, kind:
         lines.append("")
         lines.append("**In the project's own words**")
         lines.append(description_text[:280] + ("…" if len(description_text) > 280 else ""))
+    if estimated_target:
+        lines.append("")
+        lines.append("**Estimated Target (NFA)**")
+        lines.append(
+            f"~{estimated_target['low']:.4f} - {estimated_target['high']:.4f} {symbol} "
+            f"(median ~{estimated_target['mid']:.4f} {symbol}), buying at today's floor"
+        )
+        lines.append(
+            f"*Not a prediction for THIS project specifically - the spread of where NFT Scope's own past "
+            f"{estimated_target['sample_size']} proved-out calls actually landed, applied to today's floor. "
+            "Most calls never reach these levels. NFA.*"
+        )
+    links = ", ".join(
+        f"[{label}]({url})" for label, url in (
+            ("Twitter/X", f"https://x.com/{c['twitter']}" if c.get("twitter") else None),
+            ("Discord", c.get("discord")),
+            ("Website", c.get("website")),
+        ) if url
+    )
+    if links:
+        lines.append("")
+        lines.append(f"**Links**  {links}")
     lines.append("")
     lines.append("*Heuristic read from public OpenSea/on-chain data - not financial advice. DYOR before any trade. NFA.*")
 
@@ -4696,6 +4761,8 @@ def _nft_scope_embed(c: dict, score: dict, top_offer_amount: float | None, kind:
     # whether to look closer, so it gets equal billing with Floor/Top Offer.
     if score.get("floor_multiple"):
         fields.append({"name": "Since First Seen", "value": f"🚀 {score['floor_multiple']:.1f}x", "inline": True})
+    if c.get("volTotal") is not None:
+        fields.append({"name": "Total Volume", "value": f"{c['volTotal']:.2f} {symbol}", "inline": True})
     return {
         "title": f"{title_prefix} — {c['name']}",
         "url": c.get("openseaUrl"),
@@ -4880,6 +4947,49 @@ async def _nft_scope_mark_slug_proved(client: httpx.AsyncClient, slug: str, mult
         )
     except httpx.HTTPError:
         logger.exception("Failed to mark %s as a proved slug", slug)
+
+
+_NFT_SCOPE_TARGET_MIN_SAMPLE = 8  # below this, a percentile spread is just noise from a handful of points, not a real distribution
+
+
+async def _nft_scope_estimated_target(client: httpx.AsyncClient, floor: float | None) -> dict | None:
+    # The only honest basis for a forward-looking price estimate is this
+    # bot's own resolved track record - never a guess, never extrapolated
+    # from this ONE collection's own thin history. Pulls the p25/median/p75
+    # of the multiple past NFT Scope calls actually reached once they
+    # proved out (nft_scope_proved_slugs), and applies that spread to
+    # THIS call's current floor. Deliberately a RANGE, not a single
+    # number - a point estimate reads as a promise, a spread reads as
+    # "here's how past winners actually varied." Requires a real minimum
+    # sample before showing anything at all; returns None rather than a
+    # number built on noise.
+    if not floor or floor <= 0:
+        return None
+    try:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/nft_scope_proved_multiple_stats",
+            headers=_supabase_headers(),
+            params={"select": "sample_size,p25_multiple,median_multiple,p75_multiple"},
+        )
+        res.raise_for_status()
+        rows = res.json()
+        if not rows:
+            return None
+        row = rows[0]
+        sample_size = row.get("sample_size") or 0
+        if sample_size < _NFT_SCOPE_TARGET_MIN_SAMPLE:
+            return None
+        p25, median, p75 = row.get("p25_multiple"), row.get("median_multiple"), row.get("p75_multiple")
+        if p25 is None or median is None or p75 is None:
+            return None
+        return {
+            "sample_size": sample_size,
+            "low": floor * float(p25),
+            "mid": floor * float(median),
+            "high": floor * float(p75),
+        }
+    except (httpx.HTTPError, TypeError, ValueError, KeyError):
+        return None
 
 
 async def _nft_scope_call_buyer_track_records(client: httpx.AsyncClient, in_filter: str) -> dict[str, dict]:
@@ -5292,7 +5402,8 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
                     and not await _nft_scope_recently_posted(client, slug)
                     and await _nft_scope_clears_wash_check(client, slug)
                 ):
-                    delivered = await _post_channel_message(client, settings.discord_nft_scope_channel_id, _nft_scope_embed(c, score, top_offer_amount, "fresh", rapid_activity=rapid_activity))
+                    estimated_target = await _nft_scope_estimated_target(client, c.get("floor"))
+                    delivered = await _post_channel_message(client, settings.discord_nft_scope_channel_id, _nft_scope_embed(c, score, top_offer_amount, "fresh", rapid_activity=rapid_activity, estimated_target=estimated_target))
                     if delivered:
                         fresh_posted.append(slug)
                         await _nft_scope_mark_posted(client, slug, c.get("floor") or 0)
@@ -5457,7 +5568,8 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
             if score.get("floor_multiple") and score["floor_multiple"] >= _NFT_SCOPE_PROVED_MULTIPLE_THRESHOLD:
                 await _nft_scope_mark_slug_proved(client, slug, score["floor_multiple"])
             if _nft_scope_worth_posting(score) and await _nft_scope_clears_wash_check(client, slug):
-                delivered = await _post_channel_message(client, settings.discord_nft_scope_channel_id, _nft_scope_embed(c, score, top_offer_amount, "trending", rapid_activity=rapid_activity))
+                estimated_target = await _nft_scope_estimated_target(client, c.get("floor"))
+                delivered = await _post_channel_message(client, settings.discord_nft_scope_channel_id, _nft_scope_embed(c, score, top_offer_amount, "trending", rapid_activity=rapid_activity, estimated_target=estimated_target))
                 if delivered:
                     trending_posted.append(slug)
                     await _nft_alert_state_set(client, slug, "nft_scope_trending_post", c.get("floor") or 0)
@@ -5534,7 +5646,8 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
             if score.get("floor_multiple") and score["floor_multiple"] >= _NFT_SCOPE_PROVED_MULTIPLE_THRESHOLD:
                 await _nft_scope_mark_slug_proved(client, slug, score["floor_multiple"])
             if _nft_scope_worth_posting(score) and await _nft_scope_clears_wash_check(client, slug):
-                delivered = await _post_channel_message(client, settings.discord_nft_scope_channel_id, _nft_scope_embed(c, score, top_offer_amount, "momentum", rapid_activity=rapid_activity))
+                estimated_target = await _nft_scope_estimated_target(client, c.get("floor"))
+                delivered = await _post_channel_message(client, settings.discord_nft_scope_channel_id, _nft_scope_embed(c, score, top_offer_amount, "momentum", rapid_activity=rapid_activity, estimated_target=estimated_target))
                 if delivered:
                     await _nft_alert_state_set(client, slug, "nft_scope_momentum", c.get("floor") or 0)
                     await _nft_scope_mark_posted(client, slug, c.get("floor") or 0)
@@ -5605,7 +5718,8 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
                     "accumulation" in r.lower() or "jumped" in r.lower() for r in score["reasons"]
                 )
                 if has_recent_movement and _nft_scope_worth_posting(score) and await _nft_scope_clears_wash_check(client, slug):
-                    delivered = await _post_channel_message(client, settings.discord_nft_scope_channel_id, _nft_scope_embed(c, score, top_offer_amount, "holdings", rapid_activity=rapid_activity))
+                    estimated_target = await _nft_scope_estimated_target(client, c.get("floor"))
+                    delivered = await _post_channel_message(client, settings.discord_nft_scope_channel_id, _nft_scope_embed(c, score, top_offer_amount, "holdings", rapid_activity=rapid_activity, estimated_target=estimated_target))
                     if delivered:
                         holdings_posted.append(slug)
                         await _nft_scope_mark_posted(client, slug, c.get("floor") or 0)
