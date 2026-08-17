@@ -6,6 +6,19 @@ name: Backend CI
 # as what gets shipped isn't broken). Catches a bug before it's live,
 # instead of finding out from a broken Discord command.
 #
+# Deployment is explicitly triggered by THIS workflow (see trigger-deploy
+# below), not left to Vercel's native GitHub App integration - confirmed
+# live that the native integration can silently stop firing on push
+# (project shows as "connected" the whole time, deploys just don't
+# happen) with no error anywhere, and post-deploy-check used to only
+# verify /health returned 200, which stayed true from a stale build the
+# entire time. A Vercel Deploy Hook (VERCEL_DEPLOY_HOOK_URL, narrowly
+# scoped to only trigger a build on the master branch - not a full
+# account-level API token) is what actually starts the build now;
+# post-deploy-check then polls until /health's echoed commit SHA proves
+# THIS specific commit is what's actually live, not just that something
+# answered.
+#
 # Manual rollback (no auto-rollback is wired up - see notify-on-failure
 # below for why): `vercel rollback <deployment-url> --yes` from a machine
 # with `vercel` CLI logged into this project, or promote any previous
@@ -74,6 +87,19 @@ jobs:
     if: github.ref == 'refs/heads/master' && github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
+      - name: Trigger the actual deploy
+        # Explicit and self-contained, not dependent on Vercel's own
+        # GitHub App integration - see the note at the top of this file
+        # for why. The hook only knows how to build the master branch; it
+        # can't do anything else with this project.
+        run: |
+          status=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${{ secrets.VERCEL_DEPLOY_HOOK_URL }}")
+          echo "Deploy hook trigger: HTTP $status"
+          if [ "$status" -ge 300 ]; then
+            echo "::error::Deploy hook returned HTTP $status - the hook may have been deleted or the URL secret has drifted."
+            exit 1
+          fi
+
       - name: Poll until THIS commit is actually the one live
         # /health returning 200 only ever proved SOME deployment was
         # responding - it's a static response, identical whether the
