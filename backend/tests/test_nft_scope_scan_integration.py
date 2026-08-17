@@ -576,8 +576,13 @@ async def test_healthy_opensea_posts_more_than_one_when_genuine_demand_exists():
         if path == "/collections":
             if params["order_by"] == "created_date":
                 return {"collections": []}
-            if params["order_by"] == "seven_day_volume":
-                return {"collections": [{"collection": f"strong-{params['chain']}"}]}
+            if params["order_by"] in ("seven_day_volume", "one_day_volume", "one_day_change"):
+                # One distinct candidate per (chain, source) pair, not just
+                # one per chain - 7 chains x 3 sources comfortably exceeds
+                # the surge ceiling, so the cap stays the binding
+                # constraint this test is actually exercising rather than
+                # the fixture's own candidate count.
+                return {"collections": [{"collection": f"strong-{params['chain']}-{params['order_by']}"}]}
             return {"collections": []}
         if path.startswith("/events/collection/"):
             return {"asset_events": []}
@@ -597,6 +602,12 @@ async def test_healthy_opensea_posts_more_than_one_when_genuine_demand_exists():
 
     async def fake_recent_snapshots(client, slug, limit=30):
         return []
+
+    async def fake_first_snapshot(client, slug):
+        return None
+
+    async def fake_store_snapshot(client, c):
+        return None
 
     async def fake_post(client, channel_id, embed, content=None):
         return True
@@ -619,6 +630,8 @@ async def test_healthy_opensea_posts_more_than_one_when_genuine_demand_exists():
          patch.object(main, "_nft_collection_core", new=fake_collection_core), \
          patch.object(main, "_opensea_get_top_offer", new=fake_top_offer), \
          patch.object(main, "_nft_recent_snapshots", new=fake_recent_snapshots), \
+         patch.object(main, "_nft_first_snapshot", new=fake_first_snapshot), \
+         patch.object(main, "_nft_store_snapshot", new=fake_store_snapshot), \
          patch.object(main, "_nft_scope_clears_wash_check", new=fake_wash_clean), \
          patch.object(main, "_nft_poll_tracked_slugs", new=fake_tracked_slugs), \
          patch.object(main, "_nft_alert_state_get", new=fake_alert_state_get), \

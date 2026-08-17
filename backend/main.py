@@ -3705,7 +3705,19 @@ _NFT_SCOPE_GREEN_THRESHOLD = 85
 _NFT_SCOPE_FRESH_MAX_POSTS = 1
 _NFT_SCOPE_TRENDING_MAX_POSTS = 1
 _NFT_SCOPE_MOMENTUM_MAX_POSTS = 1
-_NFT_SCOPE_SURGE_MAX_POSTS = 3  # per-pass ceiling when OpenSea is healthy AND demand is genuinely there
+# Per-pass ceiling when OpenSea is healthy AND demand is genuinely there - not
+# "how many candidates exist," but the actual channel-readability/Discord-rate-
+# limit ceiling. Raised from 3 to 8: a real multi-project cooking moment (a
+# whole sector moving at once, not a fluke) is exactly the case the base-size-1
+# caps exist to NOT suppress once demand is real - _post_channel_message
+# already retries through Discord's own per-channel rate limit
+# (_discord_post_with_retry), so a genuine burst of qualifying calls in one
+# cycle gets posted, not silently truncated at an arbitrarily small number.
+# Across all 4 passes that's up to 32 distinct collections in the most
+# extreme case, each one still independently having cleared every strict gate
+# on its own merits - this raises how much real signal gets through, it does
+# not loosen what counts as signal.
+_NFT_SCOPE_SURGE_MAX_POSTS = 8
 _NFT_SCOPE_MOMENTUM_MIN_SNAPSHOTS = 6   # ~30 min of history minimum before trusting a trend
 _NFT_SCOPE_MOMENTUM_SCAN_LIMIT = 25  # base; doubles in surge mode, see _nft_scope_pass_limits
 _NFT_SCOPE_HOLDINGS_MAX_POSTS = 1
