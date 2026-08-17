@@ -2398,6 +2398,7 @@ def _nft_collection_shape(c: dict, stats: dict | None) -> dict:
         "vol7d": (intervals.get("seven_day") or {}).get("volume"),
         "vol30d": (intervals.get("thirty_day") or {}).get("volume"),
         "volTotal": total.get("volume"),
+        "salesTotal": total.get("sales"),
         "sales24h": (intervals.get("one_day") or {}).get("sales"),
         "owners": total.get("num_owners"),
         "totalSupply": c.get("total_supply"),
@@ -3970,6 +3971,42 @@ def _detect_blue_chip(c: dict) -> str | None:
     return None
 
 
+_NFT_SCOPE_STALE_LIFETIME_SALES_THRESHOLD = 10_000  # absolute - catches a heavily-traded collection regardless of supply size
+_NFT_SCOPE_STALE_LIFETIME_TURNOVER_RATIO = 2.0  # relative - the average token has changed hands this many times over the collection's WHOLE life, not just today
+
+
+def _detect_already_traded_out(c: dict) -> str | None:
+    # A real, confirmed gap: owner count alone can completely miss a
+    # collection that's been extensively traded for months but stayed
+    # concentrated among a small set of flippers - low owners, but
+    # nothing about it is early or undiscovered. Confirmed live: a
+    # collection with 826 owners (comfortably under the blue-chip
+    # threshold) and 34,475 lifetime sales got called as if it were an
+    # emerging play, when it had already been trading for 3+ months with
+    # more historical turnover than most "blue chips" ever see. This
+    # looks at TOTAL sales across the collection's whole life, not just
+    # today's activity - a genuinely early/fresh play hasn't had time to
+    # rack up thousands of historical trades no matter how hot it is
+    # right now.
+    sales_total = c.get("salesTotal")
+    if not sales_total:
+        return None
+    if sales_total >= _NFT_SCOPE_STALE_LIFETIME_SALES_THRESHOLD:
+        return (
+            f"{sales_total:,} lifetime sales - this has already been extensively traded for a long time, "
+            "not a still-early/undiscovered play regardless of today's owner count or activity"
+        )
+    supply = c.get("totalSupply")
+    if supply and supply > 0:
+        turnover = sales_total / supply
+        if turnover >= _NFT_SCOPE_STALE_LIFETIME_TURNOVER_RATIO:
+            return (
+                f"The average token here has already changed hands {turnover:.1f}x over the collection's "
+                f"whole history ({sales_total:,} lifetime sales against {supply} supply) - well-worn, not early"
+            )
+    return None
+
+
 def _trend_up(values: list[float], min_len: int) -> tuple[bool, float]:
     # Requires a MAJORITY of recent consecutive moves to be upward, not
     # just an endpoint-to-endpoint comparison - a single spike surrounded
@@ -4187,6 +4224,7 @@ def _nft_scope_score(
         reasons.append(f"Supply of {supply} is in a sane range - not an infinite-mint or dust-supply setup")
 
     # Momentum (0-20, only when there's enough tracked history to trust)
+    momentum_points = 0
     if history:
         momentum_points, momentum_reasons = _momentum_points(c, history)
         points += momentum_points
@@ -4257,6 +4295,20 @@ def _nft_scope_score(
                 f"{rapid_activity['sharp_window_minutes']} min - this is happening right now, not winding down"
             )
 
+    # Confirmed live: a 6-month-old collection with 6 sales/day and zero
+    # momentum/surge/rapid-activity/wallet signal still reached 70/100
+    # purely from static checklist points (distribution ratio, socials,
+    # description, category, verified, sane supply) - none of which say
+    # anything about whether something is actually happening RIGHT NOW.
+    # "Worth posting" requires that at least one genuinely time-sensitive
+    # signal fired, not just that the project looks legitimate on paper -
+    # a project that merely EXISTS respectably isn't what a degen call is
+    # for. This never adds points on its own; it's a gate, checked in
+    # _nft_scope_worth_posting below.
+    has_timeliness_signal = bool(
+        momentum_points or accumulation_points or surge_points or smart_points or spike_points or rapid_activity
+    )
+
     turnover_result = _detect_abnormal_turnover(c, wash_analysis)
     turnover_blocks = False
     if turnover_result:
@@ -4276,14 +4328,22 @@ def _nft_scope_score(
     if blue_chip_reason:
         red_flags.append(blue_chip_reason)
 
-    # A detected fake offer, an abnormal supply/owner turnover, or an
-    # already-established blue chip is a hard stop, not a minor
+    traded_out_reason = _detect_already_traded_out(c)
+    if traded_out_reason:
+        red_flags.append(traded_out_reason)
+
+    # A detected fake offer, an abnormal supply/owner turnover, an
+    # already-established blue chip, or a collection that's already been
+    # extensively traded over its whole life is a hard stop, not a minor
     # deduction - never recommend regardless of how high the rest of the
     # score is (the first two can otherwise produce a HIGH score, since
     # "lots of sales" and "many owners" are exactly what those numbers
-    # look like from the outside; the third would score highest of all,
-    # since a blue chip legitimately aces every soft signal).
-    blocked = fake_offer_reason is not None or turnover_blocks or blue_chip_reason is not None
+    # look like from the outside; the third and fourth would score
+    # highest of all, since an established/well-worn collection
+    # legitimately aces every soft signal without being early in any
+    # sense - confirmed live: low owner count let a heavily-traded
+    # collection through the blue-chip check alone).
+    blocked = fake_offer_reason is not None or turnover_blocks or blue_chip_reason is not None or traded_out_reason is not None
 
     # A description, social links, a category, even a listed floor price
     # cost a scammer nothing to fake and don't require a single other
@@ -4327,11 +4387,15 @@ def _nft_scope_score(
         # capping here changes nothing about which tier anything lands in.
         "score": min(points, 100), "reasons": reasons, "red_flags": red_flags, "risk_tier": risk_tier,
         "tier": tier, "blocked": blocked, "has_real_activity": has_real_activity, "floor_multiple": floor_multiple,
+        "has_timeliness_signal": has_timeliness_signal,
     }
 
 
 def _nft_scope_worth_posting(score: dict) -> bool:
-    return score["tier"] in ("green", "yellow", "red") and not score["blocked"] and score["has_real_activity"]
+    return (
+        score["tier"] in ("green", "yellow", "red") and not score["blocked"]
+        and score["has_real_activity"] and score["has_timeliness_signal"]
+    )
 
 
 def _nft_scope_age_text(created_date: str | None) -> str | None:

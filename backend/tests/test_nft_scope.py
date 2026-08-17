@@ -242,6 +242,84 @@ def test_score_allows_small_project_below_blue_chip_threshold():
     assert score["blocked"] is False
 
 
+# ── _detect_already_traded_out - real false positive: low owner count ──
+# alone completely missed a collection that's been heavily traded for
+# months (confirmed live: 826 owners, comfortably under the blue-chip
+# threshold, but 34,475 lifetime sales - already well-worn, not early).
+
+def test_already_traded_out_blocks_high_absolute_lifetime_sales():
+    c = {"salesTotal": 34475, "totalSupply": 10000}
+    assert main._detect_already_traded_out(c) is not None
+
+
+def test_already_traded_out_blocks_high_relative_turnover_even_at_modest_scale():
+    # 500 supply, 1200 lifetime sales = 2.4x turnover - the average token
+    # has already changed hands more than twice over the collection's
+    # whole life, regardless of the absolute sales count being modest.
+    c = {"salesTotal": 1200, "totalSupply": 500}
+    assert main._detect_already_traded_out(c) is not None
+
+
+def test_already_traded_out_allows_a_genuinely_fresh_collection():
+    c = {"salesTotal": 40, "totalSupply": 5000}
+    assert main._detect_already_traded_out(c) is None
+
+
+def test_already_traded_out_handles_missing_data():
+    assert main._detect_already_traded_out({}) is None
+    assert main._detect_already_traded_out({"salesTotal": None}) is None
+    assert main._detect_already_traded_out({"salesTotal": 0}) is None
+
+
+def test_score_blocks_already_traded_out_even_with_a_live_burst():
+    # The real false positive, reproduced end to end: real distribution,
+    # real socials, even a live rapid-activity burst - none of it should
+    # matter once lifetime sales reveal this isn't an early play.
+    c = strong_collection(owners=826, totalSupply=10000, salesTotal=34475, sales24h=24, vol1d=0.46)
+    burst = {"count": 5, "unique_buyers": 5, "unique_sellers": 5, "window_minutes": 30}
+    score = main._nft_scope_score(c, None, rapid_activity=burst)
+    assert score["blocked"] is True
+    assert not main._nft_scope_worth_posting(score)
+    assert any("lifetime sales" in f for f in score["red_flags"])
+
+
+# ── has_timeliness_signal - "worth posting" requires something actually ──
+# happening, not just that a project looks legitimate on paper. Real false
+# positive: a 6-month-old collection with only a thin 24h sales trickle and
+# zero momentum/surge/rapid-activity/wallet signal still reached 70/100
+# purely from static checklist points (distribution ratio, socials,
+# description, category, verified, sane supply).
+
+def test_worth_posting_requires_a_timeliness_signal_even_with_a_high_score():
+    # strong_collection() alone clears distribution/substance/supply
+    # comfortably but has no history, no rapid_activity, no wallet hits -
+    # nothing time-sensitive at all.
+    score = main._nft_scope_score(strong_collection(), 0.06)
+    assert score["has_timeliness_signal"] is False
+    assert not main._nft_scope_worth_posting(score)
+
+
+def test_worth_posting_accepts_rapid_activity_as_a_timeliness_signal():
+    burst = {"count": 5, "unique_buyers": 5, "unique_sellers": 5, "window_minutes": 30}
+    score = main._nft_scope_score(strong_collection(), 0.06, rapid_activity=burst)
+    assert score["has_timeliness_signal"] is True
+    assert main._nft_scope_worth_posting(score)
+
+
+def test_worth_posting_accepts_momentum_as_a_timeliness_signal():
+    n = main._NFT_SCOPE_MOMENTUM_MIN_SNAPSHOTS
+    history = history_from([0.03, 0.035, 0.04, 0.042, 0.045, 0.05], "floor")[:n]
+    c = strong_collection(floor=0.05)
+    score = main._nft_scope_score(c, None, history=history)
+    assert score["has_timeliness_signal"] is True
+
+
+def test_worth_posting_accepts_a_floor_multiple_as_a_timeliness_signal():
+    c = strong_collection(floor=0.5)
+    score = main._nft_scope_score(c, None, first_snapshot={"floor": 0.01, "captured_at": "2026-08-01"})
+    assert score["has_timeliness_signal"] is True
+
+
 # ── mandatory real-activity gate accepts rapid_activity as proof too ───
 # (sales24h comes from OpenSea's aggregate stats, which can lag reality
 # for a collection minting fast right now - confirmed against real
@@ -334,7 +412,12 @@ def test_real_sales_but_too_few_owners_still_blocked():
 
 
 def test_strong_collection_with_real_activity_posts_normally():
-    score = main._nft_scope_score(strong_collection(), 0.06)
+    # Real distribution/substance/activity alone is no longer sufficient -
+    # has_timeliness_signal also requires something genuinely time-
+    # sensitive (here, a verified rapid-activity burst) to actually be
+    # present, not just that the project looks legitimate on paper.
+    burst = {"count": 5, "unique_buyers": 5, "unique_sellers": 5, "window_minutes": 30}
+    score = main._nft_scope_score(strong_collection(), 0.06, rapid_activity=burst)
     assert main._nft_scope_worth_posting(score)
 
 

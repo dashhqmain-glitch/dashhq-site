@@ -29,6 +29,26 @@ def _scam_collection(slug):
     }
 
 
+def _qualifying_sale_events():
+    # A wash-clean, 3-sale burst inside the rapid-activity window - the
+    # minimum shape that makes _detect_rapid_activity return non-None,
+    # which most of this file's fixtures now need to satisfy the
+    # has_timeliness_signal gate (a project isn't "worth posting" on
+    # static checklist points alone anymore - see the real false positive
+    # this was built to fix). Distinct buyers/sellers/tokens throughout,
+    # so it never trips the wash-trade checks either.
+    import time
+    now = time.time()
+    return {"asset_events": [
+        {
+            "buyer": f"buyer{i}", "seller": f"seller{i}", "nft": {"identifier": str(i)},
+            "event_timestamp": now - 60 * i,
+            "payment": {"quantity": "1000000000000000000", "decimals": 18, "symbol": "ETH"},
+        }
+        for i in range(1, 4)
+    ]}
+
+
 async def test_trending_pass_finds_a_strong_established_collection_outside_the_other_two_passes():
     _config_channel()
 
@@ -40,7 +60,7 @@ async def test_trending_pass_finds_a_strong_established_collection_outside_the_o
                 return {"collections": [{"collection": "trending-real"}]}
             return {"collections": []}
         if path.startswith("/events/collection/"):
-            return {"asset_events": []}
+            return _qualifying_sale_events()
         raise AssertionError(f"unexpected {path}")
 
     scan_state = {}
@@ -153,6 +173,12 @@ async def test_trending_pass_still_blocks_scam_shaped_collections():
                 return {"collections": [{"collection": "scam-trending"}]}
             return {"collections": []}
         if path.startswith("/events/collection/"):
+            # Deliberately empty, not a qualifying burst - a real scam's
+            # actual 24h wash-analysis should never be artificially
+            # "cleaned" by a shared clean-burst fixture. This collection
+            # must stay blocked by turnover regardless of timeliness
+            # (blocked=True short-circuits _nft_scope_worth_posting
+            # either way, so this doesn't need a burst to prove its point).
             return {"asset_events": []}
         raise AssertionError(f"unexpected {path}")
 
@@ -227,7 +253,7 @@ async def test_trending_pass_queries_both_7day_and_24h_volume_and_dedupes():
             if params["order_by"] == "one_day_change":
                 return {"collections": [{"collection": "only-in-24h-sales"}]}
         if path.startswith("/events/collection/"):
-            return {"asset_events": []}
+            return _qualifying_sale_events()
         raise AssertionError(f"unexpected {path} {params}")
 
     async def fake_alert_state_get(client, slug, alert_type):
@@ -295,7 +321,7 @@ async def test_trending_slot_is_not_structurally_biased_toward_any_single_discov
                 return {"collections": []}
             return {"collections": [{"collection": f"from-{params['order_by']}"}]}
         if path.startswith("/events/collection/"):
-            return {"asset_events": []}
+            return _qualifying_sale_events()
         raise AssertionError(f"unexpected {path} {params}")
 
     async def fake_alert_state_get(client, slug, alert_type):
@@ -368,7 +394,7 @@ async def test_trending_pass_is_not_structurally_biased_toward_any_single_chain(
                 return {"collections": []}
             return {"collections": [{"collection": f"from-{params['chain']}"}]}
         if path.startswith("/events/collection/"):
-            return {"asset_events": []}
+            return _qualifying_sale_events()
         raise AssertionError(f"unexpected {path} {params}")
 
     async def fake_alert_state_get(client, slug, alert_type):
@@ -437,7 +463,7 @@ async def test_trending_pass_spreads_across_multiple_chains_within_one_cycle():
                 return {"collections": []}
             return {"collections": [{"collection": f"from-{params['chain']}"}]}
         if path.startswith("/events/collection/"):
-            return {"asset_events": []}
+            return _qualifying_sale_events()
         raise AssertionError(f"unexpected {path} {params}")
 
     async def fake_alert_state_get(client, slug, alert_type):
@@ -503,7 +529,7 @@ async def test_trending_scan_budget_bounds_worst_case_api_cost():
             prefix = f"{params['chain']}-{params['order_by']}"
             return {"collections": [{"collection": f"{prefix}-{i}"} for i in range(10)]}
         if path.startswith("/events/collection/"):
-            return {"asset_events": []}
+            return _qualifying_sale_events()
         raise AssertionError(f"unexpected {path} {params}")
 
     evaluated = []
@@ -585,7 +611,7 @@ async def test_healthy_opensea_posts_more_than_one_when_genuine_demand_exists():
                 return {"collections": [{"collection": f"strong-{params['chain']}-{params['order_by']}"}]}
             return {"collections": []}
         if path.startswith("/events/collection/"):
-            return {"asset_events": []}
+            return _qualifying_sale_events()
         raise AssertionError(f"unexpected {path}")
 
     async def fake_alert_state_get(client, slug, alert_type):
@@ -660,7 +686,7 @@ async def test_recent_real_429_forces_scan_back_to_conservative_base_limits():
                 return {"collections": [{"collection": f"strong-{params['chain']}"}]}
             return {"collections": []}
         if path.startswith("/events/collection/"):
-            return {"asset_events": []}
+            return _qualifying_sale_events()
         raise AssertionError(f"unexpected {path}")
 
     async def fake_alert_state_get(client, slug, alert_type):
@@ -725,6 +751,12 @@ async def test_surge_mode_never_loosens_whether_a_candidate_qualifies():
                 return {"collections": [{"collection": "scam-trending"}]}
             return {"collections": []}
         if path.startswith("/events/collection/"):
+            # Deliberately empty, not a qualifying burst - a real scam's
+            # actual 24h wash-analysis should never be artificially
+            # "cleaned" by a shared clean-burst fixture. This collection
+            # must stay blocked by turnover regardless of timeliness
+            # (blocked=True short-circuits _nft_scope_worth_posting
+            # either way, so this doesn't need a burst to prove its point).
             return {"asset_events": []}
         raise AssertionError(f"unexpected {path}")
 
@@ -795,7 +827,7 @@ async def test_trending_pass_rotates_off_a_recent_winner_instead_of_reposting_it
                 return {"collections": []}
             return {"collections": [{"collection": s} for s in ("winner-1", "winner-2", "winner-3", "winner-4")]}
         if path.startswith("/events/collection/"):
-            return {"asset_events": []}
+            return _qualifying_sale_events()
         raise AssertionError(f"unexpected {path}")
 
     async def fake_alert_state_get(client, slug, alert_type):
@@ -872,7 +904,7 @@ async def test_momentum_pass_is_not_structurally_biased_toward_alphabetically_ea
         if path == "/collections":
             return {"collections": []}
         if path.startswith("/events/collection/"):
-            return {"asset_events": []}
+            return _qualifying_sale_events()
         raise AssertionError(f"unexpected {path}")
 
     # Deliberately alphabetical, and larger than a shrunk scan limit -
@@ -954,7 +986,7 @@ async def test_a_collection_cannot_be_posted_twice_by_different_passes_in_one_cy
                 return {"collections": [{"collection": slug}]}
             return {"collections": []}
         if path.startswith("/events/collection/"):
-            return {"asset_events": []}
+            return _qualifying_sale_events()
         raise AssertionError(f"unexpected {path}")
 
     state: dict = {}  # shared backing store, exactly like the real Supabase-backed one
@@ -1028,7 +1060,15 @@ async def test_fresh_mint_gets_a_new_look_after_recheck_cooldown_instead_of_bein
                 return {"collections": [{"collection": "grower"}]}
             return {"collections": []}
         if path.startswith("/events/collection/"):
-            return {"asset_events": []}
+            # Matches fake_collection_core below: genuinely zero activity
+            # (no rapid burst either) the first time, a real qualifying
+            # burst the second time - the mandatory-activity gate must
+            # fail on the first pass for the RIGHT reason (nothing
+            # happening yet), not accidentally pass because a shared
+            # fixture handed it a burst regardless of the scenario.
+            if call_count["n"] <= 1:
+                return {"asset_events": []}
+            return _qualifying_sale_events()
         raise AssertionError(f"unexpected {path}")
 
     async def fake_recently_seen(client, slug, cooldown_seconds=main._NFT_SCOPE_FRESH_RECHECK_COOLDOWN_SECONDS):
@@ -1111,7 +1151,7 @@ async def test_fresh_mint_already_posted_is_never_reannounced_even_after_cooldow
                 return {"collections": [{"collection": "already-called"}]}
             return {"collections": []}
         if path.startswith("/events/collection/"):
-            return {"asset_events": []}
+            return _qualifying_sale_events()
         raise AssertionError(f"unexpected {path}")
 
     async def fake_recently_seen(client, slug, cooldown_seconds=main._NFT_SCOPE_FRESH_RECHECK_COOLDOWN_SECONDS):
