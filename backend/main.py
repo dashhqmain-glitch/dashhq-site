@@ -3,6 +3,7 @@ import base64
 import hashlib
 import json
 import logging
+import os
 import random
 import re
 import secrets
@@ -6640,4 +6641,14 @@ async def _handle_toolkit_command(payload: dict) -> dict:
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    # commit exposes which build is actually live - Vercel injects
+    # VERCEL_GIT_COMMIT_SHA automatically into every deployment connected
+    # to a Git repo, no extra config/secret needed. Without this, /health
+    # returning 200 only ever proved SOME deployment was responding, not
+    # that the deployment CI just tested was the one that's actually
+    # live - confirmed live: Vercel's auto-deploy silently stopped
+    # firing for several pushes in a row, and every one of those CI runs
+    # still reported success because /health kept answering 200 from the
+    # stale, hours-old build the whole time. The post-deploy-check job in
+    # backend-ci.yml now compares this against github.sha directly.
+    return {"status": "ok", "commit": os.environ.get("VERCEL_GIT_COMMIT_SHA", "unknown")}

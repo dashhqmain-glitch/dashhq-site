@@ -74,23 +74,29 @@ jobs:
     if: github.ref == 'refs/heads/master' && github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
-      - name: Poll until Vercel's deployment is live
-        # Actively confirms the deploy landed instead of guessing a fixed
-        # delay - checks every 5s for up to 3 minutes, which comfortably
-        # covers this project's typical ~15-20s build time with real
-        # margin instead of a blind sleep that could fire early on a slow
-        # deploy or waste time on a fast one.
+      - name: Poll until THIS commit is actually the one live
+        # /health returning 200 only ever proved SOME deployment was
+        # responding - it's a static response, identical whether the
+        # brand-new build landed or Vercel's auto-deploy silently never
+        # fired and the site is still serving a build from hours/days
+        # ago. Confirmed live: that exact blind spot let several pushes
+        # in a row report CI success while production kept running stale
+        # code the whole time. /health now echoes VERCEL_GIT_COMMIT_SHA
+        # (Vercel injects it automatically, no extra secret needed) -
+        # this polls until that value actually matches the commit this
+        # workflow run is FOR, not just until something answers 200.
         run: |
           for i in $(seq 1 36); do
-            code=$(curl -s -o /dev/null -w "%{http_code}" "https://www.dashhq.site/health")
-            echo "attempt $i: HTTP $code"
-            if [ "$code" = "200" ]; then
-              echo "Live."
+            response=$(curl -s "https://www.dashhq.site/health")
+            live_commit=$(echo "$response" | grep -o '"commit":"[^"]*"' | cut -d'"' -f4)
+            echo "attempt $i: live commit is ${live_commit:-<none>}, expecting ${{ github.sha }}"
+            if [ "$live_commit" = "${{ github.sha }}" ]; then
+              echo "Live and confirmed on the right commit."
               exit 0
             fi
             sleep 5
           done
-          echo "::error::Production never came back healthy within 3 minutes of the deploy starting."
+          echo "::error::Production is still not serving commit ${{ github.sha }} after 3 minutes - Vercel's auto-deploy for this push may not have fired. Check the Vercel dashboard's Deployments tab directly."
           exit 1
 
       - name: Live real-endpoint check
