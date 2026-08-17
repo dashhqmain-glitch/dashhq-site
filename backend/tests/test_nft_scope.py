@@ -184,19 +184,52 @@ def test_turnover_stays_blocked_if_corroborating_sample_has_too_few_distinct_buy
 
 
 def test_turnover_unblocked_and_reclassified_bullish_when_corroborated_clean():
-    # A real, wash-clean sweep on a small-supply collection: the same
-    # elevated turnover ratio as the scam cases above, but backed by a
-    # same-window wash analysis with real buyer diversity and no
-    # suspicious patterns. This is the actual bug fix - this exact shape
-    # (high turnover + genuine broad buying) was being silently vetoed
-    # before, which is confirmed as a real cause of missed surges.
-    c = {"totalSupply": 500, "owners": 50, "sales24h": 250}  # 50% turnover
-    clean = {"suspicious": False, "unique_buyers": 30, "unique_sellers": 45}
+    # A real, wash-clean sweep on a small-supply collection: elevated
+    # turnover, same as the scam cases above, but backed by a same-window
+    # wash analysis with real buyer diversity and no suspicious patterns.
+    # This is the actual bug fix - this exact shape (high turnover +
+    # genuine broad buying) was being silently vetoed before, which is
+    # confirmed as a real cause of missed surges. Kept under the hard
+    # ceiling (_NFT_SCOPE_TURNOVER_HARD_CEILING) and with buyer diversity
+    # scaled to the sales count (_NFT_SCOPE_TURNOVER_CORROBORATION_MIN_BUYER_RATIO)
+    # - past either bar, nothing corroborates it away regardless of buyer
+    # count (see the hard-ceiling tests below), confirmed live against a
+    # 59%-of-supply-in-a-day sybil ring that cleared the old flat 2-buyer bar.
+    c = {"totalSupply": 500, "owners": 50, "sales24h": 200}  # 40% turnover
+    clean = {"suspicious": False, "unique_buyers": 120, "unique_sellers": 150}
     result = main._detect_abnormal_turnover(c, wash_analysis=clean)
     assert result is not None
     blocked, reason = result
     assert blocked is False
     assert "real, broad-based sweep" in reason
+
+
+def test_turnover_hard_ceiling_blocks_even_with_massive_buyer_diversity():
+    # Confirmed live: a 111-supply collection saw 65 sales in 24h (59% of
+    # its ENTIRE supply) reclassified as bullish because 31 "distinct"
+    # buyers cleared the old flat floor of 2. No amount of buyer diversity
+    # should corroborate away turnover this extreme - a sufficiently
+    # resourced sybil operation can always produce "enough" distinct
+    # wallets to clear a fixed head-count bar, so past this point the bar
+    # has to stop being about buyer count entirely.
+    c = {"totalSupply": 111, "owners": 40, "sales24h": 65}  # 59% turnover
+    clean = {"suspicious": False, "unique_buyers": 31, "unique_sellers": 35}
+    result = main._detect_abnormal_turnover(c, wash_analysis=clean)
+    assert result is not None
+    blocked, reason = result
+    assert blocked is True
+
+
+def test_turnover_stays_blocked_when_buyer_diversity_is_thin_relative_to_sales():
+    # Below the hard ceiling but the unique-buyer count is a small
+    # fraction of the day's sales - not enough to call it broad-based
+    # even though it clears the old flat floor of 2.
+    c = {"totalSupply": 1000, "owners": 200, "sales24h": 400}  # 40% turnover
+    thin = {"suspicious": False, "unique_buyers": 20, "unique_sellers": 40}  # only 5% of sales
+    result = main._detect_abnormal_turnover(c, wash_analysis=thin)
+    assert result is not None
+    blocked, reason = result
+    assert blocked is True
 
 
 # ── _detect_blue_chip (NFT Scope is for secondary plays, not majors) ────

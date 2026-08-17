@@ -3690,6 +3690,7 @@ async def _nft_mint_radar_mark_seen(client: httpx.AsyncClient, slug: str) -> Non
 _NFT_SCOPE_RED_THRESHOLD = 50
 _NFT_SCOPE_YELLOW_THRESHOLD = 70
 _NFT_SCOPE_GREEN_THRESHOLD = 85
+_NFT_SCOPE_DISPLAY_SCORE_CAP = 95  # never show a bare 100/100 - nothing in degen is a sure thing
 # Reserved per-pass, not pooled - ranking discovery by dollar volume
 # structurally favors big blue-chips (one Moonbirds sale outweighs
 # dozens of trades on a smaller collection in $ terms), which meant
@@ -3867,7 +3868,10 @@ def _detect_fake_offer(c: dict, top_offer_amount: float | None) -> str | None:
     return None
 
 
-_NFT_SCOPE_TURNOVER_CORROBORATION_MIN_BUYERS = 2
+_NFT_SCOPE_TURNOVER_CORROBORATION_MIN_BUYERS = 2  # floor - the real bar is the ratio below, this only guards tiny sale counts
+_NFT_SCOPE_TURNOVER_CORROBORATION_MIN_BUYER_RATIO = 0.5  # unique buyers must represent at least half the day's sales, not just clear a fixed head count
+_NFT_SCOPE_TURNOVER_HARD_CEILING = 0.5  # 50%+ of ENTIRE supply trading in 24h - no corroboration possible past this, regardless of buyer diversity
+_NFT_SCOPE_FLIPS_PER_OWNER_HARD_CEILING = 10  # double the already-elevated bar - no corroboration possible past this either
 
 
 def _nft_scope_turnover_elevated(c: dict) -> bool:
@@ -3926,10 +3930,44 @@ def _detect_abnormal_turnover(c: dict, wash_analysis: dict | None = None) -> tup
     if not elevated:
         return None
 
+    # Confirmed live: 2+ distinct buyers was nowhere near enough of a bar.
+    # A collection with only 111 supply saw 65 sales in 24h (59% of its
+    # ENTIRE supply) reclassified as bullish on 31 "distinct" buyers -
+    # exactly the large-sybil-ring blind spot _analyze_wash_trading's own
+    # docstring already warned about (built to catch a small colluding
+    # ring, not a coordinated operation spreading trades across dozens of
+    # wallets that each only trade once or twice). Two hardenings:
+    #   1. An absolute ceiling past which NOTHING corroborates it away -
+    #      real collector communities do not turn over half their entire
+    #      supply in a single day, no matter how many distinct addresses
+    #      show up. A sufficiently resourced operation can always produce
+    #      "enough" distinct wallets to clear a fixed head-count bar.
+    #   2. Below that ceiling, the required buyer diversity now SCALES
+    #      with the sales count instead of a flat minimum - unique
+    #      buyers have to represent a real fraction of the day's sales,
+    #      not just clear a low fixed floor.
+    if turnover is not None and turnover >= _NFT_SCOPE_TURNOVER_HARD_CEILING:
+        return (
+            True,
+            f"{sales} sales against only {supply} total supply ({turnover:.0%} of the ENTIRE collection "
+            "changed hands in 24h) - no amount of buyer diversity makes this organic; this is beyond what "
+            "any real collector community does in a day"
+        )
+    if flips_per_owner is not None and flips_per_owner >= _NFT_SCOPE_FLIPS_PER_OWNER_HARD_CEILING:
+        return (
+            True,
+            f"{sales} sales across only {owners} current owners (~{flips_per_owner:.1f} flips per holder in "
+            "24h, well beyond the already-elevated bar) - no amount of buyer diversity makes this organic"
+        )
+
+    min_buyers_required = max(
+        _NFT_SCOPE_TURNOVER_CORROBORATION_MIN_BUYERS,
+        int(sales * _NFT_SCOPE_TURNOVER_CORROBORATION_MIN_BUYER_RATIO),
+    )
     corroborated = (
         wash_analysis is not None
         and not wash_analysis.get("suspicious")
-        and (wash_analysis.get("unique_buyers") or 0) >= _NFT_SCOPE_TURNOVER_CORROBORATION_MIN_BUYERS
+        and (wash_analysis.get("unique_buyers") or 0) >= min_buyers_required
     )
     detail = f"{sales} sales" + (f" against {supply} total supply ({turnover:.0%} turnover)" if turnover is not None else "")
     if corroborated:
@@ -3974,6 +4012,7 @@ def _detect_blue_chip(c: dict) -> str | None:
 
 _NFT_SCOPE_STALE_LIFETIME_SALES_THRESHOLD = 10_000  # absolute - catches a heavily-traded collection regardless of supply size
 _NFT_SCOPE_STALE_LIFETIME_TURNOVER_RATIO = 2.0  # relative - the average token has changed hands this many times over the collection's WHOLE life, not just today
+_NFT_SCOPE_STALE_LIFETIME_MIN_AGE_DAYS = 150  # the ratio check only means "well-worn" once a collection has actually had months to accumulate that turnover
 
 
 def _detect_already_traded_out(c: dict) -> str | None:
@@ -4001,10 +4040,18 @@ def _detect_already_traded_out(c: dict) -> str | None:
     if supply and supply > 0:
         turnover = sales_total / supply
         if turnover >= _NFT_SCOPE_STALE_LIFETIME_TURNOVER_RATIO:
-            return (
-                f"The average token here has already changed hands {turnover:.1f}x over the collection's "
-                f"whole history ({sales_total:,} lifetime sales against {supply} supply) - well-worn, not early"
-            )
+            # A young, actively-growing collection can clear this ratio
+            # honestly (every sale counts against a still-small supply) -
+            # confirmed live against IdentityMD, ~3 months old at 2.0x,
+            # wrongly blocked as "already traded out" when it had barely
+            # had time to be traded at all. The ratio only means "well-worn"
+            # once the collection has actually had months to earn it.
+            age_days = _nft_scope_collection_age_days(c.get("createdDate"))
+            if age_days is None or age_days >= _NFT_SCOPE_STALE_LIFETIME_MIN_AGE_DAYS:
+                return (
+                    f"The average token here has already changed hands {turnover:.1f}x over the collection's "
+                    f"whole history ({sales_total:,} lifetime sales against {supply} supply) - well-worn, not early"
+                )
     return None
 
 
@@ -4381,12 +4428,15 @@ def _nft_scope_score(
         tier, risk_tier = "none", "⚪ Not Enough Signal"
 
     return {
-        # Capped for display - the surge/momentum/rapid-activity/turnover-
-        # corroboration dimensions can legitimately stack past 100 for a
-        # genuinely huge mover clearing several of them at once, but the
-        # embed shows this as "X/100" and tiers are all <=100 anyway, so
-        # capping here changes nothing about which tier anything lands in.
-        "score": min(points, 100), "reasons": reasons, "red_flags": red_flags, "risk_tier": risk_tier,
+        # Capped for display, and deliberately capped BELOW 100 - the
+        # surge/momentum/rapid-activity/turnover-corroboration dimensions
+        # can legitimately stack past 100 for a genuinely huge mover
+        # clearing several of them at once, but nothing in degen is ever
+        # a sure thing, and a bare "100/100" reads as certainty this
+        # system doesn't actually have. Tiers are computed off the
+        # uncapped `points` above, so this display cap changes nothing
+        # about which tier anything lands in.
+        "score": min(points, _NFT_SCOPE_DISPLAY_SCORE_CAP), "reasons": reasons, "red_flags": red_flags, "risk_tier": risk_tier,
         "tier": tier, "blocked": blocked, "has_real_activity": has_real_activity, "floor_multiple": floor_multiple,
         "has_timeliness_signal": has_timeliness_signal,
     }
@@ -4399,10 +4449,7 @@ def _nft_scope_worth_posting(score: dict) -> bool:
     )
 
 
-def _nft_scope_age_text(created_date: str | None) -> str | None:
-    # A collection's age is context nothing else here conveys - a 3-day-old
-    # mint and a 2-year-old collection can post near-identical numbers and
-    # mean completely different things.
+def _nft_scope_collection_age_days(created_date: str | None) -> float | None:
     if not created_date:
         return None
     try:
@@ -4413,6 +4460,16 @@ def _nft_scope_age_text(created_date: str | None) -> str | None:
         created = created.replace(tzinfo=timezone.utc)
     days = (datetime.now(timezone.utc) - created).total_seconds() / 86400
     if days < 0:
+        return None
+    return days
+
+
+def _nft_scope_age_text(created_date: str | None) -> str | None:
+    # A collection's age is context nothing else here conveys - a 3-day-old
+    # mint and a 2-year-old collection can post near-identical numbers and
+    # mean completely different things.
+    days = _nft_scope_collection_age_days(created_date)
+    if days is None:
         return None
     if days < 1:
         return "minted today"
@@ -4673,7 +4730,12 @@ async def _nft_scope_wash_analysis(client: httpx.AsyncClient, slug: str) -> dict
 # below, so a wallet with one lucky 2-for-2 doesn't outrank one with a
 # proven 8-for-20.
 _NFT_SCOPE_PROVED_MULTIPLE_THRESHOLD = 5  # floor multiple that counts as "this call actually proved out"
-_NFT_SCOPE_SMART_WALLET_MIN_SAMPLE = 3  # sample size floor - below this, a "100% win rate" is just noise
+# Confirmed live: a 3/4 (75%) "hit rate" contributed real scoring weight
+# toward a 100/100 call - 4 total tries is nowhere near enough to call
+# something a track record rather than a hot streak. Raised to 5; still
+# not statistically rigorous (nothing free-tier-heuristic ever is), but a
+# meaningfully higher bar than "won 3 coin flips in a row."
+_NFT_SCOPE_SMART_WALLET_MIN_SAMPLE = 5
 _NFT_SCOPE_SMART_WALLET_MIN_WIN_RATE = 0.3
 _NFT_SCOPE_SMART_WALLET_BONUS_POINTS = 20
 _NFT_SCOPE_CONVERGENCE_POINTS_PER_WALLET = 8
