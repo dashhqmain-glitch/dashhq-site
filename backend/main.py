@@ -2401,6 +2401,14 @@ def _nft_collection_shape(c: dict, stats: dict | None) -> dict:
         "volTotal": total.get("volume"),
         "salesTotal": total.get("sales"),
         "sales24h": (intervals.get("one_day") or {}).get("sales"),
+        # OpenSea's stats endpoint has no average-price or floor-history
+        # field at all (verified live against the raw response - each
+        # interval is only ever {interval, volume, sales}) - these two
+        # extra counts are what let a per-window average price get
+        # derived (volume/sales) from data already in hand, at zero extra
+        # API cost, instead of needing a whole separate historical fetch.
+        "sales7d": (intervals.get("seven_day") or {}).get("sales"),
+        "sales30d": (intervals.get("thirty_day") or {}).get("sales"),
         "owners": total.get("num_owners"),
         "totalSupply": c.get("total_supply"),
         "openseaUrl": "https://opensea.io/collection/" + (slug or ""),
@@ -4055,6 +4063,59 @@ def _detect_already_traded_out(c: dict) -> str | None:
     return None
 
 
+_NFT_SCOPE_DECLINE_MIN_30D_SALES = 5  # below this, a 30-day average price is one or two data points, not a trend
+_NFT_SCOPE_DECLINE_1D_RATIO = 0.5  # today's average sale price is less than half the 30-day average
+_NFT_SCOPE_DECLINE_7D_RATIO = 0.8  # the 7-day window is already trending down too - not just one off day
+
+
+def _detect_declining_price_trend(c: dict) -> str | None:
+    # Confirmed live: Guild of Grime scored 95/100 as "Momentum Building"
+    # off a burst of cheap sales climbing 286% within a 30-minute window
+    # (e.g. ~$4 to ~$16) while OpenSea itself showed the collection's
+    # floor down 35.5% that same day and its whole price history sloping
+    # hard down from its all-time high - a handful of trivially-priced
+    # sales trending up within their own tiny burst says nothing about
+    # the bigger picture of a collection whose real sale prices have
+    # been shrinking for weeks. OpenSea's stats endpoint has no floor-
+    # history or average-price field to check against an all-time high
+    # directly, but volume/sales are already fetched for every candidate
+    # regardless - dividing them per window (1d/7d/30d) gives an actual
+    # average sale price trend at zero extra API cost, and a burst
+    # confined to one narrow window can't hide inside it the way it can
+    # hide inside a single 24h aggregate.
+    sales30d = c.get("sales30d")
+    vol30d = c.get("vol30d")
+    if not sales30d or sales30d < _NFT_SCOPE_DECLINE_MIN_30D_SALES or not vol30d:
+        return None
+    avg30d = vol30d / sales30d
+
+    sales24h = c.get("sales24h")
+    vol1d = c.get("vol1d")
+    if not sales24h or not vol1d:
+        return None
+    avg1d = vol1d / sales24h
+    if avg1d > avg30d * _NFT_SCOPE_DECLINE_1D_RATIO:
+        return None
+
+    # Require the 7-day window to already be sliding too, so a single
+    # rough day against an otherwise-flat month doesn't trip this - a
+    # real decline shows up as a multi-window slope, not a one-day dip.
+    sales7d = c.get("sales7d")
+    vol7d = c.get("vol7d")
+    if not sales7d or not vol7d:
+        return None
+    avg7d = vol7d / sales7d
+    if avg7d > avg30d * _NFT_SCOPE_DECLINE_7D_RATIO:
+        return None
+
+    symbol = c.get("symbol") or "ETH"
+    return (
+        f"Real sale prices have been sliding, not climbing - today's average sale is "
+        f"{avg1d:.4f} {symbol}, down from a 7-day average of {avg7d:.4f} and a 30-day average of "
+        f"{avg30d:.4f} - this looks like a collection working off a fading top, not building one"
+    )
+
+
 def _trend_up(values: list[float], min_len: int) -> tuple[bool, float]:
     # Requires a MAJORITY of recent consecutive moves to be upward, not
     # just an endpoint-to-endpoint comparison - a single spike surrounded
@@ -4380,18 +4441,29 @@ def _nft_scope_score(
     if traded_out_reason:
         red_flags.append(traded_out_reason)
 
+    declining_trend_reason = _detect_declining_price_trend(c)
+    if declining_trend_reason:
+        red_flags.append(declining_trend_reason)
+
     # A detected fake offer, an abnormal supply/owner turnover, an
-    # already-established blue chip, or a collection that's already been
-    # extensively traded over its whole life is a hard stop, not a minor
-    # deduction - never recommend regardless of how high the rest of the
-    # score is (the first two can otherwise produce a HIGH score, since
-    # "lots of sales" and "many owners" are exactly what those numbers
-    # look like from the outside; the third and fourth would score
-    # highest of all, since an established/well-worn collection
+    # already-established blue chip, a collection that's already been
+    # extensively traded over its whole life, or one whose real sale
+    # prices are on a sustained multi-window decline is a hard stop, not
+    # a minor deduction - never recommend regardless of how high the rest
+    # of the score is (the first two can otherwise produce a HIGH score,
+    # since "lots of sales" and "many owners" are exactly what those
+    # numbers look like from the outside; the third and fourth would
+    # score highest of all, since an established/well-worn collection
     # legitimately aces every soft signal without being early in any
     # sense - confirmed live: low owner count let a heavily-traded
-    # collection through the blue-chip check alone).
-    blocked = fake_offer_reason is not None or turnover_blocks or blue_chip_reason is not None or traded_out_reason is not None
+    # collection through the blue-chip check alone; the fifth confirmed
+    # live: a cheap-sale burst climbing 286% within its own tiny window
+    # scored 95/100 while the collection's real prices had been sliding
+    # for a month).
+    blocked = (
+        fake_offer_reason is not None or turnover_blocks or blue_chip_reason is not None
+        or traded_out_reason is not None or declining_trend_reason is not None
+    )
 
     # A description, social links, a category, even a listed floor price
     # cost a scammer nothing to fake and don't require a single other

@@ -316,6 +316,59 @@ def test_score_blocks_already_traded_out_even_with_a_live_burst():
     assert any("lifetime sales" in f for f in score["red_flags"])
 
 
+# ── _detect_declining_price_trend - real false positive: a cheap-sale ───
+# burst climbing within its own tiny window looked bullish while the
+# collection's actual sale prices had been sliding for weeks (confirmed
+# live: "Guild of Grime" scored 95/100 as "Momentum Building" off a burst
+# from ~$4 to ~$16 - a 286% jump entirely within noise - while OpenSea
+# showed its floor down 35.5% that same day and a chart sloping hard down
+# from its all-time high).
+
+def test_declining_price_trend_flags_a_sustained_multi_window_slide():
+    # 30d average ~1.0, 7d average ~0.4, 1d average ~0.1 - each window
+    # cheaper than the last, the actual shape of a fading top.
+    c = {"vol30d": 100.0, "sales30d": 100, "vol7d": 8.0, "sales7d": 20, "vol1d": 0.5, "sales24h": 5}
+    assert main._detect_declining_price_trend(c) is not None
+
+
+def test_declining_price_trend_ignores_a_single_off_day():
+    # 1d average is down against the 30d average, but the 7d average
+    # hasn't moved - one rough day, not a sustained slide.
+    c = {"vol30d": 100.0, "sales30d": 100, "vol7d": 20.0, "sales7d": 20, "vol1d": 0.3, "sales24h": 5}
+    assert main._detect_declining_price_trend(c) is None
+
+
+def test_declining_price_trend_ignores_stable_or_rising_prices():
+    c = {"vol30d": 100.0, "sales30d": 100, "vol7d": 25.0, "sales7d": 20, "vol1d": 6.0, "sales24h": 5}
+    assert main._detect_declining_price_trend(c) is None
+
+
+def test_declining_price_trend_requires_a_real_30d_sample():
+    # Only 3 sales in 30 days - not enough to trust as a trend, regardless
+    # of how the numbers line up.
+    c = {"vol30d": 10.0, "sales30d": 3, "vol7d": 0.5, "sales7d": 2, "vol1d": 0.05, "sales24h": 1}
+    assert main._detect_declining_price_trend(c) is None
+
+
+def test_declining_price_trend_handles_missing_data():
+    assert main._detect_declining_price_trend({}) is None
+    assert main._detect_declining_price_trend({"vol30d": None, "sales30d": None}) is None
+
+
+def test_score_blocks_declining_price_trend_even_with_a_live_burst():
+    # The real false positive, reproduced end to end: a live rapid-
+    # activity burst with a price surge inside it should not be enough
+    # to overcome real sale prices sliding across three windows.
+    c = strong_collection(
+        vol30d=100.0, sales30d=100, vol7d=8.0, sales7d=20, vol1d=0.5, sales24h=5,
+    )
+    burst = {"count": 5, "unique_buyers": 5, "unique_sellers": 5, "window_minutes": 30, "price_surge_pct": 286}
+    score = main._nft_scope_score(c, None, rapid_activity=burst)
+    assert score["blocked"] is True
+    assert not main._nft_scope_worth_posting(score)
+    assert any("sliding" in f for f in score["red_flags"])
+
+
 # ── has_timeliness_signal - "worth posting" requires something actually ──
 # happening, not just that a project looks legitimate on paper. Real false
 # positive: a 6-month-old collection with only a thin 24h sales trickle and
