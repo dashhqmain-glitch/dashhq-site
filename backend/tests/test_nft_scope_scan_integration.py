@@ -591,6 +591,87 @@ async def test_trending_scan_budget_bounds_worst_case_api_cost():
     assert posted == []
 
 
+async def test_trending_pass_scan_reaches_deep_candidates_via_rotation_not_just_the_front_of_the_pool():
+    # Regression test for a real, confirmed-live bug: with 7 chains x 3
+    # sources the merged candidate pool routinely holds 500+ unique
+    # slugs, but the scan budget only covers a fraction of it. Always
+    # starting the scan at position 0 meant candidates past the budget
+    # were NEVER reached - the per-slug scan cooldown (5 min) expires
+    # right before the next ~5-7 min poll cycle runs, so the exact same
+    # front slice got re-scanned every single cycle forever. Two real,
+    # clearly-qualifying movers sat unscanned the entire time they kept
+    # clearing every other gate, confirmed live. Starting from a random
+    # offset each cycle is what actually lets the full pool get covered
+    # over successive cycles instead of just its front.
+    _config_channel()
+    POOL_SIZE = 120
+
+    async def fake_opensea_get(client, path, params=None):
+        if path == "/collections":
+            if params["order_by"] == "created_date" or params["chain"] != "ethereum" or params["order_by"] != "seven_day_volume":
+                return {"collections": []}
+            return {"collections": [{"collection": f"cand-{i}"} for i in range(POOL_SIZE)]}
+        if path.startswith("/events/collection/"):
+            return _qualifying_sale_events()
+        raise AssertionError(f"unexpected {path} {params}")
+
+    evaluated: set = set()
+
+    async def fake_alert_state_get(client, slug, alert_type):
+        return None  # never cooled down - isolates rotation coverage from cooldown timing
+
+    async def fake_alert_state_set(client, slug, alert_type, value):
+        return None
+
+    async def fake_collection_core(slug):
+        evaluated.add(slug)
+        return _strong_collection(slug)
+
+    async def fake_top_offer(client, slug):
+        return None
+
+    async def fake_recent_snapshots(client, slug, limit=30):
+        return []
+
+    async def fake_post(client, channel_id, embed, content=None):
+        return True
+
+    async def fake_wash_clean(client, slug):
+        return True
+
+    async def fake_tracked_slugs(client):
+        return []
+
+    async def fake_seen_has(client, slug):
+        return False
+
+    async def fake_mark_seen(client, slug):
+        return None
+
+    with patch.object(main, "_opensea_get", new=fake_opensea_get), \
+         patch.object(main, "_nft_mint_radar_recently_seen", new=fake_seen_has), \
+         patch.object(main, "_nft_mint_radar_mark_seen", new=fake_mark_seen), \
+         patch.object(main, "_nft_collection_core", new=fake_collection_core), \
+         patch.object(main, "_opensea_get_top_offer", new=fake_top_offer), \
+         patch.object(main, "_nft_recent_snapshots", new=fake_recent_snapshots), \
+         patch.object(main, "_nft_scope_clears_wash_check", new=fake_wash_clean), \
+         patch.object(main, "_nft_poll_tracked_slugs", new=fake_tracked_slugs), \
+         patch.object(main, "_nft_alert_state_get", new=fake_alert_state_get), \
+         patch.object(main, "_nft_alert_state_set", new=fake_alert_state_set), \
+         patch.object(main, "_post_channel_message", new=fake_post):
+        for _ in range(15):
+            async with main.httpx.AsyncClient() as client:
+                await main._nft_scope_scan(client)
+
+    budget = main._nft_scope_pass_limits(True)["trending_scan_budget"]
+    assert budget < POOL_SIZE, "test assumption broken - budget must be smaller than the pool to prove anything"
+    deep_slugs = {f"cand-{i}" for i in range(budget, POOL_SIZE)}
+    assert evaluated & deep_slugs, (
+        f"no candidate past the front {budget} of a {POOL_SIZE}-deep pool was ever scanned across 15 cycles - "
+        "rotation isn't reaching the wider pool"
+    )
+
+
 async def test_healthy_opensea_posts_more_than_one_when_genuine_demand_exists():
     # The "auto-scale up" half: with no recent real 429 and several
     # distinct candidates that ALL genuinely clear every gate on their
@@ -884,9 +965,17 @@ async def test_trending_pass_rotates_off_a_recent_winner_instead_of_reposting_it
         async with main.httpx.AsyncClient() as client:
             second_posted = await main._nft_scope_scan(client)
 
-    assert first_posted == ["winner-1"]
-    assert "winner-1" not in second_posted
-    assert second_posted == ["winner-2"]
+    # Which candidate wins first is no longer deterministic (the merged
+    # candidate list now starts from a random offset each cycle, so a
+    # real deeper pool gets a fair scan instead of the same top slice
+    # every time - see the comment on the trending-pass merge above) -
+    # what actually matters here is the rotation invariant itself: the
+    # winner steps aside via its post-cooldown, and a DIFFERENT qualifying
+    # candidate takes the slot next cycle.
+    all_winners = {"winner-1", "winner-2", "winner-3", "winner-4"}
+    assert len(first_posted) == 1 and first_posted[0] in all_winners
+    assert len(second_posted) == 1 and second_posted[0] in all_winners
+    assert first_posted[0] not in second_posted
 
 
 async def test_momentum_pass_is_not_structurally_biased_toward_alphabetically_early_slugs():

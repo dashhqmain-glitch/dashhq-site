@@ -5394,6 +5394,24 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
             if slug and slug not in seen_slugs:
                 seen_slugs.add(slug)
                 collections.append(raw)
+    # Confirmed live: with 7 chains x 3 sources this merged pool routinely
+    # holds 500+ unique candidates, but the scan budget only covers ~40 of
+    # them - and the scan cooldown (5 min, matching the poll cadence) means
+    # THE SAME top ~40 have their cooldown expire right before every next
+    # cycle, so the loop always starts back at position 0 and never
+    # actually reaches position 41+. The comment this replaced claimed the
+    # per-slug cooldown alone "forces rotation across the wider pool" -
+    # verified live that it doesn't: real, clearly-qualifying candidates
+    # ranked in the hundreds (confirmed against two live movers the whole
+    # time they kept clearing every other gate) were never evaluated even
+    # once across a multi-hour window. Starting from a random offset each
+    # cycle instead of always position 0 is what actually spreads the same
+    # fixed budget across the WHOLE pool over successive cycles, not just
+    # its front - cost is identical (still capped at trending_scan_budget
+    # evaluations), only which slice of the pool gets that budget changes.
+    if collections:
+        start = random.randrange(len(collections))
+        collections = collections[start:] + collections[:start]
     for raw in collections:
         if len(trending_posted) >= limits["trending_max"] or trending_scanned >= limits["trending_scan_budget"]:
             break
