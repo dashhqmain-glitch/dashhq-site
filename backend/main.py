@@ -2897,6 +2897,12 @@ async def _nft_log_sale_events(client: httpx.AsyncClient, slug: str, events: lis
         buyer, seller, event_at = e.get("buyer"), e.get("seller"), e.get("event_timestamp")
         if not (token_id and buyer and seller and event_at):
             continue
+        # A self-sale (same wallet as buyer and seller) is never a real
+        # trade - excluded at the source so it can never contaminate any
+        # downstream wallet-precision signal (win rate, realized PnL),
+        # not just the ones that happen to remember to filter for it.
+        if buyer == seller:
+            continue
         price, symbol = None, None
         payment = e.get("payment")
         if payment:

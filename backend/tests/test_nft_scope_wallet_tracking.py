@@ -69,6 +69,29 @@ async def test_log_sale_events_skips_events_missing_required_fields():
     assert posted == []
 
 
+async def test_log_sale_events_excludes_self_trades():
+    # A self-sale (same wallet as buyer and seller) is never a real trade -
+    # excluded at the source so it can never contaminate a wallet's
+    # realized-PnL win rate downstream, not just wherever a check happens
+    # to remember to filter for it.
+    posted = []
+
+    class FakeClient:
+        async def post(self, url, headers=None, json=None):
+            posted.append(json)
+            return FakeRes(200)
+
+    events = [
+        sale_event("same-wallet", "same-wallet", token_id="1"),  # self-trade - must be dropped
+        sale_event("real-buyer", "real-seller", token_id="2"),   # genuine trade - must survive
+    ]
+    await main._nft_log_sale_events(FakeClient(), "azuki", events)
+
+    assert len(posted) == 1
+    assert len(posted[0]) == 1
+    assert posted[0][0]["token_id"] == "2"
+
+
 async def test_log_sale_events_is_a_noop_on_no_valid_rows():
     class FakeClient:
         async def post(self, url, headers=None, json=None):

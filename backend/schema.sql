@@ -287,6 +287,21 @@ alter table nft_sale_events_log enable row level security;
 -- above - actual profit/loss, not an estimate. A wallet can appear more
 -- than once per token if it round-tripped it multiple times; that's
 -- intentional, each is a separate realized trade.
+--
+-- Two precision guards, both aimed at keeping a wallet's win rate
+-- honest rather than easy to inflate:
+--   - sell.buyer != buy.seller excludes a reciprocal round-trip back to
+--     the exact wallet it was bought from (buy from B, sell back to B) -
+--     the same back-and-forth wash pattern _analyze_wash_trading already
+--     screens for elsewhere, applied here to the realized-PnL data too.
+--     Self-trades (same wallet as buyer and seller on one leg) are
+--     excluded even earlier, at the logging step itself.
+--   - sell.event_at > buy.event_at + a minimum hold guards against
+--     counting a same-block/near-instant MEV or bot flip as "conviction" -
+--     the user's own framing was buying early and HOLDING for a real
+--     move, not microsecond arbitrage. 15 minutes is long enough to
+--     exclude that noise, short enough not to exclude a genuine trader
+--     spotting and acting on a real mispricing.
 create or replace view nft_wallet_realized_trades as
 select
   buy.buyer as wallet,
@@ -304,7 +319,8 @@ join nft_sale_events_log sell
   on sell.slug = buy.slug
   and sell.token_id = buy.token_id
   and sell.seller = buy.buyer
-  and sell.event_at > buy.event_at;
+  and sell.buyer != buy.seller
+  and sell.event_at > buy.event_at + interval '15 minutes';
 
 -- Per-wallet realized win rate, across every trade this bot has directly
 -- observed resolve - buys early, sells for profit, this is the metric
