@@ -1,10 +1,21 @@
-name: Backend CI
+name: Site CI
 
 # Runs the Python backend's test suite on every change - this is what
 # actually keeps deploys safe, not the deploy mechanism itself (Vercel's
 # own atomic per-deployment cutover already means zero downtime as long
 # as what gets shipped isn't broken). Catches a bug before it's live,
 # instead of finding out from a broken Discord command.
+#
+# Covers the WHOLE site, not just backend/api - vercel.json builds the
+# Python API and every root-level static page (index.html, apply.html,
+# portal.html, their .js/.css, assets/, fonts/) as ONE Vercel deployment,
+# so a frontend-only change ships through the exact same deploy as a
+# backend change and needs the exact same safety net. Originally this
+# workflow only triggered on backend/**/api/** changes - confirmed that
+# meant a pure frontend edit (e.g. apply.html) never triggered the deploy
+# hook or the commit-verification below at all, leaving frontend changes
+# with zero protection against Vercel's native auto-deploy silently not
+# firing (see the note below) or a broken page shipping unnoticed.
 #
 # Deployment is explicitly triggered by THIS workflow (see trigger-deploy
 # below), not left to Vercel's native GitHub App integration - confirmed
@@ -31,12 +42,24 @@ on:
     paths:
       - 'backend/**'
       - 'api/**'
+      - '*.html'
+      - '*.js'
+      - '*.css'
+      - 'assets/**'
+      - 'fonts/**'
+      - 'vercel.json'
       - '.github/workflows/backend-ci.yml'
   pull_request:
     branches: [master]
     paths:
       - 'backend/**'
       - 'api/**'
+      - '*.html'
+      - '*.js'
+      - '*.css'
+      - 'assets/**'
+      - 'fonts/**'
+      - 'vercel.json'
       - '.github/workflows/backend-ci.yml'
 
 jobs:
@@ -134,6 +157,23 @@ jobs:
             exit 1
           fi
 
+      - name: Live frontend page check
+        # The API responding correctly says nothing about whether the
+        # static pages built cleanly - a broken vercel.json route or a
+        # bad static asset reference wouldn't be caught by any check
+        # above. Hits every root-level page actually meant to be public.
+        run: |
+          fail=0
+          for path in "/" "/apply" "/portal"; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" "https://www.dashhq.site${path}")
+            echo "GET ${path}: HTTP $code"
+            if [ "$code" -ge 400 ]; then
+              echo "::error::${path} is returning HTTP $code after a deploy."
+              fail=1
+            fi
+          done
+          exit $fail
+
       - name: Re-register Discord commands
         # Idempotent and cheap - safe to run after every deploy, so a
         # command-schema change never gets forgotten as a separate manual
@@ -177,5 +217,5 @@ jobs:
           curl -s -o /dev/null -w "notify: %{http_code}\n" \
             -G "https://www.dashhq.site/cron/notify" \
             --data-urlencode "level=error" \
-            --data-urlencode "message=Backend CI failed on master after ${{ github.sha }} (${{ github.event.head_commit.message }}). Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --data-urlencode "message=Site CI failed on master after ${{ github.sha }} (${{ github.event.head_commit.message }}). Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
