@@ -106,3 +106,35 @@ async def test_declined_then_accepted_still_generates_a_fresh_invite():
         await main._finalize_review("app1", "accepted", "reviewer1")
 
     assert len(post_calls) == 1
+
+
+# ── _application_embed's "Required Follows" field - there's no real API
+# follow-check (X dropped its free tier), so this is a self-reported claim
+# surfaced with direct links so a reviewer can spot-check it manually. ──
+
+def _follow_field(embed):
+    return next(f for f in embed["fields"] if f["name"] == "Required Follows (self-reported)")
+
+
+def test_embed_flags_a_true_claim_and_links_every_required_account():
+    row = _application_row(followed_team=True)
+    field = _follow_field(main._application_embed(row))
+    assert "Claims all" in field["value"] and "NOT all" not in field["value"]
+    for _, handle in main._REQUIRED_FOLLOW_ACCOUNTS:
+        assert f"https://x.com/{handle}" in field["value"]
+
+
+def test_embed_flags_a_false_claim():
+    row = _application_row(followed_team=False)
+    field = _follow_field(main._application_embed(row))
+    assert "Claims NOT all" in field["value"]
+
+
+def test_embed_treats_a_missing_followed_team_key_as_unclaimed_not_a_crash():
+    # Older rows (or a test fixture that predates this column) shouldn't
+    # blow up the embed - missing evidence must read the same as "false",
+    # never silently as "true".
+    row = _application_row()
+    assert "followed_team" not in row
+    field = _follow_field(main._application_embed(row))
+    assert "Claims NOT all" in field["value"]

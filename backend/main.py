@@ -927,6 +927,19 @@ def _x_profile_button(x_username: str) -> dict:
     return {"type": 2, "style": 5, "label": "View X Profile", "url": f"https://x.com/{x_username}"}
 
 
+# Kept in sync with apply.html's step-5 follow-chip list by hand - there's
+# no shared source between the static frontend and this backend module, so
+# a change to one (adding/removing a required account) needs the other
+# updated too. Small, rarely-changed list; not worth a build step just to
+# share it.
+_REQUIRED_FOLLOW_ACCOUNTS = [
+    ("Dash HQ (Main)", "DASHHQX"),
+    ("Alvin", "sickofnfts"),
+    ("Spykiddo", "OnlySpykidoo"),
+    ("Dee", "deekamix"),
+]
+
+
 def _application_embed(
     app_row: dict, status: str = "pending", reviewer: str = None, invite_url: str = None, decline_reason: str = None
 ) -> dict:
@@ -935,12 +948,23 @@ def _application_embed(
     if status != "pending":
         icon = "✅" if status == "accepted" else "❌"
         footer = f"{icon} {status.capitalize()} by {reviewer} · {footer}"
+    # There's no real API-verified follow-check here (X's API dropped its
+    # free tier - see the session notes) - this is self-reported by the
+    # applicant clicking through each link on the apply page. Surfacing it
+    # as an explicit claim, with the actual accounts one click away, is
+    # what lets a reviewer spot-check it manually in seconds instead of
+    # either blindly trusting a hidden boolean or having to go dig up the
+    # required-accounts list themselves.
+    claimed = app_row.get("followed_team")
+    follow_lines = ", ".join(f"[@{handle}](https://x.com/{handle})" for _, handle in _REQUIRED_FOLLOW_ACCOUNTS)
+    follow_value = f"{'✅ Claims all' if claimed else '⚠️ Claims NOT all'} followed - spot check: {follow_lines}"
     fields = [
         {"name": "Name / Alias", "value": _trunc(app_row["name"]), "inline": True},
         {"name": "X Profile", "value": f"@{app_row['x_username']}", "inline": True},
         {"name": "Intro & Role", "value": _trunc(app_row["intro"]), "inline": False},
         {"name": "Communities", "value": _trunc(app_row["communities"]), "inline": False},
         {"name": "Adding Value", "value": _trunc(app_row["value"]), "inline": False},
+        {"name": "Required Follows (self-reported)", "value": follow_value, "inline": False},
     ]
     if decline_reason:
         fields.append({"name": "Reason for Declining", "value": _trunc(decline_reason, 300), "inline": False})

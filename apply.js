@@ -111,7 +111,7 @@ var Apply = (function(){
     if(submitting) return;
     var hp = document.getElementById('f-hp');
     var payload = getData();
-    payload.followedTeam = true;
+    payload.followedTeam = !!(visited.dashhqx && visited.alvin && visited.schoolboy && visited.dee);
     payload.token = identity ? identity.token : '';
 
     var nextBtn = document.getElementById('nextBtn');
