@@ -61,11 +61,24 @@ class Settings(BaseSettings):
     # email-on-failure. Empty = the /cron/notify endpoint is a safe no-op.
     discord_ops_alert_channel_id: str = ""
 
-    # ACO ticketing system: where drop announcements post, wallet
-    # submissions happen, and support-ticket threads spawn from. Empty
-    # means the whole feature is a safe no-op (matches every other
-    # channel setting's default here).
+    # ACO ticketing system: the announcement channel - drops post here,
+    # wallet submissions happen here. Staff-posted, but open for every
+    # member to view and interact with (submit wallets, etc.) - only
+    # posting itself is meant to be staff-only, enforced via that
+    # channel's own Discord permissions, not by this bot. Empty means the
+    # whole feature is a safe no-op (matches every other channel setting
+    # here).
     discord_aco_channel_id: str = ""
+    # A SEPARATE channel from the one above - every support-ticket thread
+    # spawns here instead of wherever "Need Help?" was clicked, so tickets
+    # never mix into the public announcement channel's history. Meant to
+    # be restricted (via Discord's own channel permissions, not this bot)
+    # to the ACO staff role only - a customer never sees the channel
+    # itself, only the one private thread the bot explicitly adds them to,
+    # which Discord grants independently of whether they can see the
+    # parent channel. Falls back to discord_aco_channel_id if unset, so
+    # the feature degrades instead of breaking if this is never configured.
+    discord_aco_support_channel_id: str = ""
     # A dedicated role for ACO staff, deliberately separate from
     # citizen_role_id and from full Manage-Server permissions - lets
     # specific trusted members run drops and handle support tickets

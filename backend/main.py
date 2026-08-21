@@ -1950,7 +1950,13 @@ async def _handle_aco_support_open(payload: dict) -> dict:
     member_user = payload.get("member", {}).get("user", {})
     discord_user_id = member_user.get("id", "")
     display_name = member_user.get("global_name") or member_user.get("username", "member")
-    channel_id = payload.get("channel_id") or settings.discord_aco_channel_id
+    # Always the dedicated support channel, never wherever the button was
+    # clicked from - a ticket opened from a drop in the public
+    # announcement channel must still land in the (staff-role-restricted)
+    # support channel, not mix into the announcement channel's own
+    # history. Falls back to the announcement channel only if the support
+    # channel was never configured, so this degrades instead of breaking.
+    channel_id = settings.discord_aco_support_channel_id or settings.discord_aco_channel_id
     if not discord_user_id or not settings.discord_bot_token or not channel_id:
         return {"type": 4, "data": {"content": "Something went wrong opening your ticket.", "flags": 64}}
 

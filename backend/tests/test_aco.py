@@ -533,6 +533,73 @@ async def test_support_open_creates_a_new_thread_when_none_open():
     assert "newthread" in body["content"]
 
 
+async def test_support_open_always_targets_the_dedicated_support_channel():
+    # Regression test for a real requirement: a ticket opened from a drop
+    # in the public announcement channel must land in the (staff-role-
+    # restricted) support channel, never wherever the button was clicked
+    # from.
+    settings.discord_bot_token = "tok"
+    settings.discord_aco_channel_id = "announcement-chan"
+    settings.discord_aco_support_channel_id = "support-chan"
+    thread_post_urls = []
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [])
+
+        async def post(self, url, headers=None, json=None):
+            if "/threads" in url:
+                thread_post_urls.append(url)
+                return FakeRes(200, {"id": "newthread"})
+            return FakeRes(200, {})
+
+        async def put(self, url, headers=None, json=None):
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        # The click came from the announcement channel...
+        await main._handle_aco_support_open(_payload(channel_id="announcement-chan"))
+
+    # ...but the thread must be created under the support channel instead.
+    assert len(thread_post_urls) == 1
+    assert "support-chan" in thread_post_urls[0]
+    assert "announcement-chan" not in thread_post_urls[0]
+
+
+async def test_support_open_falls_back_to_announcement_channel_when_support_channel_unset():
+    settings.discord_bot_token = "tok"
+    settings.discord_aco_channel_id = "announcement-chan"
+    settings.discord_aco_support_channel_id = ""
+    thread_post_urls = []
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [])
+
+        async def post(self, url, headers=None, json=None):
+            if "/threads" in url:
+                thread_post_urls.append(url)
+                return FakeRes(200, {"id": "newthread"})
+            return FakeRes(200, {})
+
+        async def put(self, url, headers=None, json=None):
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        await main._handle_aco_support_open(_payload(channel_id="announcement-chan"))
+
+    assert len(thread_post_urls) == 1
+    assert "announcement-chan" in thread_post_urls[0]
+
+
 # ── Support ticket close permission ───────────────────────────────────────
 
 async def test_support_close_allows_ticket_opener():
