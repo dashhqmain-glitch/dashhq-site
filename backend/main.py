@@ -2259,11 +2259,14 @@ def _aco_info_select_component(titles: list[str]) -> dict:
 
 
 async def _handle_aco_info_command(payload: dict) -> dict:
-    # Open to everyone, ephemeral, purely self-service - unlike
-    # /cron/aco-education (which posts publicly on a schedule and moves
-    # the rotation forward), this never touches last_posted_at or posts
-    # anywhere but back to whoever asked. Same browse-a-select-menu
-    # pattern as /dashboard's toolkit_select, just scoped to ACO content.
+    # Open to everyone, PUBLIC (not ephemeral) - this is a shared
+    # reference tool, not a personal lookup, so it posts visibly in the
+    # channel like any other announcement rather than being hidden to
+    # just whoever ran the command. Unlike /cron/aco-education (which
+    # posts publicly on a schedule and moves the rotation forward), this
+    # never touches last_posted_at - purely a browse view. Same browse-
+    # a-select-menu pattern as /dashboard's toolkit_select, just scoped
+    # to ACO content.
     async with httpx.AsyncClient(timeout=15) as client:
         res = await client.get(
             f"{settings.supabase_url}/rest/v1/aco_education_posts",
@@ -2279,7 +2282,7 @@ async def _handle_aco_info_command(payload: dict) -> dict:
         "author": _ACO_AUTHOR, "title": "🎟️ Guides & Rules", "color": _ACO_BLUE, "footer": ACO_FOOTER,
         "description": "Pick a guide below to read it.\n\n" + "\n".join(lines),
     }
-    return {"type": 4, "data": {"embeds": [embed], "components": [_aco_info_select_component([p["title"] for p in posts])], "flags": 64}}
+    return {"type": 4, "data": {"embeds": [embed], "components": [_aco_info_select_component([p["title"] for p in posts])]}}
 
 
 async def _handle_aco_info_select(payload: dict) -> dict:

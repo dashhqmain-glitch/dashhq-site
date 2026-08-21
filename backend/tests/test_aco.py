@@ -755,7 +755,8 @@ async def test_aco_info_command_lists_active_guides():
         result = await main._handle_aco_info_command(_payload())
 
     assert result["type"] == 4
-    assert result["data"]["flags"] == 64  # ephemeral
+    # Public, not ephemeral - a shared reference tool, not a personal lookup.
+    assert "flags" not in result["data"]
     options = result["data"]["components"][0]["components"][0]["options"]
     assert {o["value"] for o in options} == {"Guide A", "Guide B"}
 
