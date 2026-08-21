@@ -1197,13 +1197,27 @@ async def _dispatch_interaction(payload: dict, itype) -> dict:
             return await _handle_history_command(payload)
         if cmd_name == "pidgin-exempt":
             return await _handle_pidgin_exempt_command(payload)
+        if cmd_name == "aco-drop":
+            return await _handle_aco_drop_command(payload)
+        if cmd_name == "my-aco":
+            return await _handle_my_aco_command(payload)
+        if cmd_name == "aco-setup-support":
+            return await _handle_aco_setup_support_command(payload)
         return await _handle_toolkit_command(payload)
 
     member_user = payload.get("member", {}).get("user", {})
     reviewer = member_user.get("global_name") or member_user.get("username", "someone")
 
-    if itype == 5:  # MODAL_SUBMIT — the decline-reason box was just submitted
-        custom_id = payload.get("data", {}).get("custom_id", "")
+    if itype == 5:  # MODAL_SUBMIT
+        modal_id = payload.get("data", {}).get("custom_id", "")
+        if modal_id == "acocreate":
+            return await _handle_aco_create_submit(payload)
+        if modal_id.startswith("acowallet:"):
+            _, _, drop_id = modal_id.partition(":")
+            return await _handle_aco_wallet_submit(payload, drop_id)
+
+        # the decline-reason box was just submitted
+        custom_id = modal_id
         action, _, app_id = custom_id.partition(":")
         if action != "declinereason" or not app_id:
             return {"type": 4, "data": {"content": "Unrecognized submission.", "flags": 64}}
@@ -1233,6 +1247,23 @@ async def _dispatch_interaction(payload: dict, itype) -> dict:
         return await _handle_history_clear_confirm(payload)
     if history_id == "history_clear_cancel":
         return await _handle_history_clear_cancel(payload)
+
+    if history_id.startswith("acojoin:"):
+        _, _, drop_id = history_id.partition(":")
+        return await _handle_aco_join_button(payload, drop_id)
+    if history_id.startswith("acowallets:"):
+        _, _, drop_id = history_id.partition(":")
+        return await _handle_aco_wallets_button(payload, drop_id)
+    if history_id.startswith("acoresolve:"):
+        _, _, drop_id = history_id.partition(":")
+        return await _handle_aco_resolve_button(payload, drop_id)
+    if history_id.startswith("acocancel:"):
+        _, _, drop_id = history_id.partition(":")
+        return await _handle_aco_cancel_button(payload, drop_id)
+    if history_id == "acosupport_open":
+        return await _handle_aco_support_open(payload)
+    if history_id == "acosupport_close":
+        return await _handle_aco_support_close(payload)
 
     custom_id = payload.get("data", {}).get("custom_id", "")
     action, _, app_id = custom_id.partition(":")
@@ -1334,6 +1365,540 @@ async def _finalize_review(app_id: str, status: str, reviewer: str, decline_reas
             "components": updated_components,
         },
     }
+
+
+# ── ACO ticketing system ──────────────────────────────────────────────────
+# Coordinates member wallets toward FCFS/allowlist mint "drops" the team is
+# running. A "drop" is one mint opportunity; a "ticket" is one member's
+# wallet submitted toward it. A member can submit as many distinct wallets
+# as they like per drop (explicit product requirement, not an oversight) -
+# uniqueness is on (drop, member, wallet), so two different wallets from
+# the same member are two real tickets, not a conflict. Deadline
+# enforcement and the wallet-format check are both real, server-side
+# checks - never trust that a still-visible Discord button means a drop is
+# still open, since buttons don't auto-disable on their own.
+_ACO_WALLET_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
+_ACO_MAX_WALLETS_PER_SUBMIT = 25  # sane ceiling on one modal submission, not a real cap on "as many as they like" - submit again for more
+_ACO_DURATION_RE = re.compile(r"^(\d+)\s*([mhd])$", re.IGNORECASE)
+
+
+def _is_aco_staff(payload: dict) -> bool:
+    # A dedicated role, deliberately separate from full Manage-Server
+    # rights - lets specific trusted members run ACO without needing full
+    # server-admin permissions. Manage-Server holders can always act too,
+    # as a safety net in case the role is never configured.
+    if _is_team_member(payload):
+        return True
+    if not settings.discord_aco_staff_role_id:
+        return False
+    roles = (payload.get("member") or {}).get("roles") or []
+    return settings.discord_aco_staff_role_id in roles
+
+
+def _parse_aco_wallets(raw: str) -> tuple[list[str], list[str]]:
+    # Splits on newlines or commas so a member can paste several addresses
+    # in one submission - dedupes case-insensitively (checksummed
+    # addresses differ only by case) while preserving the original casing
+    # of whichever copy was seen first.
+    seen: set[str] = set()
+    valid: list[str] = []
+    invalid: list[str] = []
+    for token in re.split(r"[\n,]+", raw):
+        token = token.strip()
+        if not token:
+            continue
+        key = token.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        (valid if _ACO_WALLET_RE.match(token) else invalid).append(token)
+    return valid, invalid
+
+
+def _parse_aco_deadline(raw: str) -> datetime | None:
+    # Accepts either a short relative duration ("6h", "30m", "2d") measured
+    # from the moment the drop is created, or a full ISO 8601 datetime -
+    # the reference format this was modeled on shows deadlines as "N hours
+    # ago/from now," so relative input is the common case, not the
+    # exception.
+    raw = raw.strip()
+    m = _ACO_DURATION_RE.match(raw)
+    if m:
+        amount, unit = int(m.group(1)), m.group(2).lower()
+        if amount <= 0:
+            return None
+        delta = {"m": timedelta(minutes=amount), "h": timedelta(hours=amount), "d": timedelta(days=amount)}[unit]
+        return datetime.now(timezone.utc) + delta
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _aco_deadline_text(deadline_iso: str | None) -> str:
+    if not deadline_iso:
+        return "-"
+    try:
+        deadline = datetime.fromisoformat(deadline_iso.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return "-"
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=timezone.utc)
+    seconds = (deadline - datetime.now(timezone.utc)).total_seconds()
+    if seconds <= 0:
+        hours_ago = -seconds / 3600
+        return f"Passed ({hours_ago:.1f}h ago)" if hours_ago < 48 else f"Passed ({-seconds / 86400:.1f}d ago)"
+    if seconds < 3600:
+        return f"in {int(seconds / 60)}m"
+    if seconds < 172800:
+        return f"in {seconds / 3600:.1f}h"
+    return f"in {seconds / 86400:.1f}d"
+
+
+def _aco_drop_embed(drop: dict, ticket_count: int, member_count: int) -> dict:
+    status = drop.get("status", "open")
+    color = {"open": EMBED_COLOR_GOOD, "resolved": EMBED_COLOR_WARN, "cancelled": EMBED_COLOR_BAD}.get(status, EMBED_COLOR_GOOD)
+    status_label = {"open": "🟢 Open", "resolved": "✅ Resolved", "cancelled": "❌ Cancelled"}.get(status, status)
+    fields = [
+        {"name": "Chain", "value": drop.get("chain") or "-", "inline": True},
+        {"name": "Deadline", "value": _aco_deadline_text(drop.get("deadline")), "inline": True},
+        {"name": "Status", "value": status_label, "inline": True},
+    ]
+    if drop.get("profit_note"):
+        fields.append({"name": "Profit / Notes", "value": _trunc(drop["profit_note"], 500), "inline": False})
+    if drop.get("contract_address"):
+        fields.append({"name": "Contract", "value": f"`{drop['contract_address']}`", "inline": False})
+    if drop.get("checker_url"):
+        fields.append({"name": "Checker", "value": drop["checker_url"], "inline": False})
+    fields.append({"name": "Wallets Submitted", "value": f"{ticket_count} ({member_count} member(s))", "inline": True})
+    return {
+        "title": f"🎟️ ACO Drop: {drop['title']}",
+        "color": color,
+        "fields": fields,
+        "footer": {"text": f"Drop ID: {drop['id']}"},
+    }
+
+
+def _aco_drop_components(drop_id: str, status: str) -> list:
+    see_wallets = {"type": 2, "style": 2, "label": "See Wallets", "custom_id": f"acowallets:{drop_id}"}
+    if status != "open":
+        return [{"type": 1, "components": [see_wallets]}]
+    return [{
+        "type": 1,
+        "components": [
+            {"type": 2, "style": 1, "label": "Submit Wallet(s)", "custom_id": f"acojoin:{drop_id}"},
+            see_wallets,
+            {"type": 2, "style": 3, "label": "Mark Resolved", "custom_id": f"acoresolve:{drop_id}"},
+            {"type": 2, "style": 4, "label": "Cancel Drop", "custom_id": f"acocancel:{drop_id}"},
+        ],
+    }]
+
+
+async def _discord_edit_channel_message(channel_id: str, message_id: str, embed: dict, components: list) -> None:
+    # A direct channel-message edit (bot-token auth), independent of the
+    # interaction-response mechanism - used when a modal-submit needs to
+    # update the shared drop message AND separately reply to the
+    # submitter, which a single interaction response can't do at once
+    # (it's one response type, not both an UPDATE_MESSAGE and a reply).
+    if not channel_id or not message_id or not settings.discord_bot_token:
+        return
+    async with httpx.AsyncClient(timeout=10) as client:
+        try:
+            await client.patch(
+                f"{DISCORD_API}/channels/{channel_id}/messages/{message_id}",
+                headers={"Authorization": f"Bot {settings.discord_bot_token}"},
+                json={"embeds": [embed], "components": components},
+            )
+        except httpx.HTTPError:
+            logger.exception("Failed to edit ACO drop message %s/%s", channel_id, message_id)
+
+
+async def _aco_get_drop(client: httpx.AsyncClient, drop_id: str) -> dict | None:
+    res = await client.get(
+        f"{settings.supabase_url}/rest/v1/aco_drops",
+        headers=_supabase_headers(),
+        params={"id": f"eq.{drop_id}", "select": "*"},
+    )
+    res.raise_for_status()
+    rows = res.json()
+    return rows[0] if rows else None
+
+
+def _aco_deadline_passed(drop: dict) -> bool:
+    deadline = datetime.fromisoformat(drop["deadline"].replace("Z", "+00:00"))
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) > deadline
+
+
+async def _aco_ticket_counts(client: httpx.AsyncClient, drop_id: str) -> tuple[int, int, list[dict]]:
+    res = await client.get(
+        f"{settings.supabase_url}/rest/v1/aco_tickets",
+        headers=_supabase_headers(),
+        params={"drop_id": f"eq.{drop_id}", "select": "discord_user_id,wallet_address,submitted_at", "order": "submitted_at.asc"},
+    )
+    res.raise_for_status()
+    tickets = res.json()
+    return len(tickets), len({t["discord_user_id"] for t in tickets}), tickets
+
+
+async def _handle_aco_drop_command(payload: dict) -> dict:
+    if not _is_aco_staff(payload):
+        return {"type": 4, "data": {"content": "ACO staff only.", "flags": 64}}
+    if not settings.discord_aco_channel_id:
+        return {"type": 4, "data": {"content": "The ACO channel isn't configured yet - set DISCORD_ACO_CHANNEL_ID.", "flags": 64}}
+    return {
+        "type": 9,
+        "data": {
+            "custom_id": "acocreate",
+            "title": "New ACO Drop",
+            "components": [
+                {"type": 1, "components": [{"type": 4, "custom_id": "title", "style": 1, "label": "Title", "max_length": 100, "required": True}]},
+                {"type": 1, "components": [{"type": 4, "custom_id": "chain", "style": 1, "label": "Chain", "max_length": 50, "required": True}]},
+                {"type": 1, "components": [{"type": 4, "custom_id": "deadline", "style": 1, "label": "Deadline (e.g. 6h, 30m, 2d, or an ISO date)", "max_length": 40, "required": True}]},
+                {"type": 1, "components": [{
+                    "type": 4, "custom_id": "profit", "style": 2, "label": "Profit / Notes", "max_length": 500, "required": True,
+                    "placeholder": "e.g. 30% Profit. Mega Heavy OA so expect some fails.",
+                }]},
+                {"type": 1, "components": [{
+                    "type": 4, "custom_id": "contract_and_checker", "style": 2,
+                    "label": "Contract + Checker URL (one per line)", "max_length": 300, "required": False,
+                }]},
+            ],
+        },
+    }
+
+
+async def _handle_aco_create_submit(payload: dict) -> dict:
+    if not _is_aco_staff(payload):
+        return {"type": 4, "data": {"content": "ACO staff only.", "flags": 64}}
+    values: dict[str, str] = {}
+    for row in payload.get("data", {}).get("components", []):
+        for comp in row.get("components", []):
+            values[comp.get("custom_id")] = (comp.get("value") or "").strip()
+
+    deadline = _parse_aco_deadline(values.get("deadline", ""))
+    if not deadline:
+        return {"type": 4, "data": {
+            "content": "Couldn't parse that deadline - use something like `6h`, `30m`, `2d`, or a full date like `2026-08-25T18:00`.",
+            "flags": 64,
+        }}
+
+    extra_lines = [l.strip() for l in values.get("contract_and_checker", "").split("\n") if l.strip()]
+    contract_address = extra_lines[0] if extra_lines else None
+    checker_url = extra_lines[1] if len(extra_lines) > 1 else None
+
+    member_user = payload.get("member", {}).get("user", {})
+    row = {
+        "title": values.get("title", "")[:100] or "Untitled Drop",
+        "chain": values.get("chain", "")[:50] or "-",
+        "deadline": deadline.isoformat(),
+        "profit_note": values.get("profit", "")[:500] or None,
+        "contract_address": contract_address,
+        "checker_url": checker_url,
+        "created_by": member_user.get("id", ""),
+        "discord_channel_id": settings.discord_aco_channel_id,
+    }
+    async with httpx.AsyncClient(timeout=15) as client:
+        res = await client.post(f"{settings.supabase_url}/rest/v1/aco_drops", headers=_supabase_headers(), json=row)
+        res.raise_for_status()
+        drop = res.json()[0]
+
+        msg_res = await _discord_post_with_retry(
+            client,
+            f"{DISCORD_API}/channels/{settings.discord_aco_channel_id}/messages",
+            {"Authorization": f"Bot {settings.discord_bot_token}"},
+            {"embeds": [_aco_drop_embed(drop, 0, 0)], "components": _aco_drop_components(drop["id"], "open")},
+        )
+        if msg_res.status_code < 300:
+            msg = msg_res.json()
+            await client.patch(
+                f"{settings.supabase_url}/rest/v1/aco_drops",
+                headers=_supabase_headers(prefer="return=minimal"),
+                params={"id": f"eq.{drop['id']}"},
+                json={"discord_message_id": msg["id"]},
+            )
+    return {"type": 4, "data": {"content": f"✅ Drop posted in <#{settings.discord_aco_channel_id}>.", "flags": 64}}
+
+
+async def _handle_aco_join_button(payload: dict, drop_id: str) -> dict:
+    if not drop_id:
+        return {"type": 4, "data": {"content": "Unrecognized drop.", "flags": 64}}
+    async with httpx.AsyncClient(timeout=10) as client:
+        drop = await _aco_get_drop(client, drop_id)
+    if not drop:
+        return {"type": 4, "data": {"content": "This drop no longer exists.", "flags": 64}}
+    if drop["status"] != "open":
+        return {"type": 4, "data": {"content": "This drop is no longer accepting submissions.", "flags": 64}}
+    if _aco_deadline_passed(drop):
+        return {"type": 4, "data": {"content": "This drop's deadline has already passed.", "flags": 64}}
+    return {
+        "type": 9,
+        "data": {
+            "custom_id": f"acowallet:{drop_id}",
+            "title": "Submit Wallet(s)",
+            "components": [{"type": 1, "components": [{
+                "type": 4, "custom_id": "wallets", "style": 2, "label": "Wallet address(es) - one per line",
+                "max_length": 1500, "required": True, "placeholder": "0xabc...\n0xdef...",
+            }]}],
+        },
+    }
+
+
+async def _handle_aco_wallet_submit(payload: dict, drop_id: str) -> dict:
+    raw = ""
+    for row in payload.get("data", {}).get("components", []):
+        for comp in row.get("components", []):
+            if comp.get("custom_id") == "wallets":
+                raw = comp.get("value", "")
+    valid, invalid = _parse_aco_wallets(raw)
+    overflow = max(0, len(valid) - _ACO_MAX_WALLETS_PER_SUBMIT)
+    valid = valid[:_ACO_MAX_WALLETS_PER_SUBMIT]
+    if not valid:
+        return {"type": 4, "data": {
+            "content": "No valid wallet addresses found - each one should look like `0x` followed by 40 hex characters.",
+            "flags": 64,
+        }}
+
+    member_user = payload.get("member", {}).get("user", {})
+    discord_user_id = member_user.get("id", "")
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        drop = await _aco_get_drop(client, drop_id)
+        if not drop:
+            return {"type": 4, "data": {"content": "This drop no longer exists.", "flags": 64}}
+        if drop["status"] != "open":
+            return {"type": 4, "data": {"content": "This drop is no longer accepting submissions.", "flags": 64}}
+        if _aco_deadline_passed(drop):
+            return {"type": 4, "data": {"content": "This drop's deadline has already passed.", "flags": 64}}
+
+        rows = [{"drop_id": drop_id, "discord_user_id": discord_user_id, "wallet_address": w} for w in valid]
+        await client.post(
+            f"{settings.supabase_url}/rest/v1/aco_tickets",
+            headers=_supabase_headers(prefer="resolution=ignore-duplicates,return=minimal"),
+            json=rows,
+        )
+        ticket_count, member_count, _ = await _aco_ticket_counts(client, drop_id)
+        await _discord_edit_channel_message(
+            drop.get("discord_channel_id"), drop.get("discord_message_id"),
+            _aco_drop_embed(drop, ticket_count, member_count), _aco_drop_components(drop_id, drop["status"]),
+        )
+
+    summary = f"✅ {len(valid)} wallet(s) submitted."
+    if invalid:
+        summary += f" ⚠️ {len(invalid)} line(s) didn't look like a valid wallet address and were skipped."
+    if overflow:
+        summary += f" ℹ️ {overflow} more beyond the {_ACO_MAX_WALLETS_PER_SUBMIT}-per-submission cap were skipped - submit again for the rest."
+    return {"type": 4, "data": {"content": summary, "flags": 64}}
+
+
+async def _aco_finalize_drop(drop_id: str, status: str) -> dict:
+    async with httpx.AsyncClient(timeout=15) as client:
+        patch_res = await client.patch(
+            f"{settings.supabase_url}/rest/v1/aco_drops",
+            headers=_supabase_headers(prefer="return=representation"),
+            params={"id": f"eq.{drop_id}"},
+            json={"status": status, "resolved_at": datetime.now(timezone.utc).isoformat()},
+        )
+        patch_res.raise_for_status()
+        rows = patch_res.json()
+        if not rows:
+            return {"type": 4, "data": {"content": "This drop no longer exists.", "flags": 64}}
+        drop = rows[0]
+        ticket_count, member_count, _ = await _aco_ticket_counts(client, drop_id)
+
+    return {
+        "type": 7,
+        "data": {
+            "embeds": [_aco_drop_embed(drop, ticket_count, member_count)],
+            "components": _aco_drop_components(drop_id, status),
+        },
+    }
+
+
+async def _handle_aco_resolve_button(payload: dict, drop_id: str) -> dict:
+    if not _is_aco_staff(payload):
+        return {"type": 4, "data": {"content": "ACO staff only.", "flags": 64}}
+    return await _aco_finalize_drop(drop_id, "resolved")
+
+
+async def _handle_aco_cancel_button(payload: dict, drop_id: str) -> dict:
+    if not _is_aco_staff(payload):
+        return {"type": 4, "data": {"content": "ACO staff only.", "flags": 64}}
+    return await _aco_finalize_drop(drop_id, "cancelled")
+
+
+async def _handle_aco_wallets_button(payload: dict, drop_id: str) -> dict:
+    if not _is_aco_staff(payload):
+        return {"type": 4, "data": {"content": "ACO staff only.", "flags": 64}}
+    interaction_id = payload.get("id")
+    token = payload.get("token")
+    await _discord_deferred_ack(interaction_id, token, ephemeral=True)
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            drop = await _aco_get_drop(client, drop_id)
+            title = drop["title"] if drop else drop_id
+            _, _, tickets = await _aco_ticket_counts(client, drop_id)
+
+        if not tickets:
+            await _discord_edit_original(token, {"title": "No wallets submitted yet", "color": EMBED_COLOR_WARN})
+            return {"type": 5}
+
+        wallet_counts: dict[str, int] = {}
+        for t in tickets:
+            key = t["wallet_address"].lower()
+            wallet_counts[key] = wallet_counts.get(key, 0) + 1
+
+        lines = ["discord_user_id,wallet_address,submitted_at,duplicate_wallet"]
+        for t in tickets:
+            is_dupe = wallet_counts[t["wallet_address"].lower()] > 1
+            lines.append(f"{t['discord_user_id']},{t['wallet_address']},{t['submitted_at']},{'yes' if is_dupe else ''}")
+        csv_bytes = "\n".join(lines).encode("utf-8")
+
+        dupe_wallets = sum(1 for c in wallet_counts.values() if c > 1)
+        note = f"{len(tickets)} wallet(s) from {len({t['discord_user_id'] for t in tickets})} member(s))."
+        if dupe_wallets:
+            note += f" ⚠️ {dupe_wallets} wallet address(es) appear more than once - see the CSV's duplicate_wallet column."
+
+        await _discord_edit_original_with_file(token, f"aco-wallets-{title[:40]}.csv", csv_bytes, content=note, content_type="text/csv")
+    except Exception:
+        logger.exception("Failed to build ACO wallet export for drop %s", drop_id)
+        await _discord_edit_original(token, _clean_embed(_error_embed(HTTPException(status_code=500, detail="Failed to build the wallet export."))))
+    return {"type": 5}
+
+
+async def _handle_my_aco_command(payload: dict) -> dict:
+    member_user = payload.get("member", {}).get("user", {}) or payload.get("user", {})
+    discord_user_id = member_user.get("id", "")
+    if not discord_user_id:
+        return {"type": 4, "data": {"content": "Could not identify you.", "flags": 64}}
+    async with httpx.AsyncClient(timeout=15) as client:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/aco_tickets",
+            headers=_supabase_headers(),
+            params={
+                "discord_user_id": f"eq.{discord_user_id}",
+                "select": "wallet_address,submitted_at,aco_drops(title,status)",
+                "order": "submitted_at.desc",
+                "limit": "15",
+            },
+        )
+        res.raise_for_status()
+        tickets = res.json()
+    if not tickets:
+        return {"type": 4, "data": {"content": "You haven't submitted a wallet for any ACO drop yet.", "flags": 64}}
+    lines = []
+    for t in tickets:
+        drop = t.get("aco_drops") or {}
+        lines.append(f"• **{drop.get('title', '?')}** — `{t['wallet_address']}` ({drop.get('status', '?')})")
+    embed = {"title": "🎟️ Your ACO Submissions", "description": "\n".join(lines), "color": EMBED_COLOR_GOOD, "footer": TOOLKIT_FOOTER}
+    return {"type": 4, "data": {"embeds": [embed], "flags": 64}}
+
+
+async def _handle_aco_setup_support_command(payload: dict) -> dict:
+    if not _is_aco_staff(payload):
+        return {"type": 4, "data": {"content": "ACO staff only.", "flags": 64}}
+    if not settings.discord_aco_channel_id or not settings.discord_bot_token:
+        return {"type": 4, "data": {"content": "The ACO channel isn't configured yet.", "flags": 64}}
+    embed = {
+        "title": "🎫 ACO Support",
+        "description": "Having an issue with an ACO drop - a wallet not showing up, a payout question, anything else? Click below to open a private ticket with the team.",
+        "color": EMBED_COLOR_GOOD,
+        "footer": TOOLKIT_FOOTER,
+    }
+    components = [{"type": 1, "components": [{"type": 2, "style": 1, "label": "Open Support Ticket", "custom_id": "acosupport_open"}]}]
+    async with httpx.AsyncClient(timeout=15) as client:
+        await _discord_post_with_retry(
+            client,
+            f"{DISCORD_API}/channels/{settings.discord_aco_channel_id}/messages",
+            {"Authorization": f"Bot {settings.discord_bot_token}"},
+            {"embeds": [embed], "components": components},
+        )
+    return {"type": 4, "data": {"content": "Posted.", "flags": 64}}
+
+
+async def _handle_aco_support_open(payload: dict) -> dict:
+    member_user = payload.get("member", {}).get("user", {})
+    discord_user_id = member_user.get("id", "")
+    display_name = member_user.get("global_name") or member_user.get("username", "member")
+    channel_id = payload.get("channel_id") or settings.discord_aco_channel_id
+    if not discord_user_id or not settings.discord_bot_token or not channel_id:
+        return {"type": 4, "data": {"content": "Something went wrong opening your ticket.", "flags": 64}}
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        # A private THREAD, not a full channel - Discord manages
+        # opener+staff visibility natively (the opener is invited
+        # explicitly below; staff already sees every private thread on
+        # the parent channel with the right permission), so there's no
+        # manual permission-overwrite bookkeeping to get wrong or clean
+        # up later, and archived threads tidy themselves out of the way.
+        thread_res = await client.post(
+            f"{DISCORD_API}/channels/{channel_id}/threads",
+            headers={"Authorization": f"Bot {settings.discord_bot_token}"},
+            json={"name": f"ticket-{display_name}"[:100], "type": 12, "invitable": False},
+        )
+        if thread_res.status_code >= 300:
+            logger.error("Failed to create ACO support thread: %s %s", thread_res.status_code, thread_res.text[:300])
+            return {"type": 4, "data": {"content": "Couldn't open a ticket right now - please try again in a moment.", "flags": 64}}
+        thread_id = thread_res.json()["id"]
+
+        await client.put(
+            f"{DISCORD_API}/channels/{thread_id}/thread-members/{discord_user_id}",
+            headers={"Authorization": f"Bot {settings.discord_bot_token}"},
+        )
+        await client.post(
+            f"{DISCORD_API}/channels/{thread_id}/messages",
+            headers={"Authorization": f"Bot {settings.discord_bot_token}"},
+            json={
+                "content": f"<@{discord_user_id}> Thanks for reaching out - describe your issue here and a team member will help shortly.",
+                "components": [{"type": 1, "components": [{"type": 2, "style": 4, "label": "Close Ticket", "custom_id": "acosupport_close"}]}],
+            },
+        )
+        await client.post(
+            f"{settings.supabase_url}/rest/v1/aco_support_tickets",
+            headers=_supabase_headers(prefer="return=minimal"),
+            json={"discord_user_id": discord_user_id, "thread_id": thread_id},
+        )
+    return {"type": 4, "data": {"content": f"✅ Ticket opened: <#{thread_id}>", "flags": 64}}
+
+
+async def _handle_aco_support_close(payload: dict) -> dict:
+    thread_id = payload.get("channel_id", "")
+    member_user = payload.get("member", {}).get("user", {})
+    closer_id = member_user.get("id", "")
+    is_staff = _is_aco_staff(payload)
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/aco_support_tickets",
+            headers=_supabase_headers(),
+            params={"thread_id": f"eq.{thread_id}", "select": "discord_user_id,status"},
+        )
+        res.raise_for_status()
+        rows = res.json()
+        if not rows:
+            return {"type": 4, "data": {"content": "Couldn't find this ticket's record.", "flags": 64}}
+        ticket = rows[0]
+        if not is_staff and closer_id != ticket["discord_user_id"]:
+            return {"type": 4, "data": {"content": "Only the ticket opener or ACO staff can close this.", "flags": 64}}
+        if ticket["status"] == "closed":
+            return {"type": 4, "data": {"content": "This ticket is already closed.", "flags": 64}}
+
+        await client.patch(
+            f"{settings.supabase_url}/rest/v1/aco_support_tickets",
+            headers=_supabase_headers(prefer="return=minimal"),
+            params={"thread_id": f"eq.{thread_id}"},
+            json={"status": "closed", "closed_at": datetime.now(timezone.utc).isoformat(), "closed_by": closer_id},
+        )
+        await client.patch(
+            f"{DISCORD_API}/channels/{thread_id}",
+            headers={"Authorization": f"Bot {settings.discord_bot_token}"},
+            json={"archived": True, "locked": True},
+        )
+    return {"type": 4, "data": {"content": "🔒 Ticket closed.", "flags": 64}}
 
 
 # ── /history — team-only application archive, browsable in Discord ──────────
@@ -6763,7 +7328,9 @@ async def _discord_edit_original(token: str, embed: dict) -> None:
             logger.exception("Failed to edit original response for interaction token")
 
 
-async def _discord_edit_original_with_file(token: str, filename: str, file_bytes: bytes, content: str | None = None) -> None:
+async def _discord_edit_original_with_file(
+    token: str, filename: str, file_bytes: bytes, content: str | None = None, content_type: str = "image/png"
+) -> None:
     # File attachments on an interaction response go through the same
     # webhook-edit endpoint as a plain embed, but as multipart/form-data
     # instead of JSON - the JSON part becomes a "payload_json" form field
@@ -6776,7 +7343,7 @@ async def _discord_edit_original_with_file(token: str, filename: str, file_bytes
             await client.patch(
                 f"{DISCORD_API}/webhooks/{settings.discord_client_id}/{token}/messages/@original",
                 data={"payload_json": json.dumps(payload_json)},
-                files={"files[0]": (filename, file_bytes, "image/png")},
+                files={"files[0]": (filename, file_bytes, content_type)},
             )
         except httpx.HTTPError:
             logger.exception("Failed to edit original response with file attachment")

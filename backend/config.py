@@ -61,6 +61,19 @@ class Settings(BaseSettings):
     # email-on-failure. Empty = the /cron/notify endpoint is a safe no-op.
     discord_ops_alert_channel_id: str = ""
 
+    # ACO ticketing system: where drop announcements post, wallet
+    # submissions happen, and support-ticket threads spawn from. Empty
+    # means the whole feature is a safe no-op (matches every other
+    # channel setting's default here).
+    discord_aco_channel_id: str = ""
+    # A dedicated role for ACO staff, deliberately separate from
+    # citizen_role_id and from full Manage-Server permissions - lets
+    # specific trusted members run drops and handle support tickets
+    # without needing full server-admin rights. Manage-Server holders
+    # (_is_team_member) can always act too, as a safety net in case this
+    # role is never set up.
+    discord_aco_staff_role_id: str = ""
+
     x_client_id: str = ""
     x_client_secret: str = ""
     x_redirect_uri: str = "https://www.dashhq.site/auth/x/callback"

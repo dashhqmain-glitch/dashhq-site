@@ -403,3 +403,66 @@ select
 from nft_sale_events_log
 group by buyer;
 
+-- ── ACO ticketing system ────────────────────────────────────────────────
+-- A "drop" is one FCFS/allowlist mint opportunity the team is coordinating
+-- wallets for. A "ticket" is one member's wallet submitted toward it - a
+-- member can submit as many distinct wallets as they like per drop (an
+-- explicit product requirement, not an oversight), so this is NOT one row
+-- per member, it's one row per (drop, member, wallet).
+create table if not exists aco_drops (
+  id                  uuid primary key default gen_random_uuid(),
+  title               text not null,
+  chain               text not null,
+  contract_address    text,
+  checker_url         text,
+  profit_note         text,
+  deadline            timestamptz not null,
+  status              text not null default 'open' check (status in ('open', 'resolved', 'cancelled')),
+  created_by          text not null,  -- discord id of the admin who created it
+  discord_channel_id  text,
+  discord_message_id  text,
+  created_at          timestamptz not null default now(),
+  resolved_at         timestamptz
+);
+
+create index if not exists aco_drops_status_idx on aco_drops (status);
+
+alter table aco_drops enable row level security;
+
+-- Uniqueness is on (drop, member, wallet), not (drop, member) - submitting
+-- the exact same wallet twice is a harmless no-op (upserted, not doubled),
+-- but two DIFFERENT wallets from the same member for the same drop are
+-- both real, intentional tickets.
+create table if not exists aco_tickets (
+  id              bigint generated always as identity primary key,
+  drop_id         uuid not null references aco_drops(id) on delete cascade,
+  discord_user_id text not null,
+  wallet_address  text not null,
+  submitted_at    timestamptz not null default now()
+);
+
+create unique index if not exists aco_tickets_unique_wallet_per_drop
+  on aco_tickets (drop_id, discord_user_id, wallet_address);
+create index if not exists aco_tickets_drop_idx on aco_tickets (drop_id);
+create index if not exists aco_tickets_user_idx on aco_tickets (discord_user_id);
+
+alter table aco_tickets enable row level security;
+
+-- One thread per support ticket. thread_id is the Discord private thread
+-- created off the ACO channel - closing archives the thread AND flips
+-- this row, so /history-style admin review has a real record even after
+-- the thread itself is archived and out of sight.
+create table if not exists aco_support_tickets (
+  id              bigint generated always as identity primary key,
+  discord_user_id text not null,
+  thread_id       text not null unique,
+  status          text not null default 'open' check (status in ('open', 'closed')),
+  opened_at       timestamptz not null default now(),
+  closed_at       timestamptz,
+  closed_by       text
+);
+
+create index if not exists aco_support_tickets_status_idx on aco_support_tickets (status);
+
+alter table aco_support_tickets enable row level security;
+
