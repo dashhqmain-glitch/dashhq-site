@@ -466,6 +466,30 @@ create index if not exists aco_support_tickets_status_idx on aco_support_tickets
 
 alter table aco_support_tickets enable row level security;
 
+-- Private-key handoff tracking - deliberately METADATA ONLY. This table
+-- (and every line of Python that touches it) never stores, reads, or
+-- forwards the key itself - only that a handoff thread exists, who
+-- opened it, and its status. The member types the actual key as a plain
+-- message inside a private Discord thread; the bot never processes
+-- message content there at all, it only creates/deletes the thread and
+-- tracks this bookkeeping row. status='expired' is set by the cleanup
+-- cron (/cron/aco-key-cleanup) for anything a staff member forgot to
+-- close - the thread gets force-deleted either way, so a forgotten
+-- handoff can't sit around holding a live key indefinitely.
+create table if not exists aco_key_handoffs (
+  id              bigint generated always as identity primary key,
+  discord_user_id text not null,
+  thread_id       text not null unique,
+  status          text not null default 'open' check (status in ('open', 'completed', 'expired')),
+  opened_at       timestamptz not null default now(),
+  completed_at    timestamptz,
+  completed_by    text
+);
+
+create index if not exists aco_key_handoffs_status_idx on aco_key_handoffs (status);
+
+alter table aco_key_handoffs enable row level security;
+
 -- Rotating educational/rules content, posted automatically on a schedule
 -- (see /cron/aco-education) - adding a new guide later is just an insert
 -- here, no redeploy needed. `sections` is an array of {heading, body}

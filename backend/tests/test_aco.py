@@ -806,3 +806,162 @@ async def test_aco_info_select_handles_missing_guide():
         result = await main._handle_aco_info_select(payload)
 
     assert "isn't available" in result["data"]["content"]
+
+
+# ── Private-key handoff - orchestration only, never storage ──────────────
+
+async def test_key_open_reuses_existing_open_handoff():
+    settings.discord_bot_token = "tok"
+    settings.discord_aco_support_channel_id = "support-chan"
+    patches = []
+    thread_created = {"called": False}
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [{"thread_id": "existingkeythread"}])
+
+        async def post(self, url, headers=None, json=None):
+            if "/threads" in url:
+                thread_created["called"] = True
+            return FakeRes(200, {"id": "shouldnotbeused"})
+
+        async def put(self, url, headers=None, json=None):
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            patches.append((url, json))
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        result = await main._handle_aco_key_open(_payload(channel_id="announcement-chan"))
+
+    assert result["type"] == 5
+    assert thread_created["called"] is False
+    body = _webhook_patch_body(patches)
+    assert "existingkeythread" in body["content"]
+
+
+async def test_key_open_creates_thread_in_support_channel_never_the_announcement_channel():
+    settings.discord_bot_token = "tok"
+    settings.discord_aco_channel_id = "announcement-chan"
+    settings.discord_aco_support_channel_id = "support-chan"
+    thread_post_urls = []
+    thread_messages = []
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [])  # no existing open handoff
+
+        async def post(self, url, headers=None, json=None):
+            if "/threads" in url:
+                thread_post_urls.append(url)
+                return FakeRes(200, {"id": "newkeythread"})
+            if "/messages" in url:
+                thread_messages.append(json)
+            return FakeRes(200, {})
+
+        async def put(self, url, headers=None, json=None):
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        # Clicked from the public announcement channel...
+        result = await main._handle_aco_key_open(_payload(channel_id="announcement-chan"))
+
+    assert result["type"] == 5
+    # ...but the thread must land in the support channel, never the
+    # announcement channel.
+    assert len(thread_post_urls) == 1
+    assert "support-chan" in thread_post_urls[0]
+    assert "announcement-chan" not in thread_post_urls[0]
+    # The instructional message must carry the "Mark Complete" button and
+    # must not itself ask for or echo back any key value.
+    instructions = thread_messages[0]
+    assert instructions["components"][0]["components"][0]["custom_id"] == "acokey_complete"
+
+
+async def test_key_complete_rejects_non_staff():
+    settings.discord_aco_staff_role_id = "role123"
+    result = await main._handle_aco_key_complete(_payload(permissions="0", roles=[]))
+    assert "staff only" in result["data"]["content"].lower()
+
+
+async def test_key_complete_rejects_already_completed():
+    settings.discord_aco_staff_role_id = "role123"
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [{"discord_user_id": "user1", "status": "completed"}])
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        result = await main._handle_aco_key_complete(_payload(permissions="32", roles=[]))
+
+    assert "already closed" in result["data"]["content"].lower()
+
+
+async def test_key_complete_deletes_thread_and_marks_completed():
+    settings.discord_bot_token = "tok"
+    settings.discord_aco_staff_role_id = "role123"
+    patches = []
+    deletes = []
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [{"discord_user_id": "user1", "status": "open"}])
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            patches.append((url, json))
+            return FakeRes(200, {})
+
+        async def delete(self, url, headers=None):
+            deletes.append(url)
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        result = await main._handle_aco_key_complete(_payload(permissions="32", roles=[], channel_id="keythread1"))
+
+    assert result["type"] == 6
+    assert any("keythread1" in u for u in deletes)  # the thread itself was deleted, not just archived
+    supabase_patch = next(j for u, j in patches if "aco_key_handoffs" in u)
+    assert supabase_patch["status"] == "completed"
+
+
+async def test_cleanup_expired_key_handoffs_deletes_old_threads_and_marks_expired():
+    from datetime import datetime, timedelta, timezone
+    old_row = {"id": 1, "thread_id": "oldthread", "discord_user_id": "user1"}
+    deletes = []
+    patches = []
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [old_row])
+
+        async def delete(self, url, headers=None):
+            deletes.append(url)
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            patches.append((url, json))
+            return FakeRes(200, {})
+
+    fake_client = FakeClient()
+    count = await main._aco_cleanup_expired_key_handoffs(fake_client, max_age_hours=24)
+
+    assert count == 1
+    assert any("oldthread" in u for u in deletes)
+    assert patches[0][1]["status"] == "expired"
+
+
+async def test_cron_aco_key_cleanup_requires_valid_secret():
+    settings.cron_secret = "realsecret"
+    try:
+        await main.cron_aco_key_cleanup(FakeRequest())
+        assert False, "should have raised"
+    except main.HTTPException as exc:
+        assert exc.status_code == 401

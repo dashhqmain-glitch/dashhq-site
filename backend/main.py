@@ -668,6 +668,20 @@ async def cron_aco_education(request: Request):
     return {"posted": True, "title": post["title"]}
 
 
+@app.get("/cron/aco-key-cleanup")
+async def cron_aco_key_cleanup(request: Request):
+    # Safety net for a staff member who forgot to click "Mark Complete" on
+    # a private-key handoff thread - force-deletes anything still open
+    # past 24h so a forgotten thread can't sit around holding a live key
+    # indefinitely just because nobody remembered to close it.
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    async with httpx.AsyncClient(timeout=30) as client:
+        expired_count = await _aco_cleanup_expired_key_handoffs(client)
+    return {"expired": expired_count}
+
+
 @app.get("/cron/test-monitor-channel")
 async def test_monitor_channel(request: Request, channel_id: str = Query(None, min_length=1, max_length=32)):
     # Verifies a channel is actually postable end-to-end - env var
@@ -1309,6 +1323,10 @@ async def _dispatch_interaction(payload: dict, itype) -> dict:
         return await _handle_aco_support_open(payload)
     if history_id == "acosupport_close":
         return await _handle_aco_support_close(payload)
+    if history_id == "acokey_open":
+        return await _handle_aco_key_open(payload)
+    if history_id == "acokey_complete":
+        return await _handle_aco_key_complete(payload)
 
     custom_id = payload.get("data", {}).get("custom_id", "")
     action, _, app_id = custom_id.partition(":")
@@ -1806,15 +1824,15 @@ async def _handle_aco_wallet_submit(payload: dict, drop_id: str) -> dict:
         summary += f" ⚠️ {len(invalid)} line(s) didn't look like a valid wallet address and were skipped."
     if overflow:
         summary += f" ℹ️ {overflow} more beyond the {_ACO_MAX_WALLETS_PER_SUBMIT}-per-submission cap were skipped - submit again for the rest."
-    # A "Need Help?" button right here, not a standing public panel - this
-    # is the one moment support is actually relevant (right after someone
-    # engages with a drop), and it means only people who've actually
-    # submitted a wallet ever see a way to open a ticket in the first
-    # place. Reuses the exact same acosupport_open handler either way.
+    # Two buttons right here, not a standing public panel - this is the
+    # one moment either is actually relevant (right after someone engages
+    # with a drop), and it means only people who've actually submitted a
+    # wallet ever see a way to reach either in the first place.
     await _discord_edit_original_raw(token, {
         "content": summary,
         "components": [{"type": 1, "components": [
             {"type": 2, "style": 2, "label": "Need Help?", "custom_id": "acosupport_open"},
+            {"type": 2, "style": 1, "label": "Send Private Key (Botting)", "custom_id": "acokey_open"},
         ]}],
     })
     return {"type": 5}
@@ -2057,6 +2075,150 @@ async def _handle_aco_support_close(payload: dict) -> dict:
         )
     await _aco_log(f"🔒 **Support ticket closed** by <@{closer_id}> (opened by <@{ticket['discord_user_id']}>): <#{thread_id}>")
     return {"type": 4, "data": {"content": "🔒 Ticket closed.", "flags": 64}}
+
+
+# ── Private-key handoff - orchestration only, never storage ──────────────
+# The bot's entire job here is creating and cleaning up an isolated,
+# unique-per-customer space and controlling exactly who's in it. It never
+# reads, parses, stores, or relays whatever the member actually types in
+# the thread - no message-content handling exists anywhere in this file.
+# The key itself never touches this backend, this database, or any log
+# this bot writes, only the thread's own existence and status do.
+async def _handle_aco_key_open(payload: dict) -> dict:
+    member_user = payload.get("member", {}).get("user", {})
+    discord_user_id = member_user.get("id", "")
+    display_name = member_user.get("global_name") or member_user.get("username", "member")
+    channel_id = settings.discord_aco_support_channel_id or settings.discord_aco_channel_id
+    if not discord_user_id or not settings.discord_bot_token or not channel_id:
+        return {"type": 4, "data": {"content": "Something went wrong opening that.", "flags": 64}}
+
+    interaction_id = payload.get("id")
+    token = payload.get("token")
+    await _discord_deferred_ack(interaction_id, token, ephemeral=True)
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        existing_res = await client.get(
+            f"{settings.supabase_url}/rest/v1/aco_key_handoffs",
+            headers=_supabase_headers(),
+            params={"discord_user_id": f"eq.{discord_user_id}", "status": "eq.open", "select": "thread_id", "limit": "1"},
+        )
+        existing_res.raise_for_status()
+        existing = existing_res.json()
+        if existing:
+            await _discord_edit_original_raw(token, {"content": f"You already have an open key handoff: <#{existing[0]['thread_id']}>"})
+            return {"type": 5}
+
+        thread_res = await client.post(
+            f"{DISCORD_API}/channels/{channel_id}/threads",
+            headers={"Authorization": f"Bot {settings.discord_bot_token}"},
+            json={"name": f"key-{display_name}"[:100], "type": 12, "invitable": False},
+        )
+        if thread_res.status_code >= 300:
+            logger.error("Failed to create ACO key handoff thread: %s %s", thread_res.status_code, thread_res.text[:300])
+            await _discord_edit_original_raw(token, {"content": "Couldn't open that right now - please try again in a moment."})
+            return {"type": 5}
+        thread_id = thread_res.json()["id"]
+
+        await client.put(
+            f"{DISCORD_API}/channels/{thread_id}/thread-members/{discord_user_id}",
+            headers={"Authorization": f"Bot {settings.discord_bot_token}"},
+        )
+        await client.post(
+            f"{DISCORD_API}/channels/{thread_id}/messages",
+            headers={"Authorization": f"Bot {settings.discord_bot_token}"},
+            json={
+                "content": (
+                    f"<@{discord_user_id}> This thread is private to you and ACO staff only.\n\n"
+                    "Paste your **burner wallet's** private key below - never your main wallet's. "
+                    "A staff member will confirm once they have what they need, and this whole thread "
+                    "(including your message) gets permanently deleted right after, not just archived."
+                ),
+                "components": [{"type": 1, "components": [{"type": 2, "style": 3, "label": "Mark Complete & Delete Thread", "custom_id": "acokey_complete"}]}],
+            },
+        )
+        await client.post(
+            f"{settings.supabase_url}/rest/v1/aco_key_handoffs",
+            headers=_supabase_headers(prefer="return=minimal"),
+            json={"discord_user_id": discord_user_id, "thread_id": thread_id},
+        )
+    # Metadata only in the log line too - a thread reference and who
+    # opened it, never anything about what's inside.
+    await _aco_log(f"🔑 **Key handoff opened** by <@{discord_user_id}>: <#{thread_id}>")
+    await _discord_edit_original_raw(token, {"content": f"✅ Private thread opened: <#{thread_id}>"})
+    return {"type": 5}
+
+
+async def _handle_aco_key_complete(payload: dict) -> dict:
+    # Staff only, deliberately not "opener or staff" like support-close -
+    # only staff actually knows whether they've received and used the
+    # key, the member has no reason to be the one confirming this.
+    if not _is_aco_staff(payload):
+        return {"type": 4, "data": {"content": "ACO staff only.", "flags": 64}}
+    thread_id = payload.get("channel_id", "")
+    member_user = payload.get("member", {}).get("user", {})
+    completer_id = member_user.get("id", "")
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/aco_key_handoffs",
+            headers=_supabase_headers(),
+            params={"thread_id": f"eq.{thread_id}", "select": "discord_user_id,status", "limit": "1"},
+        )
+        res.raise_for_status()
+        rows = res.json()
+        if not rows:
+            return {"type": 4, "data": {"content": "Couldn't find this handoff's record.", "flags": 64}}
+        handoff = rows[0]
+        if handoff["status"] != "open":
+            return {"type": 4, "data": {"content": "This handoff is already closed.", "flags": 64}}
+
+        await client.patch(
+            f"{settings.supabase_url}/rest/v1/aco_key_handoffs",
+            headers=_supabase_headers(prefer="return=minimal"),
+            params={"thread_id": f"eq.{thread_id}"},
+            json={"status": "completed", "completed_at": datetime.now(timezone.utc).isoformat(), "completed_by": completer_id},
+        )
+        # Delete, not archive - the whole point is the key's message
+        # doesn't sit around in Discord's history a moment longer than it
+        # has to once staff has what they need.
+        await client.delete(
+            f"{DISCORD_API}/channels/{thread_id}",
+            headers={"Authorization": f"Bot {settings.discord_bot_token}"},
+        )
+    await _aco_log(f"🗑️ **Key handoff completed & deleted** by <@{completer_id}> (opener: <@{handoff['discord_user_id']}>)")
+    # No reply possible - the channel this interaction came from no
+    # longer exists once the delete above succeeds.
+    return {"type": 6}
+
+
+async def _aco_cleanup_expired_key_handoffs(client: httpx.AsyncClient, max_age_hours: int = 24) -> int:
+    # Safety net for a staff member who forgot to click "Mark Complete" -
+    # a forgotten handoff must not sit around holding a live key
+    # indefinitely just because nobody remembered to close it.
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
+    res = await client.get(
+        f"{settings.supabase_url}/rest/v1/aco_key_handoffs",
+        headers=_supabase_headers(),
+        params={"status": "eq.open", "opened_at": f"lt.{cutoff}", "select": "id,thread_id,discord_user_id"},
+    )
+    res.raise_for_status()
+    expired = res.json()
+    for row in expired:
+        try:
+            await client.delete(
+                f"{DISCORD_API}/channels/{row['thread_id']}",
+                headers={"Authorization": f"Bot {settings.discord_bot_token}"},
+            )
+        except httpx.HTTPError:
+            logger.exception("Failed to delete expired ACO key handoff thread %s", row["thread_id"])
+        await client.patch(
+            f"{settings.supabase_url}/rest/v1/aco_key_handoffs",
+            headers=_supabase_headers(prefer="return=minimal"),
+            params={"id": f"eq.{row['id']}"},
+            json={"status": "expired"},
+        )
+        await _aco_log(f"⏰ **Key handoff expired** (>{max_age_hours}h, nobody marked it complete) - opener: <@{row['discord_user_id']}>, thread deleted")
+    return len(expired)
 
 
 _ACO_EDUCATION_MAX_EMBEDS = 10  # Discord's own per-message cap

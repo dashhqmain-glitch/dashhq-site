@@ -32,6 +32,7 @@
   "crons": [
     { "path": "/cron/sync-members", "schedule": "0 6 * * *" },
     { "path": "/cron/refresh-opensea-key", "schedule": "0 12 * * *" },
-    { "path": "/cron/aco-education", "schedule": "0 17 */3 * *" }
+    { "path": "/cron/aco-education", "schedule": "0 17 */3 * *" },
+    { "path": "/cron/aco-key-cleanup", "schedule": "0 3 * * *" }
   ]
 }
