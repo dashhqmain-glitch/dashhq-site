@@ -164,7 +164,15 @@ def test_embed_includes_core_fields():
     embed = main._aco_drop_embed(_drop(), ticket_count=5, member_count=3)
     names = [f["name"] for f in embed["fields"]]
     assert "Chain" in names and "Deadline" in names and "Status" in names
-    assert any("5" in f["value"] for f in embed["fields"] if f["name"] == "Wallets Submitted")
+    wallets_field = next(f for f in embed["fields"] if "Wallets Submitted" in f["name"])
+    assert "5" in wallets_field["value"]
+
+
+def test_embed_carries_dash_aco_branding():
+    embed = main._aco_drop_embed(_drop(), 0, 0)
+    assert embed["author"]["name"] == "DASH ACO"
+    assert embed["color"] == main._ACO_BLUE
+    assert "DASH ACO" in embed["footer"]["text"]
 
 
 def test_embed_omits_optional_fields_when_absent():

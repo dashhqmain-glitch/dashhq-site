@@ -1381,6 +1381,16 @@ _ACO_WALLET_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
 _ACO_MAX_WALLETS_PER_SUBMIT = 25  # sane ceiling on one modal submission, not a real cap on "as many as they like" - submit again for more
 _ACO_DURATION_RE = re.compile(r"^(\d+)\s*([mhd])$", re.IGNORECASE)
 
+# Brand identity: DASH ACO. One consistent blue accent (the same brand
+# blue already used for pending applications) across every embed this
+# bot posts, regardless of a drop's open/resolved/cancelled status -
+# status is communicated through the emoji/label field instead, so the
+# bot's visual identity stays constant while state is still scannable at
+# a glance.
+_ACO_BLUE = 0x1B42FF
+_ACO_AUTHOR = {"name": "DASH ACO"}
+ACO_FOOTER = {"text": "DASH ACO · dashhq.site"}
+
 
 def _is_aco_staff(payload: dict) -> bool:
     # A dedicated role, deliberately separate from full Manage-Server
@@ -1460,7 +1470,6 @@ def _aco_deadline_text(deadline_iso: str | None) -> str:
 
 def _aco_drop_embed(drop: dict, ticket_count: int, member_count: int) -> dict:
     status = drop.get("status", "open")
-    color = {"open": EMBED_COLOR_GOOD, "resolved": EMBED_COLOR_WARN, "cancelled": EMBED_COLOR_BAD}.get(status, EMBED_COLOR_GOOD)
     status_label = {"open": "🟢 Open", "resolved": "✅ Resolved", "cancelled": "❌ Cancelled"}.get(status, status)
     fields = [
         {"name": "Chain", "value": drop.get("chain") or "-", "inline": True},
@@ -1473,12 +1482,13 @@ def _aco_drop_embed(drop: dict, ticket_count: int, member_count: int) -> dict:
         fields.append({"name": "Contract", "value": f"`{drop['contract_address']}`", "inline": False})
     if drop.get("checker_url"):
         fields.append({"name": "Checker", "value": drop["checker_url"], "inline": False})
-    fields.append({"name": "Wallets Submitted", "value": f"{ticket_count} ({member_count} member(s))", "inline": True})
+    fields.append({"name": "🎟️ Wallets Submitted", "value": f"**{ticket_count}** ({member_count} member(s))", "inline": True})
     return {
-        "title": f"🎟️ ACO Drop: {drop['title']}",
-        "color": color,
+        "author": _ACO_AUTHOR,
+        "title": drop["title"],
+        "color": _ACO_BLUE,
         "fields": fields,
-        "footer": {"text": f"Drop ID: {drop['id']}"},
+        "footer": {"text": f"DASH ACO · Drop ID: {drop['id']}"},
     }
 
 
@@ -1495,6 +1505,25 @@ def _aco_drop_components(drop_id: str, status: str) -> list:
             {"type": 2, "style": 4, "label": "Cancel Drop", "custom_id": f"acocancel:{drop_id}"},
         ],
     }]
+
+
+async def _aco_log(text: str) -> None:
+    # Best-effort admin visibility trail - every ACO staff action gets
+    # mirrored to the moderator channel so the team has a full audit log
+    # in one place without needing to watch the public ACO channel.
+    # Deliberately fire-and-forget: a failure here must never block or
+    # fail the real action it's logging.
+    if not settings.discord_aco_admin_log_channel_id or not settings.discord_bot_token:
+        return
+    async with httpx.AsyncClient(timeout=10) as client:
+        try:
+            await client.post(
+                f"{DISCORD_API}/channels/{settings.discord_aco_admin_log_channel_id}/messages",
+                headers={"Authorization": f"Bot {settings.discord_bot_token}"},
+                json={"embeds": [{"description": text, "color": _ACO_BLUE, "footer": ACO_FOOTER}]},
+            )
+        except httpx.HTTPError:
+            logger.exception("Failed to post ACO admin log")
 
 
 async def _discord_edit_channel_message(channel_id: str, message_id: str, embed: dict, components: list) -> None:
@@ -1554,7 +1583,7 @@ async def _handle_aco_drop_command(payload: dict) -> dict:
         "type": 9,
         "data": {
             "custom_id": "acocreate",
-            "title": "New ACO Drop",
+            "title": "New DASH ACO Drop",
             "components": [
                 {"type": 1, "components": [{"type": 4, "custom_id": "title", "style": 1, "label": "Title", "max_length": 100, "required": True}]},
                 {"type": 1, "components": [{"type": 4, "custom_id": "chain", "style": 1, "label": "Chain", "max_length": 50, "required": True}]},
@@ -1621,6 +1650,7 @@ async def _handle_aco_create_submit(payload: dict) -> dict:
                 params={"id": f"eq.{drop['id']}"},
                 json={"discord_message_id": msg["id"]},
             )
+    await _aco_log(f"🎟️ **Drop created** by <@{row['created_by']}>: **{row['title']}** ({row['chain']}) — deadline {_aco_deadline_text(row['deadline'])}")
     return {"type": 4, "data": {"content": f"✅ Drop posted in <#{settings.discord_aco_channel_id}>.", "flags": 64}}
 
 
@@ -1695,7 +1725,7 @@ async def _handle_aco_wallet_submit(payload: dict, drop_id: str) -> dict:
     return {"type": 4, "data": {"content": summary, "flags": 64}}
 
 
-async def _aco_finalize_drop(drop_id: str, status: str) -> dict:
+async def _aco_finalize_drop(drop_id: str, status: str, actor_id: str) -> dict:
     async with httpx.AsyncClient(timeout=15) as client:
         patch_res = await client.patch(
             f"{settings.supabase_url}/rest/v1/aco_drops",
@@ -1710,6 +1740,9 @@ async def _aco_finalize_drop(drop_id: str, status: str) -> dict:
         drop = rows[0]
         ticket_count, member_count, _ = await _aco_ticket_counts(client, drop_id)
 
+    verb = {"resolved": "✅ **Drop resolved**", "cancelled": "❌ **Drop cancelled**"}.get(status, status)
+    await _aco_log(f"{verb} by <@{actor_id}>: **{drop['title']}** — {ticket_count} wallet(s) from {member_count} member(s)")
+
     return {
         "type": 7,
         "data": {
@@ -1722,13 +1755,15 @@ async def _aco_finalize_drop(drop_id: str, status: str) -> dict:
 async def _handle_aco_resolve_button(payload: dict, drop_id: str) -> dict:
     if not _is_aco_staff(payload):
         return {"type": 4, "data": {"content": "ACO staff only.", "flags": 64}}
-    return await _aco_finalize_drop(drop_id, "resolved")
+    actor_id = payload.get("member", {}).get("user", {}).get("id", "")
+    return await _aco_finalize_drop(drop_id, "resolved", actor_id)
 
 
 async def _handle_aco_cancel_button(payload: dict, drop_id: str) -> dict:
     if not _is_aco_staff(payload):
         return {"type": 4, "data": {"content": "ACO staff only.", "flags": 64}}
-    return await _aco_finalize_drop(drop_id, "cancelled")
+    actor_id = payload.get("member", {}).get("user", {}).get("id", "")
+    return await _aco_finalize_drop(drop_id, "cancelled", actor_id)
 
 
 async def _handle_aco_wallets_button(payload: dict, drop_id: str) -> dict:
@@ -1744,7 +1779,7 @@ async def _handle_aco_wallets_button(payload: dict, drop_id: str) -> dict:
             _, _, tickets = await _aco_ticket_counts(client, drop_id)
 
         if not tickets:
-            await _discord_edit_original(token, {"title": "No wallets submitted yet", "color": EMBED_COLOR_WARN})
+            await _discord_edit_original(token, {"author": _ACO_AUTHOR, "title": "No wallets submitted yet", "color": _ACO_BLUE, "footer": ACO_FOOTER})
             return {"type": 5}
 
         wallet_counts: dict[str, int] = {}
@@ -1759,11 +1794,13 @@ async def _handle_aco_wallets_button(payload: dict, drop_id: str) -> dict:
         csv_bytes = "\n".join(lines).encode("utf-8")
 
         dupe_wallets = sum(1 for c in wallet_counts.values() if c > 1)
-        note = f"{len(tickets)} wallet(s) from {len({t['discord_user_id'] for t in tickets})} member(s))."
+        note = f"{len(tickets)} wallet(s) from {len({t['discord_user_id'] for t in tickets})} member(s)."
         if dupe_wallets:
             note += f" ⚠️ {dupe_wallets} wallet address(es) appear more than once - see the CSV's duplicate_wallet column."
 
         await _discord_edit_original_with_file(token, f"aco-wallets-{title[:40]}.csv", csv_bytes, content=note, content_type="text/csv")
+        actor_id = payload.get("member", {}).get("user", {}).get("id", "")
+        await _aco_log(f"📤 **Wallet export pulled** by <@{actor_id}> for **{title}** — {note}")
     except Exception:
         logger.exception("Failed to build ACO wallet export for drop %s", drop_id)
         await _discord_edit_original(token, _clean_embed(_error_embed(HTTPException(status_code=500, detail="Failed to build the wallet export."))))
@@ -1794,7 +1831,7 @@ async def _handle_my_aco_command(payload: dict) -> dict:
     for t in tickets:
         drop = t.get("aco_drops") or {}
         lines.append(f"• **{drop.get('title', '?')}** — `{t['wallet_address']}` ({drop.get('status', '?')})")
-    embed = {"title": "🎟️ Your ACO Submissions", "description": "\n".join(lines), "color": EMBED_COLOR_GOOD, "footer": TOOLKIT_FOOTER}
+    embed = {"author": _ACO_AUTHOR, "title": "🎟️ Your Submissions", "description": "\n".join(lines), "color": _ACO_BLUE, "footer": ACO_FOOTER}
     return {"type": 4, "data": {"embeds": [embed], "flags": 64}}
 
 
@@ -1804,10 +1841,11 @@ async def _handle_aco_setup_support_command(payload: dict) -> dict:
     if not settings.discord_aco_channel_id or not settings.discord_bot_token:
         return {"type": 4, "data": {"content": "The ACO channel isn't configured yet.", "flags": 64}}
     embed = {
-        "title": "🎫 ACO Support",
+        "author": _ACO_AUTHOR,
+        "title": "🎫 Support",
         "description": "Having an issue with an ACO drop - a wallet not showing up, a payout question, anything else? Click below to open a private ticket with the team.",
-        "color": EMBED_COLOR_GOOD,
-        "footer": TOOLKIT_FOOTER,
+        "color": _ACO_BLUE,
+        "footer": ACO_FOOTER,
     }
     components = [{"type": 1, "components": [{"type": 2, "style": 1, "label": "Open Support Ticket", "custom_id": "acosupport_open"}]}]
     async with httpx.AsyncClient(timeout=15) as client:
@@ -1862,6 +1900,7 @@ async def _handle_aco_support_open(payload: dict) -> dict:
             headers=_supabase_headers(prefer="return=minimal"),
             json={"discord_user_id": discord_user_id, "thread_id": thread_id},
         )
+    await _aco_log(f"🎫 **Support ticket opened** by <@{discord_user_id}>: <#{thread_id}>")
     return {"type": 4, "data": {"content": f"✅ Ticket opened: <#{thread_id}>", "flags": 64}}
 
 
@@ -1898,6 +1937,7 @@ async def _handle_aco_support_close(payload: dict) -> dict:
             headers={"Authorization": f"Bot {settings.discord_bot_token}"},
             json={"archived": True, "locked": True},
         )
+    await _aco_log(f"🔒 **Support ticket closed** by <@{closer_id}> (opened by <@{ticket['discord_user_id']}>): <#{thread_id}>")
     return {"type": 4, "data": {"content": "🔒 Ticket closed.", "flags": 64}}
 
 

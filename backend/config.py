@@ -73,6 +73,11 @@ class Settings(BaseSettings):
     # (_is_team_member) can always act too, as a safety net in case this
     # role is never set up.
     discord_aco_staff_role_id: str = ""
+    # Admin visibility trail: every ACO staff action (drop created,
+    # resolved/cancelled, wallet export pulled, support ticket opened/
+    # closed) gets logged here, so the team has a full audit log in one
+    # place without needing to watch the public ACO channel itself.
+    discord_aco_admin_log_channel_id: str = ""
 
     x_client_id: str = ""
     x_client_secret: str = ""
