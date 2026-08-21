@@ -228,12 +228,6 @@ async def test_aco_wallets_export_rejects_non_staff():
     assert "staff only" in result["data"]["content"].lower()
 
 
-async def test_aco_setup_support_rejects_non_staff():
-    settings.discord_aco_staff_role_id = "role123"
-    result = await main._handle_aco_setup_support_command(_payload(permissions="0", roles=[]))
-    assert "staff only" in result["data"]["content"].lower()
-
-
 async def test_aco_drop_command_allows_staff_role_holder():
     settings.discord_aco_staff_role_id = "role123"
     settings.discord_aco_channel_id = "chan1"
@@ -311,6 +305,12 @@ async def test_wallet_submit_inserts_tickets_and_confirms():
 
     assert "1 wallet(s) submitted" in result["data"]["content"]
     assert posted["tickets"][0]["wallet_address"] == "0x1234567890123456789012345678901234567890"
+    # The only path to support is this contextual button - confirms it's
+    # actually attached, not just a public standing panel that no longer
+    # exists.
+    button = result["data"]["components"][0]["components"][0]
+    assert button["custom_id"] == "acosupport_open"
+    assert button["label"] == "Need Help?"
 
 
 async def test_wallet_submit_reports_invalid_lines():

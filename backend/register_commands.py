@@ -166,11 +166,6 @@ COMMANDS = [
         "description": "See your own wallet submissions across ACO drops",
     },
     {
-        "name": "aco-setup-support",
-        "description": "Team only: post the ACO support-ticket button (run once per channel)",
-        "default_member_permissions": "32",
-    },
-    {
         "name": "history",
         "description": "Team only: browse every citizenship application and its verdict",
         # Hidden from regular members entirely - Discord only shows/allows a

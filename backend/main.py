@@ -1244,8 +1244,6 @@ async def _dispatch_interaction(payload: dict, itype) -> dict:
             return await _handle_aco_drop_command(payload)
         if cmd_name == "my-aco":
             return await _handle_my_aco_command(payload)
-        if cmd_name == "aco-setup-support":
-            return await _handle_aco_setup_support_command(payload)
         return await _handle_toolkit_command(payload)
 
     member_user = payload.get("member", {}).get("user", {})
@@ -1765,7 +1763,20 @@ async def _handle_aco_wallet_submit(payload: dict, drop_id: str) -> dict:
         summary += f" ⚠️ {len(invalid)} line(s) didn't look like a valid wallet address and were skipped."
     if overflow:
         summary += f" ℹ️ {overflow} more beyond the {_ACO_MAX_WALLETS_PER_SUBMIT}-per-submission cap were skipped - submit again for the rest."
-    return {"type": 4, "data": {"content": summary, "flags": 64}}
+    # A "Need Help?" button right here, not a standing public panel - this
+    # is the one moment support is actually relevant (right after someone
+    # engages with a drop), and it means only people who've actually
+    # submitted a wallet ever see a way to open a ticket in the first
+    # place. Reuses the exact same acosupport_open handler either way.
+    return {
+        "type": 4,
+        "data": {
+            "content": summary, "flags": 64,
+            "components": [{"type": 1, "components": [
+                {"type": 2, "style": 2, "label": "Need Help?", "custom_id": "acosupport_open"},
+            ]}],
+        },
+    }
 
 
 async def _aco_finalize_drop(drop_id: str, status: str, actor_id: str) -> dict:
@@ -1878,29 +1889,13 @@ async def _handle_my_aco_command(payload: dict) -> dict:
     return {"type": 4, "data": {"embeds": [embed], "flags": 64}}
 
 
-async def _handle_aco_setup_support_command(payload: dict) -> dict:
-    if not _is_aco_staff(payload):
-        return {"type": 4, "data": {"content": "ACO staff only.", "flags": 64}}
-    if not settings.discord_aco_channel_id or not settings.discord_bot_token:
-        return {"type": 4, "data": {"content": "The ACO channel isn't configured yet.", "flags": 64}}
-    embed = {
-        "author": _ACO_AUTHOR,
-        "title": "🎫 Support",
-        "description": "Having an issue with an ACO drop - a wallet not showing up, a payout question, anything else? Click below to open a private ticket with the team.",
-        "color": _ACO_BLUE,
-        "footer": ACO_FOOTER,
-    }
-    components = [{"type": 1, "components": [{"type": 2, "style": 1, "label": "Open Support Ticket", "custom_id": "acosupport_open"}]}]
-    async with httpx.AsyncClient(timeout=15) as client:
-        await _discord_post_with_retry(
-            client,
-            f"{DISCORD_API}/channels/{settings.discord_aco_channel_id}/messages",
-            {"Authorization": f"Bot {settings.discord_bot_token}"},
-            {"embeds": [embed], "components": components},
-        )
-    return {"type": 4, "data": {"content": "Posted.", "flags": 64}}
-
-
+# No standing public "Open Support Ticket" panel on purpose - the only
+# way to reach this is the "Need Help?" button attached to a wallet-
+# submission confirmation (_handle_aco_wallet_submit), which only the
+# submitter ever sees, ephemeral, right after they've actually engaged
+# with a drop. That's what keeps support scoped to real ACO
+# participants instead of a button anyone in the public channel could
+# click regardless of whether they've ever touched ACO.
 async def _handle_aco_support_open(payload: dict) -> dict:
     member_user = payload.get("member", {}).get("user", {})
     discord_user_id = member_user.get("id", "")
