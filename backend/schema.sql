@@ -466,3 +466,42 @@ create index if not exists aco_support_tickets_status_idx on aco_support_tickets
 
 alter table aco_support_tickets enable row level security;
 
+-- Rotating educational/rules content, posted automatically on a schedule
+-- (see /cron/aco-education) - adding a new guide later is just an insert
+-- here, no redeploy needed. `sections` is an array of {heading, body}
+-- objects, rendered as one Discord embed per section (a message can
+-- carry up to 10). last_posted_at drives the rotation: the cron always
+-- picks the least-recently-posted active row, so a brand new post (null
+-- last_posted_at) goes out first, then everything cycles evenly.
+create table if not exists aco_education_posts (
+  id              bigint generated always as identity primary key,
+  title           text not null unique,
+  emoji           text,
+  sections        jsonb not null,
+  active          boolean not null default true,
+  last_posted_at  timestamptz,
+  created_at      timestamptz not null default now()
+);
+
+alter table aco_education_posts enable row level security;
+
+insert into aco_education_posts (title, emoji, sections) values
+('How To Win Gas Wars', '⛽', $json$[
+  {"heading": "What You Need", "body": "A basic understanding of how to read Etherscan. Basic math, or just a calculator. And nerve, because this gets expensive fast."},
+  {"heading": "What Is A Gas War", "body": "When a mint is obviously profitable (say a free mint with a 0.2 ETH floor), everyone wants in at the same time. The higher your gas, the sooner your transaction lands in a block, so people keep pushing their gas up to beat each other. That competition is the gas war."},
+  {"heading": "Checking The Gas Limit", "body": "Every contract uses a different amount of gas, and it can change by mint type (FCFS vs allowlist vs team mint), so check a past transaction from the SAME contract and SAME mint type before committing to a gas setting. On Etherscan, open a similar transaction, click \"Click to show more,\" and you'll see both the Gas Limit and the actual Gas Usage.\n\nGas Limit is the most you could possibly spend. Gas Usage is what actually gets spent once the transaction goes through, and it's almost always lower than the limit. Always fund your wallet based on the Limit, not the Usage, so you're never caught short.\n\nThe formula: gwei * gas usage / 10^9 = cost in ETH.\n150 gwei at 100K usage = 0.015 ETH\n100 gwei at 120K usage = 0.012 ETH\n200 gwei at 250K usage = 0.05 ETH\n400 gwei at 300K usage = 0.12 ETH"},
+  {"heading": "Setting Your Gwei", "body": "Gas has two parts: Max Fee and Priority Fee, usually written as Max/Priority. The Max Fee is always the bigger number. Think of Priority Fee as a tip to the bouncer, the more you tip, the faster you get let in. Max Fee is the total cash you're willing to bring for the night, you won't always spend all of it. If you set 500/100, you'll actually pay somewhere between 100 and 500 gwei depending on network conditions."},
+  {"heading": "Building Your Strategy", "body": "Start by budgeting at least 50% of your expected gross profit toward gas. If mint price is 0.03 and floor is 0.1, your gross profit is 0.07, so plan to spend up to half of that.\n\nWatch the remaining supply. A tight supply of 100 to 500 usually means higher gas, since fewer people are willing to compete out loud, but a bigger pool of 1000 to 2000 draws a bigger crowd even at lower gas.\n\nWatch the price. Really high profit mints (0.5 ETH or more) tend to push gas into the thousands of gwei, which scares off casual participants, so setting high can be less contested than you'd think. Cheaper mints (under 0.05 to 0.1 ETH) attract way more competition and it's easy to overpay relative to the actual profit.\n\nConsider the dump risk. If a lot of new supply is about to hit the market from an FCFS round, expect people to sell fast for quick profit, which can push the floor down right after mint.\n\nConsider the fail risk too. A failed transaction still burns gas, usually 20K to 70K in usage, so at 1000 gwei a failed attempt alone can cost 0.02 to 0.07 ETH.\n\nAnd remember bots exist. If you're not using one, you're already behind whoever is, so budget higher gas to make up the difference in speed."},
+  {"heading": "Real Examples", "body": "PVP: Floor was around 0.28 ETH before FCFS, free mint price, slow volume (1 to 3 sales every 10 minutes). Gas limit/usage were 260K/175K. Supply left was 85 to 90. I expected the floor might dip to 0.25, worst case 0.2, given the light volume, but I had multiple allowlist spots so even 0.05 profit per mint worked for me. I was ready to spend 0.15 to 0.18 ETH per mint. At 1000 gwei and 175K usage that's 0.175 ETH, so I set Max Fee to 1000 and Priority to 750, and got it.\n\nAOFVerse: Floor was 0.6 ETH before FCFS, free mint price, high demand, decent volume. Gas limit/usage were 170K/110K. Supply left was 100 to 110. People were already panicking about gas hitting 3000 to 5000 gwei. I was ready to spend 0.3 to 0.5 ETH because the demand and volume made me confident it could push higher after mint. At 5000 gwei and 110K usage that's 0.55 ETH, so I set Max Fee to 5000 and Priority to 3500. I got it, and even though some people hit it at 2800 to 3000 gwei and I overpaid slightly, the gap barely mattered against that much profit."},
+  {"heading": "One Rule Everyone Follows", "body": "Never ask people what gwei they used, and never share what you used either. It's a mind game. If someone tells you a number and you miss, you'll blame them. If they tell you a number and you overpay, you'll blame them. And if you share your number, the next person just outbids you by a hair. Everyone plays their own hand. Good luck out there."}
+]$json$::jsonb),
+('DASH ACO: Rules & How It Works', '🎟️', $json$[
+  {"heading": "What Is DASH ACO", "body": "DASH ACO is our minting service for high-demand or difficult drops. Instead of fighting the gas war and bot competition alone, our team runs advanced mint bots on your behalf to maximize your odds of landing an allocation."},
+  {"heading": "Supported Chains", "body": "We cover most EVM chains, Solana, and Bitcoin-based drops."},
+  {"heading": "How Botting Works", "body": "You provide a burner wallet's private key through #aco-help so our bots can mint for you. Always use a dedicated burner wallet, never your main wallet, this is non-negotiable for your own security.\n\nIf a gas war is likely, we'll walk you through recommended gas settings before the mint."},
+  {"heading": "Fees", "body": "DASH ACO charges 30% of net profit, whether you hold or sell.\n\nIf you sell within 1 to 2 hours of minting, the fee is calculated on your actual sale profit.\n\nIf you choose to hold, the fee is calculated against a floor price we agree on together at the time."},
+  {"heading": "No Guarantees", "body": "We do everything we can to land a successful mint, but nothing is guaranteed. Bots can fail, projects can behave unpredictably, and gas can be spent on an attempt that doesn't land. We are not responsible for gas lost on a failed attempt. Using a bot significantly improves your odds, it does not guarantee them."},
+  {"heading": "Requesting A Bot", "body": "Drop everything we need in #aco-request at least 6 hours before the mint: project socials, mint date and time, price, supply, and anything else relevant. The earlier we know, the better we can prepare."}
+]$json$::jsonb)
+on conflict (title) do nothing;
+

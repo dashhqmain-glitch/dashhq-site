@@ -389,3 +389,96 @@ async def test_support_close_allows_staff_even_if_not_opener():
         result = await main._handle_aco_support_close(_payload(permissions="32", roles=[], user_id="staffmember"))
 
     assert "closed" in result["data"]["content"].lower()
+
+
+# ── ACO education content - rotating rules/guide posts ───────────────────
+
+def _education_post(**overrides):
+    p = {
+        "id": 1, "title": "Test Guide", "emoji": "⛽",
+        "sections": [
+            {"heading": "Section One", "body": "First body."},
+            {"heading": "Section Two", "body": "Second body."},
+        ],
+    }
+    p.update(overrides)
+    return p
+
+
+def test_education_embeds_has_branded_cover_plus_one_per_section():
+    embeds = main._aco_education_embeds(_education_post())
+    assert len(embeds) == 3  # cover + 2 sections
+    assert embeds[0]["author"]["name"] == "DASH ACO"
+    assert "Test Guide" in embeds[0]["title"]
+    assert embeds[1]["title"] == "Section One"
+    assert embeds[1]["description"] == "First body."
+    assert embeds[2]["title"] == "Section Two"
+
+
+def test_education_embeds_footer_only_on_last_embed():
+    embeds = main._aco_education_embeds(_education_post())
+    assert "footer" not in embeds[0]
+    assert "footer" not in embeds[1]
+    assert embeds[-1]["footer"] == main.ACO_FOOTER
+
+
+def test_education_embeds_caps_at_discord_limit():
+    many_sections = [{"heading": f"S{i}", "body": f"body {i}"} for i in range(15)]
+    embeds = main._aco_education_embeds(_education_post(sections=many_sections))
+    assert len(embeds) == main._ACO_EDUCATION_MAX_EMBEDS
+
+
+class FakeRequest:
+    def __init__(self, auth_header=None):
+        self.headers = {"authorization": auth_header} if auth_header else {}
+
+
+async def test_cron_aco_education_rejects_missing_secret():
+    settings.cron_secret = "realsecret"
+    try:
+        await main.cron_aco_education(FakeRequest())
+        assert False, "should have raised"
+    except main.HTTPException as exc:
+        assert exc.status_code == 401
+
+
+async def test_cron_aco_education_rejects_wrong_secret():
+    settings.cron_secret = "realsecret"
+    try:
+        await main.cron_aco_education(FakeRequest("Bearer wrongsecret"))
+        assert False, "should have raised"
+    except main.HTTPException as exc:
+        assert exc.status_code == 401
+
+
+async def test_cron_aco_education_noop_when_channel_not_configured():
+    settings.cron_secret = "realsecret"
+    settings.discord_aco_channel_id = ""
+    result = await main.cron_aco_education(FakeRequest("Bearer realsecret"))
+    assert result["posted"] is False
+    settings.discord_aco_channel_id = "chan1"  # restore for later tests
+
+
+async def test_cron_aco_education_posts_oldest_and_updates_last_posted_at():
+    settings.cron_secret = "realsecret"
+    settings.discord_aco_channel_id = "chan1"
+    settings.discord_bot_token = "tok"
+    patched = {}
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [_education_post()])
+
+        async def post(self, url, headers=None, json=None):
+            return FakeRes(200, {"id": "msg1"})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            patched.update(json)
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        result = await main.cron_aco_education(FakeRequest("Bearer realsecret"))
+
+    assert result["posted"] is True
+    assert "last_posted_at" in patched

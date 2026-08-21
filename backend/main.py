@@ -625,6 +625,49 @@ async def refresh_opensea_key(request: Request):
     return {"refreshed": bool(key)}
 
 
+@app.get("/cron/aco-education")
+async def cron_aco_education(request: Request):
+    # Posts the least-recently-posted active guide to the ACO channel -
+    # a brand new post (null last_posted_at) always goes out first, then
+    # everything rotates evenly. Adding more guides later is just a row
+    # in aco_education_posts, nothing here needs to change.
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not settings.discord_aco_channel_id or not settings.discord_bot_token:
+        return {"posted": False, "reason": "ACO channel not configured"}
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/aco_education_posts",
+            headers=_supabase_headers(),
+            params={"active": "eq.true", "select": "*", "order": "last_posted_at.asc.nullsfirst", "limit": "1"},
+        )
+        res.raise_for_status()
+        rows = res.json()
+        if not rows:
+            return {"posted": False, "reason": "no active education posts"}
+        post = rows[0]
+
+        msg_res = await _discord_post_with_retry(
+            client,
+            f"{DISCORD_API}/channels/{settings.discord_aco_channel_id}/messages",
+            {"Authorization": f"Bot {settings.discord_bot_token}"},
+            {"embeds": _aco_education_embeds(post)},
+        )
+        if msg_res.status_code >= 300:
+            logger.error("Failed to post ACO education content: %s %s", msg_res.status_code, msg_res.text[:300])
+            return {"posted": False, "reason": f"discord post failed ({msg_res.status_code})"}
+
+        await client.patch(
+            f"{settings.supabase_url}/rest/v1/aco_education_posts",
+            headers=_supabase_headers(prefer="return=minimal"),
+            params={"id": f"eq.{post['id']}"},
+            json={"last_posted_at": datetime.now(timezone.utc).isoformat()},
+        )
+    return {"posted": True, "title": post["title"]}
+
+
 @app.get("/cron/test-monitor-channel")
 async def test_monitor_channel(request: Request, channel_id: str = Query(None, min_length=1, max_length=32)):
     # Verifies a channel is actually postable end-to-end - env var
@@ -1939,6 +1982,31 @@ async def _handle_aco_support_close(payload: dict) -> dict:
         )
     await _aco_log(f"🔒 **Support ticket closed** by <@{closer_id}> (opened by <@{ticket['discord_user_id']}>): <#{thread_id}>")
     return {"type": 4, "data": {"content": "🔒 Ticket closed.", "flags": 64}}
+
+
+_ACO_EDUCATION_MAX_EMBEDS = 10  # Discord's own per-message cap
+
+
+def _aco_education_embeds(post: dict) -> list[dict]:
+    # A branded cover embed (title + author, the post's own identity),
+    # followed by one clean embed per section (heading as its title, body
+    # as its description) - reads as a scannable series instead of one
+    # wall of text hitting the 4096-character embed description cap.
+    # Discord allows up to 10 embeds per message; these guides all have
+    # room to spare under that with one slot reserved for the cover.
+    sections = (post.get("sections") or [])[: _ACO_EDUCATION_MAX_EMBEDS - 1]
+    embeds = [{
+        "author": _ACO_AUTHOR,
+        "title": f"{post.get('emoji', '')} {post['title']}".strip(),
+        "color": _ACO_BLUE,
+    }]
+    for section in sections:
+        embed = {"color": _ACO_BLUE, "description": _trunc(section.get("body", ""), 4000)}
+        if section.get("heading"):
+            embed["title"] = section["heading"]
+        embeds.append(embed)
+    embeds[-1]["footer"] = ACO_FOOTER
+    return embeds
 
 
 # ── /history — team-only application archive, browsable in Discord ──────────
