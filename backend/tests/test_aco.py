@@ -236,22 +236,128 @@ async def test_aco_drop_command_allows_staff_role_holder():
     assert result["data"]["custom_id"] == "acocreate"
 
 
+def _create_submit_components():
+    return [
+        {"components": [{"custom_id": "title", "value": "Test Drop"}]},
+        {"components": [{"custom_id": "chain", "value": "Ethereum"}]},
+        {"components": [{"custom_id": "deadline", "value": "6h"}]},
+        {"components": [{"custom_id": "profit", "value": "30% profit"}]},
+        {"components": [{"custom_id": "contract_and_checker", "value": ""}]},
+    ]
+
+
+async def test_aco_create_submit_reports_real_success_when_channel_post_works():
+    # Regression test for a real gap: this used to say "posted" even when
+    # the Discord channel post silently failed.
+    settings.discord_aco_staff_role_id = "role123"
+    settings.discord_aco_channel_id = "chan1"
+    settings.discord_bot_token = "tok"
+    patches = []
+
+    class FakeClient:
+        async def post(self, url, headers=None, json=None):
+            if "aco_drops" in url:
+                return FakeRes(200, [{"id": "drop1", "title": "Test Drop", "chain": "Ethereum", "status": "open",
+                                       "deadline": "2026-12-25T18:00:00+00:00"}])
+            if "/messages" in url:
+                return FakeRes(200, {"id": "msg1"})  # the channel post itself succeeded
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            patches.append((url, json))
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        payload = _payload(permissions="32", roles=[], components=_create_submit_components())
+        result = await main._handle_aco_create_submit(payload)
+
+    assert result["type"] == 5
+    body = _webhook_patch_body(patches)
+    assert "posted" in body["embeds"][0]["title"].lower()
+    assert "⚠️" not in body["embeds"][0]["title"]
+
+
+async def test_aco_create_submit_reports_real_failure_when_channel_post_fails():
+    settings.discord_aco_staff_role_id = "role123"
+    settings.discord_aco_channel_id = "chan1"
+    settings.discord_bot_token = "tok"
+    patches = []
+
+    class FakeClient:
+        async def post(self, url, headers=None, json=None):
+            if "aco_drops" in url:
+                return FakeRes(200, [{"id": "drop1", "title": "Test Drop", "chain": "Ethereum", "status": "open",
+                                       "deadline": "2026-12-25T18:00:00+00:00"}])
+            if "/messages" in url:
+                return FakeRes(403, {}, text="Missing Access")  # bot lacks permission in the channel
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            patches.append((url, json))
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        payload = _payload(permissions="32", roles=[], components=_create_submit_components())
+        result = await main._handle_aco_create_submit(payload)
+
+    assert result["type"] == 5
+    body = _webhook_patch_body(patches)
+    assert "failed" in body["embeds"][0]["title"].lower()
+    # Must NOT have PATCHed discord_message_id onto the drop row when
+    # nothing was actually posted - only the interaction-reply PATCH
+    # (to the webhooks endpoint) should have happened.
+    assert not any("aco_drops" in u for u, _ in patches)
+
+
+# ── Drop resolve/cancel can't re-finalize an already-closed drop ─────────
+
+async def test_finalize_drop_rejects_already_resolved():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [{"id": "drop1", "title": "Test", "status": "resolved"}])
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        result = await main._aco_finalize_drop("drop1", "cancelled", "actor1")
+
+    assert result["type"] == 4
+    assert "already" in result["data"]["content"].lower()
+    assert "resolved" in result["data"]["content"].lower()
+
+
 # ── Wallet submission flow ────────────────────────────────────────────────
 
+def _webhook_patch_body(patches):
+    # _handle_aco_wallet_submit (and the other deferred ACO handlers) now
+    # answer via a PATCH to the interaction webhook's @original message,
+    # not the function's direct return value - this pulls out that final
+    # payload regardless of how many other PATCH calls happened alongside it.
+    return next(j for u, j in patches if "webhooks" in u)
+
+
 async def test_wallet_submit_rejects_when_drop_not_found():
-    async def fake_get(url, headers=None, params=None):
-        return FakeRes(200, [])
+    patches = []
 
     class FakeClient:
         async def get(self, url, headers=None, params=None):
-            return await fake_get(url, headers, params)
+            return FakeRes(200, [])
+
+        async def post(self, url, headers=None, json=None):
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            patches.append((url, json))
+            return FakeRes(200, {})
 
     with patch("main.httpx.AsyncClient") as MockClient:
         MockClient.return_value.__aenter__.return_value = FakeClient()
         components = [{"components": [{"custom_id": "wallets", "value": "0x1234567890123456789012345678901234567890"}]}]
         result = await main._handle_aco_wallet_submit(_payload(components=components), "missingdrop")
 
-    assert "no longer exists" in result["data"]["content"]
+    assert result["type"] == 5
+    assert "no longer exists" in _webhook_patch_body(patches)["content"]
 
 
 async def test_wallet_submit_rejects_past_deadline():
@@ -261,17 +367,26 @@ async def test_wallet_submit_rejects_past_deadline():
         "deadline": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
         "discord_channel_id": "chan1", "discord_message_id": "msg1",
     }
+    patches = []
 
     class FakeClient:
         async def get(self, url, headers=None, params=None):
             return FakeRes(200, [past_drop])
+
+        async def post(self, url, headers=None, json=None):
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            patches.append((url, json))
+            return FakeRes(200, {})
 
     with patch("main.httpx.AsyncClient") as MockClient:
         MockClient.return_value.__aenter__.return_value = FakeClient()
         components = [{"components": [{"custom_id": "wallets", "value": "0x1234567890123456789012345678901234567890"}]}]
         result = await main._handle_aco_wallet_submit(_payload(components=components), "drop1")
 
-    assert "deadline" in result["data"]["content"].lower()
+    assert result["type"] == 5
+    assert "deadline" in _webhook_patch_body(patches)["content"].lower()
 
 
 async def test_wallet_submit_inserts_tickets_and_confirms():
@@ -282,6 +397,7 @@ async def test_wallet_submit_inserts_tickets_and_confirms():
         "discord_channel_id": "chan1", "discord_message_id": "msg1",
     }
     posted = {}
+    patches = []
 
     class FakeClient:
         async def get(self, url, headers=None, params=None):
@@ -292,10 +408,12 @@ async def test_wallet_submit_inserts_tickets_and_confirms():
             ])
 
         async def post(self, url, headers=None, json=None):
-            posted["tickets"] = json
+            if "aco_tickets" in url:
+                posted["tickets"] = json
             return FakeRes(200, {})
 
         async def patch(self, url, headers=None, params=None, json=None):
+            patches.append((url, json))
             return FakeRes(200, {})
 
     with patch("main.httpx.AsyncClient") as MockClient:
@@ -303,14 +421,22 @@ async def test_wallet_submit_inserts_tickets_and_confirms():
         components = [{"components": [{"custom_id": "wallets", "value": "0x1234567890123456789012345678901234567890"}]}]
         result = await main._handle_aco_wallet_submit(_payload(components=components), "drop1")
 
-    assert "1 wallet(s) submitted" in result["data"]["content"]
+    assert result["type"] == 5
+    body = _webhook_patch_body(patches)
+    assert "1 wallet(s) submitted" in body["content"]
     assert posted["tickets"][0]["wallet_address"] == "0x1234567890123456789012345678901234567890"
     # The only path to support is this contextual button - confirms it's
     # actually attached, not just a public standing panel that no longer
     # exists.
-    button = result["data"]["components"][0]["components"][0]
+    button = body["components"][0]["components"][0]
     assert button["custom_id"] == "acosupport_open"
     assert button["label"] == "Need Help?"
+    # The channel-message edit for the drop's own ticket count is a
+    # SEPARATE PATCH from the interaction reply above - confirms both
+    # actually happened, not just whichever one the return value used to
+    # carry.
+    channel_patch = next(j for u, j in patches if "/channels/" in u)
+    assert channel_patch["embeds"][0]["fields"][-1]["value"].startswith("**1**")
 
 
 async def test_wallet_submit_reports_invalid_lines():
@@ -320,6 +446,7 @@ async def test_wallet_submit_reports_invalid_lines():
         "deadline": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
         "discord_channel_id": "chan1", "discord_message_id": "msg1",
     }
+    patches = []
 
     class FakeClient:
         async def get(self, url, headers=None, params=None):
@@ -331,6 +458,7 @@ async def test_wallet_submit_reports_invalid_lines():
             return FakeRes(200, {})
 
         async def patch(self, url, headers=None, params=None, json=None):
+            patches.append((url, json))
             return FakeRes(200, {})
 
     with patch("main.httpx.AsyncClient") as MockClient:
@@ -338,7 +466,71 @@ async def test_wallet_submit_reports_invalid_lines():
         components = [{"components": [{"custom_id": "wallets", "value": "0x1234567890123456789012345678901234567890\nnotawallet"}]}]
         result = await main._handle_aco_wallet_submit(_payload(components=components), "drop1")
 
-    assert "1 line(s)" in result["data"]["content"]
+    assert result["type"] == 5
+    assert "1 line(s)" in _webhook_patch_body(patches)["content"]
+
+
+# ── Support ticket open - dedup against an existing open ticket ──────────
+
+async def test_support_open_reuses_existing_open_ticket_instead_of_duplicating():
+    settings.discord_bot_token = "tok"
+    patches = []
+    thread_created = {"called": False}
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [{"thread_id": "existingthread"}])
+
+        async def post(self, url, headers=None, json=None):
+            if "/threads" in url:
+                thread_created["called"] = True
+            return FakeRes(200, {"id": "shouldnotbeused"})
+
+        async def put(self, url, headers=None, json=None):
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            patches.append((url, json))
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        result = await main._handle_aco_support_open(_payload(channel_id="chan1"))
+
+    assert result["type"] == 5
+    assert thread_created["called"] is False
+    body = _webhook_patch_body(patches)
+    assert "already have an open ticket" in body["content"].lower()
+    assert "existingthread" in body["content"]
+
+
+async def test_support_open_creates_a_new_thread_when_none_open():
+    settings.discord_bot_token = "tok"
+    patches = []
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [])  # no existing open ticket
+
+        async def post(self, url, headers=None, json=None):
+            if "/threads" in url:
+                return FakeRes(200, {"id": "newthread"})
+            return FakeRes(200, {})
+
+        async def put(self, url, headers=None, json=None):
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            patches.append((url, json))
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        result = await main._handle_aco_support_open(_payload(channel_id="chan1"))
+
+    assert result["type"] == 5
+    body = _webhook_patch_body(patches)
+    assert "newthread" in body["content"]
 
 
 # ── Support ticket close permission ───────────────────────────────────────

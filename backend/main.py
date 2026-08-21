@@ -1676,7 +1676,17 @@ async def _handle_aco_create_submit(payload: dict) -> dict:
         "created_by": member_user.get("id", ""),
         "discord_channel_id": settings.discord_aco_channel_id,
     }
-    async with httpx.AsyncClient(timeout=15) as client:
+
+    # Deferred, not a direct response - _discord_post_with_retry below can
+    # legitimately sleep several seconds backing off a real Discord 429,
+    # which alone can blow Discord's 3-second interaction ack window and
+    # show staff a false "This interaction failed" even though the drop
+    # goes on to post successfully.
+    interaction_id = payload.get("id")
+    token = payload.get("token")
+    await _discord_deferred_ack(interaction_id, token, ephemeral=True)
+
+    async with httpx.AsyncClient(timeout=20) as client:
         res = await client.post(f"{settings.supabase_url}/rest/v1/aco_drops", headers=_supabase_headers(), json=row)
         res.raise_for_status()
         drop = res.json()[0]
@@ -1687,7 +1697,8 @@ async def _handle_aco_create_submit(payload: dict) -> dict:
             {"Authorization": f"Bot {settings.discord_bot_token}"},
             {"embeds": [_aco_drop_embed(drop, 0, 0)], "components": _aco_drop_components(drop["id"], "open")},
         )
-        if msg_res.status_code < 300:
+        posted_ok = msg_res.status_code < 300
+        if posted_ok:
             msg = msg_res.json()
             await client.patch(
                 f"{settings.supabase_url}/rest/v1/aco_drops",
@@ -1695,8 +1706,25 @@ async def _handle_aco_create_submit(payload: dict) -> dict:
                 params={"id": f"eq.{drop['id']}"},
                 json={"discord_message_id": msg["id"]},
             )
-    await _aco_log(f"🎟️ **Drop created** by <@{row['created_by']}>: **{row['title']}** ({row['chain']}) — deadline {_aco_deadline_text(row['deadline'])}")
-    return {"type": 4, "data": {"content": f"✅ Drop posted in <#{settings.discord_aco_channel_id}>.", "flags": 64}}
+
+    # Confirmed live gap: this used to report success unconditionally even
+    # when the channel post itself failed (bad bot permissions, deleted
+    # channel, etc.) - the drop row existed in the database with no
+    # visible announcement anywhere, and staff had no idea anything had
+    # gone wrong. Now the confirmation actually reflects what happened.
+    if posted_ok:
+        await _aco_log(f"🎟️ **Drop created** by <@{row['created_by']}>: **{row['title']}** ({row['chain']}), deadline {_aco_deadline_text(row['deadline'])}")
+        await _discord_edit_original_raw(token, {"embeds": [{
+            "author": _ACO_AUTHOR, "title": f"✅ Drop posted in <#{settings.discord_aco_channel_id}>.", "color": _ACO_BLUE,
+        }]})
+    else:
+        logger.error("Failed to post ACO drop announcement: %s %s", msg_res.status_code, msg_res.text[:300])
+        await _discord_edit_original_raw(token, {"embeds": [{
+            "author": _ACO_AUTHOR, "title": "⚠️ Drop saved, but the announcement failed to post",
+            "description": "The drop is saved in the database, but posting it to the channel failed - check the bot's permissions there (View Channel, Send Messages, Embed Links), then try again.",
+            "color": EMBED_COLOR_BAD,
+        }]})
+    return {"type": 5}
 
 
 async def _handle_aco_join_button(payload: dict, drop_id: str) -> dict:
@@ -1741,14 +1769,25 @@ async def _handle_aco_wallet_submit(payload: dict, drop_id: str) -> dict:
     member_user = payload.get("member", {}).get("user", {})
     discord_user_id = member_user.get("id", "")
 
-    async with httpx.AsyncClient(timeout=15) as client:
+    # Deferred, not a direct response - this does up to 4 sequential network
+    # calls (drop fetch, ticket insert, count fetch, channel-message edit),
+    # which can add up close to Discord's 3-second ack window on a cold
+    # start, even with no rate-limit retries involved anywhere in the chain.
+    interaction_id = payload.get("id")
+    token = payload.get("token")
+    await _discord_deferred_ack(interaction_id, token, ephemeral=True)
+
+    async with httpx.AsyncClient(timeout=20) as client:
         drop = await _aco_get_drop(client, drop_id)
         if not drop:
-            return {"type": 4, "data": {"content": "This drop no longer exists.", "flags": 64}}
+            await _discord_edit_original_raw(token, {"content": "This drop no longer exists."})
+            return {"type": 5}
         if drop["status"] != "open":
-            return {"type": 4, "data": {"content": "This drop is no longer accepting submissions.", "flags": 64}}
+            await _discord_edit_original_raw(token, {"content": "This drop is no longer accepting submissions."})
+            return {"type": 5}
         if _aco_deadline_passed(drop):
-            return {"type": 4, "data": {"content": "This drop's deadline has already passed.", "flags": 64}}
+            await _discord_edit_original_raw(token, {"content": "This drop's deadline has already passed."})
+            return {"type": 5}
 
         rows = [{"drop_id": drop_id, "discord_user_id": discord_user_id, "wallet_address": w} for w in valid]
         await client.post(
@@ -1772,19 +1811,29 @@ async def _handle_aco_wallet_submit(payload: dict, drop_id: str) -> dict:
     # engages with a drop), and it means only people who've actually
     # submitted a wallet ever see a way to open a ticket in the first
     # place. Reuses the exact same acosupport_open handler either way.
-    return {
-        "type": 4,
-        "data": {
-            "content": summary, "flags": 64,
-            "components": [{"type": 1, "components": [
-                {"type": 2, "style": 2, "label": "Need Help?", "custom_id": "acosupport_open"},
-            ]}],
-        },
-    }
+    await _discord_edit_original_raw(token, {
+        "content": summary,
+        "components": [{"type": 1, "components": [
+            {"type": 2, "style": 2, "label": "Need Help?", "custom_id": "acosupport_open"},
+        ]}],
+    })
+    return {"type": 5}
 
 
 async def _aco_finalize_drop(drop_id: str, status: str, actor_id: str) -> dict:
     async with httpx.AsyncClient(timeout=15) as client:
+        drop = await _aco_get_drop(client, drop_id)
+        if not drop:
+            return {"type": 4, "data": {"content": "This drop no longer exists.", "flags": 64}}
+        # Guards a real race: the Submit/Resolve/Cancel buttons only
+        # disappear once a fresh copy of the embed renders - two staff
+        # both looking at a stale view (or one staff double-clicking
+        # before the first click's edit lands) could otherwise re-finalize
+        # an already-closed drop, silently overwriting resolved_at and
+        # posting a duplicate, misleading log entry.
+        if drop["status"] != "open":
+            return {"type": 4, "data": {"content": f"This drop is already **{drop['status']}** - no change made.", "flags": 64}}
+
         patch_res = await client.patch(
             f"{settings.supabase_url}/rest/v1/aco_drops",
             headers=_supabase_headers(prefer="return=representation"),
@@ -1792,14 +1841,11 @@ async def _aco_finalize_drop(drop_id: str, status: str, actor_id: str) -> dict:
             json={"status": status, "resolved_at": datetime.now(timezone.utc).isoformat()},
         )
         patch_res.raise_for_status()
-        rows = patch_res.json()
-        if not rows:
-            return {"type": 4, "data": {"content": "This drop no longer exists.", "flags": 64}}
-        drop = rows[0]
+        drop = patch_res.json()[0]
         ticket_count, member_count, _ = await _aco_ticket_counts(client, drop_id)
 
     verb = {"resolved": "✅ **Drop resolved**", "cancelled": "❌ **Drop cancelled**"}.get(status, status)
-    await _aco_log(f"{verb} by <@{actor_id}>: **{drop['title']}** — {ticket_count} wallet(s) from {member_count} member(s)")
+    await _aco_log(f"{verb} by <@{actor_id}>: **{drop['title']}**, {ticket_count} wallet(s) from {member_count} member(s)")
 
     return {
         "type": 7,
@@ -1858,7 +1904,7 @@ async def _handle_aco_wallets_button(payload: dict, drop_id: str) -> dict:
 
         await _discord_edit_original_with_file(token, f"aco-wallets-{title[:40]}.csv", csv_bytes, content=note, content_type="text/csv")
         actor_id = payload.get("member", {}).get("user", {}).get("id", "")
-        await _aco_log(f"📤 **Wallet export pulled** by <@{actor_id}> for **{title}** — {note}")
+        await _aco_log(f"📤 **Wallet export pulled** by <@{actor_id}> for **{title}**: {note}")
     except Exception:
         logger.exception("Failed to build ACO wallet export for drop %s", drop_id)
         await _discord_edit_original(token, _clean_embed(_error_embed(HTTPException(status_code=500, detail="Failed to build the wallet export."))))
@@ -1888,7 +1934,7 @@ async def _handle_my_aco_command(payload: dict) -> dict:
     lines = []
     for t in tickets:
         drop = t.get("aco_drops") or {}
-        lines.append(f"• **{drop.get('title', '?')}** — `{t['wallet_address']}` ({drop.get('status', '?')})")
+        lines.append(f"• **{drop.get('title', '?')}**: `{t['wallet_address']}` ({drop.get('status', '?')})")
     embed = {"author": _ACO_AUTHOR, "title": "🎟️ Your Submissions", "description": "\n".join(lines), "color": _ACO_BLUE, "footer": ACO_FOOTER}
     return {"type": 4, "data": {"embeds": [embed], "flags": 64}}
 
@@ -1908,7 +1954,29 @@ async def _handle_aco_support_open(payload: dict) -> dict:
     if not discord_user_id or not settings.discord_bot_token or not channel_id:
         return {"type": 4, "data": {"content": "Something went wrong opening your ticket.", "flags": 64}}
 
-    async with httpx.AsyncClient(timeout=15) as client:
+    # Deferred, not a direct response - up to 5 sequential Discord/Supabase
+    # calls below, enough to risk the 3-second ack window on a cold start.
+    interaction_id = payload.get("id")
+    token = payload.get("token")
+    await _discord_deferred_ack(interaction_id, token, ephemeral=True)
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        # Confirmed live gap: a member submitting wallets to several
+        # drops in a row could click "Need Help?" after each one and
+        # accumulate multiple simultaneous open tickets, with no way to
+        # tell they already had one. Point them back to the existing
+        # thread instead of spawning a duplicate.
+        existing_res = await client.get(
+            f"{settings.supabase_url}/rest/v1/aco_support_tickets",
+            headers=_supabase_headers(),
+            params={"discord_user_id": f"eq.{discord_user_id}", "status": "eq.open", "select": "thread_id", "limit": "1"},
+        )
+        existing_res.raise_for_status()
+        existing = existing_res.json()
+        if existing:
+            await _discord_edit_original_raw(token, {"content": f"You already have an open ticket: <#{existing[0]['thread_id']}>"})
+            return {"type": 5}
+
         # A private THREAD, not a full channel - Discord manages
         # opener+staff visibility natively (the opener is invited
         # explicitly below; staff already sees every private thread on
@@ -1922,7 +1990,8 @@ async def _handle_aco_support_open(payload: dict) -> dict:
         )
         if thread_res.status_code >= 300:
             logger.error("Failed to create ACO support thread: %s %s", thread_res.status_code, thread_res.text[:300])
-            return {"type": 4, "data": {"content": "Couldn't open a ticket right now - please try again in a moment.", "flags": 64}}
+            await _discord_edit_original_raw(token, {"content": "Couldn't open a ticket right now - please try again in a moment."})
+            return {"type": 5}
         thread_id = thread_res.json()["id"]
 
         await client.put(
@@ -1943,7 +2012,8 @@ async def _handle_aco_support_open(payload: dict) -> dict:
             json={"discord_user_id": discord_user_id, "thread_id": thread_id},
         )
     await _aco_log(f"🎫 **Support ticket opened** by <@{discord_user_id}>: <#{thread_id}>")
-    return {"type": 4, "data": {"content": f"✅ Ticket opened: <#{thread_id}>", "flags": 64}}
+    await _discord_edit_original_raw(token, {"content": f"✅ Ticket opened: <#{thread_id}>"})
+    return {"type": 5}
 
 
 async def _handle_aco_support_close(payload: dict) -> dict:
@@ -7488,15 +7558,19 @@ async def _discord_deferred_ack(interaction_id: str, token: str, ephemeral: bool
             logger.exception("Failed to send deferred ack for interaction %s", interaction_id)
 
 
-async def _discord_edit_original(token: str, embed: dict) -> None:
+async def _discord_edit_original_raw(token: str, json_body: dict) -> None:
     async with httpx.AsyncClient(timeout=10) as client:
         try:
             await client.patch(
                 f"{DISCORD_API}/webhooks/{settings.discord_client_id}/{token}/messages/@original",
-                json={"embeds": [embed]},
+                json=json_body,
             )
         except httpx.HTTPError:
             logger.exception("Failed to edit original response for interaction token")
+
+
+async def _discord_edit_original(token: str, embed: dict) -> None:
+    await _discord_edit_original_raw(token, {"embeds": [embed]})
 
 
 async def _discord_edit_original_with_file(
