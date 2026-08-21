@@ -1244,6 +1244,8 @@ async def _dispatch_interaction(payload: dict, itype) -> dict:
             return await _handle_aco_drop_command(payload)
         if cmd_name == "my-aco":
             return await _handle_my_aco_command(payload)
+        if cmd_name == "aco-info":
+            return await _handle_aco_info_command(payload)
         return await _handle_toolkit_command(payload)
 
     member_user = payload.get("member", {}).get("user", {})
@@ -1274,6 +1276,8 @@ async def _dispatch_interaction(payload: dict, itype) -> dict:
 
     if payload.get("data", {}).get("custom_id") == "toolkit_select":
         return await _handle_toolkit_select(payload)
+    if payload.get("data", {}).get("custom_id") == "acoinfo_select":
+        return await _handle_aco_info_select(payload)
 
     history_id = payload.get("data", {}).get("custom_id", "")
     if history_id.startswith("monitor_select:"):
@@ -2002,6 +2006,70 @@ def _aco_education_embeds(post: dict) -> list[dict]:
         embeds.append(embed)
     embeds[-1]["footer"] = ACO_FOOTER
     return embeds
+
+
+def _aco_info_select_component(titles: list[str]) -> dict:
+    return {
+        "type": 1,
+        "components": [{
+            "type": 3,
+            "custom_id": "acoinfo_select",
+            "placeholder": "Choose a guide to read…",
+            "options": [{"label": _trunc(title, 100), "value": title} for title in titles],
+        }],
+    }
+
+
+async def _handle_aco_info_command(payload: dict) -> dict:
+    # Open to everyone, ephemeral, purely self-service - unlike
+    # /cron/aco-education (which posts publicly on a schedule and moves
+    # the rotation forward), this never touches last_posted_at or posts
+    # anywhere but back to whoever asked. Same browse-a-select-menu
+    # pattern as /dashboard's toolkit_select, just scoped to ACO content.
+    async with httpx.AsyncClient(timeout=15) as client:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/aco_education_posts",
+            headers=_supabase_headers(),
+            params={"active": "eq.true", "select": "title,emoji", "order": "title.asc"},
+        )
+        res.raise_for_status()
+        posts = res.json()
+    if not posts:
+        return {"type": 4, "data": {"content": "No ACO guides posted yet.", "flags": 64}}
+    lines = [f"{p.get('emoji') or '📄'} {p['title']}" for p in posts]
+    embed = {
+        "author": _ACO_AUTHOR, "title": "🎟️ Guides & Rules", "color": _ACO_BLUE, "footer": ACO_FOOTER,
+        "description": "Pick a guide below to read it.\n\n" + "\n".join(lines),
+    }
+    return {"type": 4, "data": {"embeds": [embed], "components": [_aco_info_select_component([p["title"] for p in posts])], "flags": 64}}
+
+
+async def _handle_aco_info_select(payload: dict) -> dict:
+    values = (payload.get("data") or {}).get("values") or []
+    title = values[0] if values else ""
+    async with httpx.AsyncClient(timeout=15) as client:
+        picked_res, all_res = await asyncio.gather(
+            client.get(
+                f"{settings.supabase_url}/rest/v1/aco_education_posts",
+                headers=_supabase_headers(),
+                params={"title": f"eq.{title}", "select": "title,emoji,sections", "limit": "1"},
+            ),
+            client.get(
+                f"{settings.supabase_url}/rest/v1/aco_education_posts",
+                headers=_supabase_headers(),
+                params={"active": "eq.true", "select": "title", "order": "title.asc"},
+            ),
+        )
+        picked_res.raise_for_status()
+        picked_rows = picked_res.json()
+        all_titles = [p["title"] for p in all_res.json()] if all_res.status_code < 300 else [title]
+    if not picked_rows:
+        return {"type": 4, "data": {"content": "That guide isn't available anymore.", "flags": 64}}
+    # UPDATE_MESSAGE, select menu re-populated with every active guide -
+    # lets them keep browsing between guides from the same ephemeral
+    # reply without re-running the command, exactly like picking a
+    # different tool from /dashboard's select menu.
+    return {"type": 7, "data": {"embeds": _aco_education_embeds(picked_rows[0]), "components": [_aco_info_select_component(all_titles)]}}
 
 
 # ── /history — team-only application archive, browsable in Discord ──────────
@@ -7527,6 +7595,24 @@ TOOLKIT_TOOLS = {
         "short": "Generate a shareable branded card showing your realized profit/loss on a mint",
         "usage": "/pnl collection:<name or contract address> mint_price:<ETH or $USD> amount_minted:<count> x_username:<optional>",
         "example": "/pnl collection:Pudgy Penguins mint_price:0.03 amount_minted:2",
+    },
+    "my-aco": {
+        "emoji": "🎟️", "label": "DASH ACO: My Submissions",
+        "short": "See your own wallet submissions across every ACO drop",
+        "usage": "/my-aco",
+        "example": "/my-aco",
+    },
+    "aco-info": {
+        "emoji": "📚", "label": "DASH ACO: Guides & Rules",
+        "short": "Browse DASH ACO's rules and educational guides on demand",
+        "usage": "/aco-info",
+        "example": "/aco-info",
+    },
+    "aco-drop": {
+        "emoji": "🎫", "label": "DASH ACO: New Drop (Team Only)",
+        "short": "Team only: announce a new ACO drop and open wallet submissions",
+        "usage": "/aco-drop",
+        "example": "/aco-drop",
     },
 }
 

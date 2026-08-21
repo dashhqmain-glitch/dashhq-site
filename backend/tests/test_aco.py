@@ -482,3 +482,68 @@ async def test_cron_aco_education_posts_oldest_and_updates_last_posted_at():
 
     assert result["posted"] is True
     assert "last_posted_at" in patched
+
+
+# ── /aco-info - self-service browse, open to everyone ────────────────────
+
+async def test_aco_info_command_lists_active_guides():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [{"title": "Guide A", "emoji": "⛽"}, {"title": "Guide B", "emoji": "🎟️"}])
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        result = await main._handle_aco_info_command(_payload())
+
+    assert result["type"] == 4
+    assert result["data"]["flags"] == 64  # ephemeral
+    options = result["data"]["components"][0]["components"][0]["options"]
+    assert {o["value"] for o in options} == {"Guide A", "Guide B"}
+
+
+async def test_aco_info_command_handles_no_guides():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [])
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        result = await main._handle_aco_info_command(_payload())
+
+    assert "no aco guides" in result["data"]["content"].lower()
+
+
+async def test_aco_info_select_shows_the_picked_guide():
+    post = _education_post(title="Guide A")
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if params and "title" in params:
+                return FakeRes(200, [post])
+            return FakeRes(200, [{"title": "Guide A"}, {"title": "Guide B"}])
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        payload = _payload(custom_id="acoinfo_select", components=None)
+        payload["data"]["values"] = ["Guide A"]
+        result = await main._handle_aco_info_select(payload)
+
+    assert result["type"] == 7  # UPDATE_MESSAGE
+    assert "Guide A" in result["data"]["embeds"][0]["title"]
+    # can still switch to a different guide afterward
+    options = result["data"]["components"][0]["components"][0]["options"]
+    assert {o["value"] for o in options} == {"Guide A", "Guide B"}
+
+
+async def test_aco_info_select_handles_missing_guide():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [])
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        payload = _payload(custom_id="acoinfo_select", components=None)
+        payload["data"]["values"] = ["Nonexistent"]
+        result = await main._handle_aco_info_select(payload)
+
+    assert "isn't available" in result["data"]["content"]

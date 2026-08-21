@@ -166,6 +166,10 @@ COMMANDS = [
         "description": "See your own wallet submissions across ACO drops",
     },
     {
+        "name": "aco-info",
+        "description": "Browse DASH ACO's rules and educational guides",
+    },
+    {
         "name": "history",
         "description": "Team only: browse every citizenship application and its verdict",
         # Hidden from regular members entirely - Discord only shows/allows a
