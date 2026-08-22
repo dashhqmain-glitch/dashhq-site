@@ -533,6 +533,49 @@ async def test_support_open_creates_a_new_thread_when_none_open():
     assert "newthread" in body["content"]
 
 
+async def test_support_open_recovers_from_a_stale_thread_reference():
+    # Regression test for a real reported bug: if a thread ever gets
+    # deleted some way OTHER than the bot's own Close button (manual
+    # deletion, a permission change, anything), the tracking row never
+    # learns it's gone and stays "open" forever - permanently blocking
+    # the member from ever opening a new ticket, pointed at a dead
+    # thread. The fix checks the thread actually still exists before
+    # trusting the row.
+    settings.discord_bot_token = "tok"
+    patches = []
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "aco_support_tickets" in url:
+                return FakeRes(200, [{"thread_id": "deletedthread"}])
+            # The Discord channel-existence check - the thread is gone.
+            return FakeRes(404, {"message": "Unknown Channel"})
+
+        async def post(self, url, headers=None, json=None):
+            if "/threads" in url:
+                return FakeRes(200, {"id": "freshthread"})
+            return FakeRes(200, {})
+
+        async def put(self, url, headers=None, json=None):
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            patches.append((url, json))
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        result = await main._handle_aco_support_open(_payload(channel_id="chan1"))
+
+    assert result["type"] == 5
+    body = _webhook_patch_body(patches)
+    # A real new thread got created, not blocked on the dead reference.
+    assert "freshthread" in body["content"]
+    # The stale row got cleaned up, not left dangling for next time.
+    stale_cleanup = next(j for u, j in patches if "aco_support_tickets" in u)
+    assert stale_cleanup["status"] == "closed"
+
+
 async def test_support_open_always_targets_the_dedicated_support_channel():
     # Regression test for a real requirement: a ticket opened from a drop
     # in the public announcement channel must land in the (staff-role-
@@ -841,6 +884,44 @@ async def test_key_open_reuses_existing_open_handoff():
     assert thread_created["called"] is False
     body = _webhook_patch_body(patches)
     assert "existingkeythread" in body["content"]
+
+
+async def test_key_open_recovers_from_a_stale_thread_reference():
+    # Same real reported bug as support tickets: a thread deleted outside
+    # the Mark Complete flow leaves the row "open" forever, permanently
+    # blocking the member from ever sending a key again. Confirm the
+    # existence check unblocks them and cleans up the dead row.
+    settings.discord_bot_token = "tok"
+    settings.discord_aco_support_channel_id = "support-chan"
+    patches = []
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "aco_key_handoffs" in url:
+                return FakeRes(200, [{"thread_id": "deletedkeythread"}])
+            return FakeRes(404, {"message": "Unknown Channel"})
+
+        async def post(self, url, headers=None, json=None):
+            if "/threads" in url:
+                return FakeRes(200, {"id": "freshkeythread"})
+            return FakeRes(200, {})
+
+        async def put(self, url, headers=None, json=None):
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            patches.append((url, json))
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        result = await main._handle_aco_key_open(_payload(channel_id="announcement-chan"))
+
+    assert result["type"] == 5
+    body = _webhook_patch_body(patches)
+    assert "freshkeythread" in body["content"]
+    stale_cleanup = next(j for u, j in patches if "aco_key_handoffs" in u)
+    assert stale_cleanup["status"] == "expired"
 
 
 async def test_key_open_creates_thread_in_support_channel_never_the_announcement_channel():

@@ -1998,8 +1998,27 @@ async def _handle_aco_support_open(payload: dict) -> dict:
         existing_res.raise_for_status()
         existing = existing_res.json()
         if existing:
-            await _discord_edit_original_raw(token, {"content": f"You already have an open ticket: <#{existing[0]['thread_id']}>"})
-            return {"type": 5}
+            stale_thread_id = existing[0]["thread_id"]
+            # Confirmed live gap: if a thread ever gets deleted some way
+            # OTHER than the bot's own Close button (manual deletion,
+            # permission change, anything), this row never learns it's
+            # gone and stays "open" forever - permanently blocking the
+            # member from ever opening a new ticket, pointed at a dead
+            # reference. Verify the thread is actually still there before
+            # trusting the row.
+            check_res = await client.get(
+                f"{DISCORD_API}/channels/{stale_thread_id}",
+                headers={"Authorization": f"Bot {settings.discord_bot_token}"},
+            )
+            if check_res.status_code < 300:
+                await _discord_edit_original_raw(token, {"content": f"You already have an open ticket: <#{stale_thread_id}>"})
+                return {"type": 5}
+            await client.patch(
+                f"{settings.supabase_url}/rest/v1/aco_support_tickets",
+                headers=_supabase_headers(prefer="return=minimal"),
+                params={"thread_id": f"eq.{stale_thread_id}"},
+                json={"status": "closed", "closed_at": datetime.now(timezone.utc).isoformat(), "closed_by": "system:stale-thread"},
+            )
 
         # A private THREAD, not a full channel - Discord manages
         # opener+staff visibility natively (the opener is invited
@@ -2105,8 +2124,26 @@ async def _handle_aco_key_open(payload: dict) -> dict:
         existing_res.raise_for_status()
         existing = existing_res.json()
         if existing:
-            await _discord_edit_original_raw(token, {"content": f"You already have an open key handoff: <#{existing[0]['thread_id']}>"})
-            return {"type": 5}
+            stale_thread_id = existing[0]["thread_id"]
+            # Same real gap as support tickets: if this thread was ever
+            # deleted some way OTHER than the Mark Complete button, this
+            # row never learns it's gone and stays "open" forever -
+            # permanently blocking the member from ever sending a key
+            # again, pointed at a dead thread reference. Verify it's
+            # actually still there before trusting the row.
+            check_res = await client.get(
+                f"{DISCORD_API}/channels/{stale_thread_id}",
+                headers={"Authorization": f"Bot {settings.discord_bot_token}"},
+            )
+            if check_res.status_code < 300:
+                await _discord_edit_original_raw(token, {"content": f"You already have an open key handoff: <#{stale_thread_id}>"})
+                return {"type": 5}
+            await client.patch(
+                f"{settings.supabase_url}/rest/v1/aco_key_handoffs",
+                headers=_supabase_headers(prefer="return=minimal"),
+                params={"thread_id": f"eq.{stale_thread_id}"},
+                json={"status": "expired"},
+            )
 
         thread_res = await client.post(
             f"{DISCORD_API}/channels/{channel_id}/threads",
