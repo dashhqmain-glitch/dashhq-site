@@ -523,9 +523,14 @@ insert into aco_education_posts (title, emoji, sections) values
   {"heading": "What Is DASH ACO", "body": "DASH ACO is our minting service for high-demand or difficult drops. Instead of fighting the gas war and bot competition alone, our team runs advanced mint bots on your behalf to maximize your odds of landing an allocation."},
   {"heading": "Supported Chains", "body": "We cover most EVM chains, Solana, and Bitcoin-based drops."},
   {"heading": "How Botting Works", "body": "You provide a burner wallet's private key through #aco-help so our bots can mint for you. Always use a dedicated burner wallet, never your main wallet, this is non-negotiable for your own security.\n\nIf a gas war is likely, we'll walk you through recommended gas settings before the mint."},
-  {"heading": "Fees", "body": "DASH ACO charges 30% of net profit, whether you hold or sell.\n\nIf you sell within 1 to 2 hours of minting, the fee is calculated on your actual sale profit.\n\nIf you choose to hold, the fee is calculated against a floor price we agree on together at the time."},
+  {"heading": "Fees", "body": "DASH ACO charges a service fee of 20% to 25% of your net profit, whether you hold or sell. The exact rate depends on the drop and gets confirmed with you upfront before we bot it, so there's never a surprise number after the fact.\n\nIf you sell within 1 to 2 hours of minting, the fee is calculated on your actual realized sale profit.\n\nIf you choose to hold, the fee is calculated against a floor price agreed on together at the time of the mint, giving both sides a fair, transparent baseline."},
   {"heading": "No Guarantees", "body": "We do everything we can to land a successful mint, but nothing is guaranteed. Bots can fail, projects can behave unpredictably, and gas can be spent on an attempt that doesn't land. We are not responsible for gas lost on a failed attempt. Using a bot significantly improves your odds, it does not guarantee them."},
   {"heading": "Requesting A Bot", "body": "Drop everything we need in #aco-request at least 6 hours before the mint: project socials, mint date and time, price, supply, and anything else relevant. The earlier we know, the better we can prepare."}
 ]$json$::jsonb)
-on conflict (title) do nothing;
+-- do UPDATE, not do nothing: this file is the source of truth for guide
+-- content, so re-running it after an edit (like the fee change above)
+-- actually syncs the live row instead of silently no-op'ing forever.
+-- Only sections/emoji are overwritten - active and last_posted_at are
+-- runtime state, not seed content, and must survive a re-run untouched.
+on conflict (title) do update set sections = excluded.sections, emoji = excluded.emoji;
 
