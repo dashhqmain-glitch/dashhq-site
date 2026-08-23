@@ -1555,19 +1555,28 @@ def _aco_drop_embed(drop: dict, ticket_count: int, member_count: int) -> dict:
     }
 
 
-def _aco_drop_components(drop_id: str, status: str) -> list:
-    see_wallets = {"type": 2, "style": 2, "label": "See Wallets", "custom_id": f"acowallets:{drop_id}"}
-    if status != "open":
-        return [{"type": 1, "components": [see_wallets]}]
-    return [{
-        "type": 1,
-        "components": [
-            {"type": 2, "style": 1, "label": "Submit Wallet(s)", "custom_id": f"acojoin:{drop_id}"},
-            see_wallets,
-            {"type": 2, "style": 3, "label": "Mark Resolved", "custom_id": f"acoresolve:{drop_id}"},
-            {"type": 2, "style": 4, "label": "Cancel Drop", "custom_id": f"acocancel:{drop_id}"},
-        ],
-    }]
+def _aco_drop_components(drop_id: str, status: str, *, submit: bool = True, staff: bool = False) -> list:
+    # `submit` and `staff` are independent, not two ends of one toggle:
+    # the public announcement message gets submit=True, staff=False; the
+    # mirrored staff-controls message (see _handle_aco_create_submit) gets
+    # submit=False, staff=True; and the single-message fallback used when
+    # no separate staff channel is configured needs BOTH at once, since
+    # there's no second message to carry the other half. See Wallets /
+    # Mark Resolved / Cancel Drop are deliberately kept out of the public
+    # view - Discord has no per-viewer component visibility within one
+    # message, so not rendering them there is the only real way to keep
+    # non-staff from seeing them at all.
+    buttons = []
+    if submit and status == "open":
+        buttons.append({"type": 2, "style": 1, "label": "Submit Wallet(s)", "custom_id": f"acojoin:{drop_id}"})
+    if staff:
+        buttons.append({"type": 2, "style": 2, "label": "See Wallets", "custom_id": f"acowallets:{drop_id}"})
+        if status == "open":
+            buttons.append({"type": 2, "style": 3, "label": "Mark Resolved", "custom_id": f"acoresolve:{drop_id}"})
+            buttons.append({"type": 2, "style": 4, "label": "Cancel Drop", "custom_id": f"acocancel:{drop_id}"})
+    if not buttons:
+        return []
+    return [{"type": 1, "components": buttons}]
 
 
 async def _aco_log(text: str) -> None:
@@ -1709,20 +1718,47 @@ async def _handle_aco_create_submit(payload: dict) -> dict:
         res.raise_for_status()
         drop = res.json()[0]
 
+        # Only a genuinely separate, staff-only channel lets us keep the
+        # staff controls (See Wallets / Mark Resolved / Cancel Drop) off
+        # the public announcement - if no support channel is configured,
+        # OR the staff-channel post fails, fall back to the old
+        # single-message layout so drops never end up unmanageable (posted
+        # but with no way to resolve/cancel them).
+        staff_channel_id = settings.discord_aco_support_channel_id or settings.discord_aco_channel_id
+        want_separate_staff_channel = bool(staff_channel_id) and staff_channel_id != settings.discord_aco_channel_id
+
+        staff_msg = None
+        if want_separate_staff_channel:
+            staff_msg_res = await _discord_post_with_retry(
+                client,
+                f"{DISCORD_API}/channels/{staff_channel_id}/messages",
+                {"Authorization": f"Bot {settings.discord_bot_token}"},
+                {"embeds": [_aco_drop_embed(drop, 0, 0)], "components": _aco_drop_components(drop["id"], "open", submit=False, staff=True)},
+            )
+            if staff_msg_res.status_code < 300:
+                staff_msg = staff_msg_res.json()
+            else:
+                logger.error("Failed to post ACO staff-controls message: %s %s", staff_msg_res.status_code, staff_msg_res.text[:300])
+
         msg_res = await _discord_post_with_retry(
             client,
             f"{DISCORD_API}/channels/{settings.discord_aco_channel_id}/messages",
             {"Authorization": f"Bot {settings.discord_bot_token}"},
-            {"embeds": [_aco_drop_embed(drop, 0, 0)], "components": _aco_drop_components(drop["id"], "open")},
+            {"embeds": [_aco_drop_embed(drop, 0, 0)], "components": _aco_drop_components(drop["id"], "open", submit=True, staff=not staff_msg)},
         )
         posted_ok = msg_res.status_code < 300
         if posted_ok:
             msg = msg_res.json()
+            patch_body = {"discord_message_id": msg["id"]}
+            if staff_msg:
+                patch_body["discord_staff_channel_id"] = staff_channel_id
+                patch_body["discord_staff_message_id"] = staff_msg["id"]
+
             await client.patch(
                 f"{settings.supabase_url}/rest/v1/aco_drops",
                 headers=_supabase_headers(prefer="return=minimal"),
                 params={"id": f"eq.{drop['id']}"},
-                json={"discord_message_id": msg["id"]},
+                json=patch_body,
             )
 
     # Confirmed live gap: this used to report success unconditionally even
@@ -1814,10 +1850,21 @@ async def _handle_aco_wallet_submit(payload: dict, drop_id: str) -> dict:
             json=rows,
         )
         ticket_count, member_count, _ = await _aco_ticket_counts(client, drop_id)
+        embed = _aco_drop_embed(drop, ticket_count, member_count)
+        # Only edit the public message with staff=True when there's no
+        # separate staff message to carry those controls instead (see
+        # _handle_aco_create_submit) - otherwise this would silently
+        # re-add See Wallets/Resolve/Cancel to the public announcement.
+        has_staff_msg = bool(drop.get("discord_staff_message_id"))
         await _discord_edit_channel_message(
             drop.get("discord_channel_id"), drop.get("discord_message_id"),
-            _aco_drop_embed(drop, ticket_count, member_count), _aco_drop_components(drop_id, drop["status"]),
+            embed, _aco_drop_components(drop_id, drop["status"], submit=True, staff=not has_staff_msg),
         )
+        if has_staff_msg:
+            await _discord_edit_channel_message(
+                drop.get("discord_staff_channel_id"), drop.get("discord_staff_message_id"),
+                embed, _aco_drop_components(drop_id, drop["status"], submit=False, staff=True),
+            )
 
     summary = f"✅ {len(valid)} wallet(s) submitted."
     if invalid:
@@ -1865,11 +1912,26 @@ async def _aco_finalize_drop(drop_id: str, status: str, actor_id: str) -> dict:
     verb = {"resolved": "✅ **Drop resolved**", "cancelled": "❌ **Drop cancelled**"}.get(status, status)
     await _aco_log(f"{verb} by <@{actor_id}>: **{drop['title']}**, {ticket_count} wallet(s) from {member_count} member(s)")
 
+    embed = _aco_drop_embed(drop, ticket_count, member_count)
+    has_staff_msg = bool(drop.get("discord_staff_message_id"))
+    # Resolve/Cancel only ever appear on the staff view (either the
+    # mirrored staff message, or the public message itself when no
+    # separate staff channel is configured) - so the type-7 response
+    # updating "the message this button lives in" is always the staff
+    # view. When there IS a separate staff message, the public
+    # announcement needs its own direct edit since a single interaction
+    # response can't update two different messages at once.
+    if has_staff_msg:
+        await _discord_edit_channel_message(
+            drop.get("discord_channel_id"), drop.get("discord_message_id"),
+            embed, _aco_drop_components(drop_id, status, submit=True, staff=False),
+        )
+
     return {
         "type": 7,
         "data": {
-            "embeds": [_aco_drop_embed(drop, ticket_count, member_count)],
-            "components": _aco_drop_components(drop_id, status),
+            "embeds": [embed],
+            "components": _aco_drop_components(drop_id, status, submit=not has_staff_msg, staff=True),
         },
     }
 

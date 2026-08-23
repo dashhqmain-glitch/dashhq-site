@@ -182,16 +182,47 @@ def test_embed_omits_optional_fields_when_absent():
     assert "Profit / Notes" not in names and "Contract" not in names and "Checker" not in names
 
 
-def test_open_drop_has_all_four_buttons():
-    components = main._aco_drop_components("drop1", "open")
+def test_open_drop_staff_only_view_has_three_buttons():
+    # This is the mirrored staff-controls message (a separate Discord
+    # message from the public announcement) - it never carries Submit
+    # Wallet(s), since that button is only meaningful on the public view.
+    components = main._aco_drop_components("drop1", "open", submit=False, staff=True)
+    labels = [c["label"] for c in components[0]["components"]]
+    assert labels == ["See Wallets", "Mark Resolved", "Cancel Drop"]
+
+
+def test_resolved_drop_staff_only_view_only_has_see_wallets_button():
+    components = main._aco_drop_components("drop1", "resolved", submit=False, staff=True)
+    labels = [c["label"] for c in components[0]["components"]]
+    assert labels == ["See Wallets"]
+
+
+def test_open_drop_combined_fallback_view_has_all_four_buttons():
+    # When no separate staff channel is configured there's only ever ONE
+    # message, so it has to carry both halves at once - this is the
+    # single-message fallback (see _handle_aco_create_submit).
+    components = main._aco_drop_components("drop1", "open", submit=True, staff=True)
     labels = [c["label"] for c in components[0]["components"]]
     assert labels == ["Submit Wallet(s)", "See Wallets", "Mark Resolved", "Cancel Drop"]
 
 
-def test_resolved_drop_only_has_see_wallets_button():
-    components = main._aco_drop_components("drop1", "resolved")
+def test_open_drop_public_view_only_has_submit_button():
+    # This is the actual fix: See Wallets / Mark Resolved / Cancel Drop
+    # must never appear on the public (non-staff) view, since Discord has
+    # no per-viewer component visibility - the public view not rendering
+    # them is the only real way to keep non-ACO-role members from seeing
+    # them at all.
+    components = main._aco_drop_components("drop1", "open", staff=False)
     labels = [c["label"] for c in components[0]["components"]]
-    assert labels == ["See Wallets"]
+    assert labels == ["Submit Wallet(s)"]
+
+
+def test_resolved_drop_public_view_has_no_buttons():
+    assert main._aco_drop_components("drop1", "resolved", staff=False) == []
+
+
+def test_drop_components_defaults_to_public_view():
+    assert main._aco_drop_components("drop1", "open") == main._aco_drop_components("drop1", "open", staff=False)
 
 
 # ── Admin-gate enforcement - the security-critical part ──────────────────
@@ -309,6 +340,82 @@ async def test_aco_create_submit_reports_real_failure_when_channel_post_fails():
     # nothing was actually posted - only the interaction-reply PATCH
     # (to the webhooks endpoint) should have happened.
     assert not any("aco_drops" in u for u, _ in patches)
+
+
+async def test_aco_create_submit_mirrors_staff_controls_to_the_support_channel():
+    # The actual fix: See Wallets / Mark Resolved / Cancel Drop must never
+    # render on the public announcement message - they live on a second
+    # message posted to the staff-only support channel instead.
+    settings.discord_aco_staff_role_id = "role123"
+    settings.discord_aco_channel_id = "announcement-chan"
+    settings.discord_aco_support_channel_id = "support-chan"
+    settings.discord_bot_token = "tok"
+    posts = []
+    patches = []
+
+    class FakeClient:
+        async def post(self, url, headers=None, json=None):
+            if "aco_drops" in url:
+                return FakeRes(200, [{"id": "drop1", "title": "Test Drop", "chain": "Ethereum", "status": "open",
+                                       "deadline": "2026-12-25T18:00:00+00:00"}])
+            if "/messages" in url:
+                posts.append((url, json))
+                return FakeRes(200, {"id": f"msg{len(posts)}"})
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            patches.append((url, json))
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        payload = _payload(permissions="32", roles=[], components=_create_submit_components())
+        await main._handle_aco_create_submit(payload)
+
+    assert len(posts) == 2
+    public_url, public_body = next((u, b) for u, b in posts if "announcement-chan" in u)
+    staff_url, staff_body = next((u, b) for u, b in posts if "support-chan" in u)
+    public_labels = [c["label"] for c in public_body["components"][0]["components"]]
+    staff_labels = [c["label"] for c in staff_body["components"][0]["components"]]
+    assert public_labels == ["Submit Wallet(s)"]
+    assert staff_labels == ["See Wallets", "Mark Resolved", "Cancel Drop"]
+
+    drop_patch = next(j for u, j in patches if "aco_drops" in u)
+    assert drop_patch["discord_staff_channel_id"] == "support-chan"
+    assert drop_patch["discord_staff_message_id"] == "msg1"
+
+
+async def test_aco_create_submit_falls_back_to_one_message_when_no_support_channel():
+    # Degrade instead of break: with no separate support channel to mirror
+    # to, the staff controls must stay on the public message so the drop
+    # is still manageable.
+    settings.discord_aco_staff_role_id = "role123"
+    settings.discord_aco_channel_id = "chan1"
+    settings.discord_aco_support_channel_id = ""
+    settings.discord_bot_token = "tok"
+    posts = []
+
+    class FakeClient:
+        async def post(self, url, headers=None, json=None):
+            if "aco_drops" in url:
+                return FakeRes(200, [{"id": "drop1", "title": "Test Drop", "chain": "Ethereum", "status": "open",
+                                       "deadline": "2026-12-25T18:00:00+00:00"}])
+            if "/messages" in url:
+                posts.append((url, json))
+                return FakeRes(200, {"id": "msg1"})
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        payload = _payload(permissions="32", roles=[], components=_create_submit_components())
+        await main._handle_aco_create_submit(payload)
+
+    assert len(posts) == 1
+    labels = [c["label"] for c in posts[0][1]["components"][0]["components"]]
+    assert labels == ["Submit Wallet(s)", "See Wallets", "Mark Resolved", "Cancel Drop"]
 
 
 # ── Drop resolve/cancel can't re-finalize an already-closed drop ─────────

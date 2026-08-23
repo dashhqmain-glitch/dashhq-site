@@ -425,6 +425,15 @@ create table if not exists aco_drops (
   resolved_at         timestamptz
 );
 
+-- The public announcement message only ever carries "Submit Wallet(s)" -
+-- See Wallets / Mark Resolved / Cancel Drop live on a second, mirrored
+-- message posted to the staff-only ACO support channel instead, so those
+-- controls are never even rendered to non-staff members (Discord has no
+-- per-viewer component visibility within a single message - channel
+-- permissions are the only real enforcement, hence the second message).
+alter table aco_drops add column if not exists discord_staff_channel_id text;
+alter table aco_drops add column if not exists discord_staff_message_id text;
+
 create index if not exists aco_drops_status_idx on aco_drops (status);
 
 alter table aco_drops enable row level security;
