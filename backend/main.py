@@ -1757,27 +1757,6 @@ async def _handle_aco_create_submit(payload: dict) -> dict:
                 patch_body["discord_staff_channel_id"] = staff_channel_id
                 patch_body["discord_staff_message_id"] = staff_msg["id"]
 
-            # Follow-up ping for whoever opted into the notify-me role -
-            # a separate plain message right after the embed, not folded
-            # into it, so the embed itself stays clean. allowed_mentions
-            # explicitly scopes the ping to just this one role, so nothing
-            # in the drop's own title/notes text can accidentally trigger
-            # an unrelated mention. Best-effort: a failure here shouldn't
-            # undo the drop announcement that already posted successfully.
-            if settings.discord_aco_enjoyer_role_id:
-                ping_res = await _discord_post_with_retry(
-                    client,
-                    f"{DISCORD_API}/channels/{settings.discord_aco_channel_id}/messages",
-                    {"Authorization": f"Bot {settings.discord_bot_token}"},
-                    {
-                        "content": f"<@&{settings.discord_aco_enjoyer_role_id}> New ACO drop just posted - {drop['title']}",
-                        "allowed_mentions": {"parse": [], "roles": [settings.discord_aco_enjoyer_role_id]},
-                        "message_reference": {"message_id": msg["id"]},
-                    },
-                )
-                if ping_res.status_code >= 300:
-                    logger.error("Failed to post ACO enjoyer-role ping: %s %s", ping_res.status_code, ping_res.text[:300])
-
             await client.patch(
                 f"{settings.supabase_url}/rest/v1/aco_drops",
                 headers=_supabase_headers(prefer="return=minimal"),

@@ -91,11 +91,6 @@ class Settings(BaseSettings):
     # closed) gets logged here, so the team has a full audit log in one
     # place without needing to watch the public ACO channel itself.
     discord_aco_admin_log_channel_id: str = ""
-    # A self-assignable "notify me" role - members opt into it to get
-    # pinged whenever a new drop goes up. Empty means the ping is simply
-    # skipped (the drop still posts normally), same no-op pattern as
-    # every other ACO setting here.
-    discord_aco_enjoyer_role_id: str = ""
 
     x_client_id: str = ""
     x_client_secret: str = ""
