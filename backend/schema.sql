@@ -427,7 +427,7 @@ create table if not exists aco_drops (
 
 -- The public announcement message only ever carries "Submit Wallet(s)" -
 -- See Wallets / Mark Resolved / Cancel Drop live on a second, mirrored
--- message posted to the staff-only ACO support channel instead, so those
+-- message posted to the moderator channel instead, so those
 -- controls are never even rendered to non-staff members (Discord has no
 -- per-viewer component visibility within a single message - channel
 -- permissions are the only real enforcement, hence the second message).

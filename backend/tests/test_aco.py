@@ -342,13 +342,14 @@ async def test_aco_create_submit_reports_real_failure_when_channel_post_fails():
     assert not any("aco_drops" in u for u, _ in patches)
 
 
-async def test_aco_create_submit_mirrors_staff_controls_to_the_support_channel():
+async def test_aco_create_submit_mirrors_staff_controls_to_the_mod_channel():
     # The actual fix: See Wallets / Mark Resolved / Cancel Drop must never
     # render on the public announcement message - they live on a second
-    # message posted to the staff-only support channel instead.
+    # message posted to the moderator channel instead (not #aco-support,
+    # which is reserved for customer support ticket threads).
     settings.discord_aco_staff_role_id = "role123"
     settings.discord_aco_channel_id = "announcement-chan"
-    settings.discord_aco_support_channel_id = "support-chan"
+    settings.discord_aco_admin_log_channel_id = "mod-chan"
     settings.discord_bot_token = "tok"
     posts = []
     patches = []
@@ -372,26 +373,31 @@ async def test_aco_create_submit_mirrors_staff_controls_to_the_support_channel()
         payload = _payload(permissions="32", roles=[], components=_create_submit_components())
         await main._handle_aco_create_submit(payload)
 
-    assert len(posts) == 2
-    public_url, public_body = next((u, b) for u, b in posts if "announcement-chan" in u)
-    staff_url, staff_body = next((u, b) for u, b in posts if "support-chan" in u)
+    # The mod channel also receives a separate plain-text audit-log entry
+    # (see _aco_log) alongside the interactive staff-controls message
+    # this test cares about - filter to messages with real components so
+    # that log line doesn't get mistaken for the drop-controls message.
+    control_posts = [(u, b) for u, b in posts if b.get("components")]
+    assert len(control_posts) == 2
+    public_url, public_body = next((u, b) for u, b in control_posts if "announcement-chan" in u)
+    staff_url, staff_body = next((u, b) for u, b in control_posts if "mod-chan" in u)
     public_labels = [c["label"] for c in public_body["components"][0]["components"]]
     staff_labels = [c["label"] for c in staff_body["components"][0]["components"]]
     assert public_labels == ["Submit Wallet(s)"]
     assert staff_labels == ["See Wallets", "Mark Resolved", "Cancel Drop"]
 
     drop_patch = next(j for u, j in patches if "aco_drops" in u)
-    assert drop_patch["discord_staff_channel_id"] == "support-chan"
+    assert drop_patch["discord_staff_channel_id"] == "mod-chan"
     assert drop_patch["discord_staff_message_id"] == "msg1"
 
 
-async def test_aco_create_submit_falls_back_to_one_message_when_no_support_channel():
-    # Degrade instead of break: with no separate support channel to mirror
-    # to, the staff controls must stay on the public message so the drop
-    # is still manageable.
+async def test_aco_create_submit_falls_back_to_one_message_when_no_mod_channel():
+    # Degrade instead of break: with no mod channel to mirror to, the
+    # staff controls must stay on the public message so the drop is
+    # still manageable.
     settings.discord_aco_staff_role_id = "role123"
     settings.discord_aco_channel_id = "chan1"
-    settings.discord_aco_support_channel_id = ""
+    settings.discord_aco_admin_log_channel_id = ""
     settings.discord_bot_token = "tok"
     posts = []
 

@@ -1720,11 +1720,14 @@ async def _handle_aco_create_submit(payload: dict) -> dict:
 
         # Only a genuinely separate, staff-only channel lets us keep the
         # staff controls (See Wallets / Mark Resolved / Cancel Drop) off
-        # the public announcement - if no support channel is configured,
-        # OR the staff-channel post fails, fall back to the old
+        # the public announcement - they go to the moderator channel
+        # (already the home for every other ACO admin-visibility action,
+        # see _aco_log) rather than #aco-support, which is reserved for
+        # customer support ticket threads. If no mod channel is
+        # configured, OR the post to it fails, fall back to the old
         # single-message layout so drops never end up unmanageable (posted
         # but with no way to resolve/cancel them).
-        staff_channel_id = settings.discord_aco_support_channel_id or settings.discord_aco_channel_id
+        staff_channel_id = settings.discord_aco_admin_log_channel_id or settings.discord_aco_channel_id
         want_separate_staff_channel = bool(staff_channel_id) and staff_channel_id != settings.discord_aco_channel_id
 
         staff_msg = None
