@@ -342,6 +342,73 @@ async def test_aco_create_submit_reports_real_failure_when_channel_post_fails():
     assert not any("aco_drops" in u for u, _ in patches)
 
 
+async def test_aco_create_submit_pings_the_enjoyer_role_when_configured():
+    settings.discord_aco_staff_role_id = "role123"
+    settings.discord_aco_channel_id = "announcement-chan"
+    settings.discord_aco_admin_log_channel_id = ""
+    settings.discord_aco_enjoyer_role_id = "enjoyer456"
+    settings.discord_bot_token = "tok"
+    posts = []
+
+    class FakeClient:
+        async def post(self, url, headers=None, json=None):
+            if "aco_drops" in url:
+                return FakeRes(200, [{"id": "drop1", "title": "Test Drop", "chain": "Ethereum", "status": "open",
+                                       "deadline": "2026-12-25T18:00:00+00:00"}])
+            if "/messages" in url:
+                posts.append((url, json))
+                return FakeRes(200, {"id": f"msg{len(posts)}"})
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        payload = _payload(permissions="32", roles=[], components=_create_submit_components())
+        await main._handle_aco_create_submit(payload)
+
+    drop_msg_id = "msg1"  # the drop announcement is always posted first, per FakeClient's id numbering
+    ping = next(b for _, b in posts if "enjoyer456" in b.get("content", ""))
+    assert ping["content"].startswith("<@&enjoyer456>")
+    assert "Test Drop" in ping["content"]
+    # Scoped to just this role - nothing in the drop's own text (title,
+    # profit notes, etc.) should be able to trigger an unrelated mention.
+    assert ping["allowed_mentions"] == {"parse": [], "roles": ["enjoyer456"]}
+    # A reply to the drop announcement, not a standalone message - this is
+    # the "follow up with the drop embed" requirement.
+    assert ping["message_reference"]["message_id"] == drop_msg_id
+
+
+async def test_aco_create_submit_skips_ping_when_enjoyer_role_unconfigured():
+    settings.discord_aco_staff_role_id = "role123"
+    settings.discord_aco_channel_id = "chan1"
+    settings.discord_aco_admin_log_channel_id = ""
+    settings.discord_aco_enjoyer_role_id = ""
+    settings.discord_bot_token = "tok"
+    posts = []
+
+    class FakeClient:
+        async def post(self, url, headers=None, json=None):
+            if "aco_drops" in url:
+                return FakeRes(200, [{"id": "drop1", "title": "Test Drop", "chain": "Ethereum", "status": "open",
+                                       "deadline": "2026-12-25T18:00:00+00:00"}])
+            if "/messages" in url:
+                posts.append((url, json))
+                return FakeRes(200, {"id": "msg1"})
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        payload = _payload(permissions="32", roles=[], components=_create_submit_components())
+        await main._handle_aco_create_submit(payload)
+
+    assert len(posts) == 1  # just the drop announcement, no ping follow-up
+
+
 async def test_aco_create_submit_mirrors_staff_controls_to_the_mod_channel():
     # The actual fix: See Wallets / Mark Resolved / Cancel Drop must never
     # render on the public announcement message - they live on a second
