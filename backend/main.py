@@ -1319,12 +1319,14 @@ async def _dispatch_interaction(payload: dict, itype) -> dict:
     if history_id.startswith("acocancel:"):
         _, _, drop_id = history_id.partition(":")
         return await _handle_aco_cancel_button(payload, drop_id)
-    if history_id == "acosupport_open":
-        return await _handle_aco_support_open(payload)
+    if history_id == "acosupport_open" or history_id.startswith("acosupport_open:"):
+        _, _, drop_id = history_id.partition(":")
+        return await _handle_aco_support_open(payload, drop_id or None)
     if history_id == "acosupport_close":
         return await _handle_aco_support_close(payload)
-    if history_id == "acokey_open":
-        return await _handle_aco_key_open(payload)
+    if history_id == "acokey_open" or history_id.startswith("acokey_open:"):
+        _, _, drop_id = history_id.partition(":")
+        return await _handle_aco_key_open(payload, drop_id or None)
     if history_id == "acokey_complete":
         return await _handle_aco_key_complete(payload)
 
@@ -1890,12 +1892,14 @@ async def _handle_aco_wallet_submit(payload: dict, drop_id: str) -> dict:
     # Two buttons right here, not a standing public panel - this is the
     # one moment either is actually relevant (right after someone engages
     # with a drop), and it means only people who've actually submitted a
-    # wallet ever see a way to reach either in the first place.
+    # wallet ever see a way to reach either in the first place. drop_id
+    # rides along on the custom_id so the thread these buttons open can
+    # be named after the actual project, not just the member.
     await _discord_edit_original_raw(token, {
         "content": summary,
         "components": [{"type": 1, "components": [
-            {"type": 2, "style": 2, "label": "Need Help?", "custom_id": "acosupport_open"},
-            {"type": 2, "style": 1, "label": "Send Private Key (Botting)", "custom_id": "acokey_open"},
+            {"type": 2, "style": 2, "label": "Need Help?", "custom_id": f"acosupport_open:{drop_id}"},
+            {"type": 2, "style": 1, "label": "Send Private Key (Botting)", "custom_id": f"acokey_open:{drop_id}"},
         ]}],
     })
     return {"type": 5}
@@ -2044,7 +2048,7 @@ async def _handle_my_aco_command(payload: dict) -> dict:
 # with a drop. That's what keeps support scoped to real ACO
 # participants instead of a button anyone in the public channel could
 # click regardless of whether they've ever touched ACO.
-async def _handle_aco_support_open(payload: dict) -> dict:
+async def _handle_aco_support_open(payload: dict, drop_id: str | None = None) -> dict:
     member_user = payload.get("member", {}).get("user", {})
     discord_user_id = member_user.get("id", "")
     display_name = member_user.get("global_name") or member_user.get("username", "member")
@@ -2100,6 +2104,16 @@ async def _handle_aco_support_open(payload: dict) -> dict:
                 json={"status": "closed", "closed_at": datetime.now(timezone.utc).isoformat(), "closed_by": "system:stale-thread"},
             )
 
+        # Name the thread after the actual project (drop_id rides along
+        # on the "Need Help?" button's custom_id) so staff juggling
+        # several concurrent drops can tell tickets apart at a glance in
+        # the thread list, not just by member name. drop_id is None for
+        # any button posted before this existed, or if the drop lookup
+        # comes back empty - either way this degrades to the old
+        # member-only name rather than failing the ticket.
+        drop_for_name = await _aco_get_drop(client, drop_id) if drop_id else None
+        thread_name = f"ticket-{display_name}-{drop_for_name['title']}" if drop_for_name else f"ticket-{display_name}"
+
         # A private THREAD, not a full channel - Discord manages
         # opener+staff visibility natively (the opener is invited
         # explicitly below; staff already sees every private thread on
@@ -2109,7 +2123,7 @@ async def _handle_aco_support_open(payload: dict) -> dict:
         thread_res = await client.post(
             f"{DISCORD_API}/channels/{channel_id}/threads",
             headers={"Authorization": f"Bot {settings.discord_bot_token}"},
-            json={"name": f"ticket-{display_name}"[:100], "type": 12, "invitable": False},
+            json={"name": thread_name[:100], "type": 12, "invitable": False},
         )
         if thread_res.status_code >= 300:
             logger.error("Failed to create ACO support thread: %s %s", thread_res.status_code, thread_res.text[:300])
@@ -2121,11 +2135,16 @@ async def _handle_aco_support_open(payload: dict) -> dict:
             f"{DISCORD_API}/channels/{thread_id}/thread-members/{discord_user_id}",
             headers={"Authorization": f"Bot {settings.discord_bot_token}"},
         )
+        # Pings ACO staff right in the thread, not just the member - a
+        # private thread doesn't show up anywhere staff would otherwise
+        # notice it opened, so without this the only way staff learns of
+        # a new ticket is stumbling onto it in the channel's thread list.
+        staff_ping = f"<@&{settings.discord_aco_staff_role_id}> " if settings.discord_aco_staff_role_id else ""
         await client.post(
             f"{DISCORD_API}/channels/{thread_id}/messages",
             headers={"Authorization": f"Bot {settings.discord_bot_token}"},
             json={
-                "content": f"<@{discord_user_id}> Thanks for reaching out - describe your issue here and a team member will help shortly.",
+                "content": f"{staff_ping}<@{discord_user_id}> Thanks for reaching out - describe your issue here and a team member will help shortly.",
                 "components": [{"type": 1, "components": [{"type": 2, "style": 4, "label": "Close Ticket", "custom_id": "acosupport_close"}]}],
             },
         )
@@ -2183,7 +2202,7 @@ async def _handle_aco_support_close(payload: dict) -> dict:
 # the thread - no message-content handling exists anywhere in this file.
 # The key itself never touches this backend, this database, or any log
 # this bot writes, only the thread's own existence and status do.
-async def _handle_aco_key_open(payload: dict) -> dict:
+async def _handle_aco_key_open(payload: dict, drop_id: str | None = None) -> dict:
     member_user = payload.get("member", {}).get("user", {})
     discord_user_id = member_user.get("id", "")
     display_name = member_user.get("global_name") or member_user.get("username", "member")
@@ -2225,10 +2244,15 @@ async def _handle_aco_key_open(payload: dict) -> dict:
                 json={"status": "expired"},
             )
 
+        # Same reasoning as support tickets: name the thread after the
+        # actual project so staff can tell concurrent handoffs apart.
+        drop_for_name = await _aco_get_drop(client, drop_id) if drop_id else None
+        thread_name = f"key-{display_name}-{drop_for_name['title']}" if drop_for_name else f"key-{display_name}"
+
         thread_res = await client.post(
             f"{DISCORD_API}/channels/{channel_id}/threads",
             headers={"Authorization": f"Bot {settings.discord_bot_token}"},
-            json={"name": f"key-{display_name}"[:100], "type": 12, "invitable": False},
+            json={"name": thread_name[:100], "type": 12, "invitable": False},
         )
         if thread_res.status_code >= 300:
             logger.error("Failed to create ACO key handoff thread: %s %s", thread_res.status_code, thread_res.text[:300])
@@ -2240,12 +2264,17 @@ async def _handle_aco_key_open(payload: dict) -> dict:
             f"{DISCORD_API}/channels/{thread_id}/thread-members/{discord_user_id}",
             headers={"Authorization": f"Bot {settings.discord_bot_token}"},
         )
+        # Same reasoning as the support-ticket thread: ping ACO staff
+        # directly in the thread so a new key handoff doesn't sit
+        # unnoticed until someone happens to check the channel's thread
+        # list - this one especially shouldn't sit around waiting.
+        staff_ping = f"<@&{settings.discord_aco_staff_role_id}> " if settings.discord_aco_staff_role_id else ""
         await client.post(
             f"{DISCORD_API}/channels/{thread_id}/messages",
             headers={"Authorization": f"Bot {settings.discord_bot_token}"},
             json={
                 "content": (
-                    f"<@{discord_user_id}> This thread is private to you and ACO staff only.\n\n"
+                    f"{staff_ping}<@{discord_user_id}> This thread is private to you and ACO staff only.\n\n"
                     "Paste your **burner wallet's** private key below - never your main wallet's. "
                     "A staff member will confirm once they have what they need, and this whole thread "
                     "(including your message) gets permanently deleted right after, not just archived."

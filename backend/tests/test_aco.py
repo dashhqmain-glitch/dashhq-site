@@ -580,7 +580,9 @@ async def test_wallet_submit_inserts_tickets_and_confirms():
     # actually attached, not just a public standing panel that no longer
     # exists.
     button = body["components"][0]["components"][0]
-    assert button["custom_id"] == "acosupport_open"
+    # drop_id rides along on the custom_id now, so the resulting thread
+    # can be named after the actual project.
+    assert button["custom_id"] == "acosupport_open:drop1"
     assert button["label"] == "Need Help?"
     # The channel-message edit for the drop's own ticket count is a
     # SEPARATE PATCH from the interaction reply above - confirms both
@@ -724,6 +726,126 @@ async def test_support_open_creates_a_new_thread_when_none_open():
     assert result["type"] == 5
     body = _webhook_patch_body(patches)
     assert "newthread" in body["content"]
+
+
+async def test_support_open_names_thread_after_the_drop_when_drop_id_given():
+    settings.discord_bot_token = "tok"
+    thread_create_bodies = []
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "aco_drops" in url:
+                return FakeRes(200, [{"id": "drop1", "title": "clubNFT ACO", "status": "open",
+                                       "deadline": "2026-12-25T18:00:00+00:00"}])
+            return FakeRes(200, [])  # no existing open ticket
+
+        async def post(self, url, headers=None, json=None):
+            if "/threads" in url:
+                thread_create_bodies.append(json)
+                return FakeRes(200, {"id": "newthread"})
+            return FakeRes(200, {})
+
+        async def put(self, url, headers=None, json=None):
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        await main._handle_aco_support_open(_payload(channel_id="chan1"), "drop1")
+
+    assert thread_create_bodies[0]["name"] == "ticket-Someone-clubNFT ACO"
+
+
+async def test_support_open_falls_back_to_member_only_name_when_drop_id_missing_or_stale():
+    # Any button posted before drop_id existed on the custom_id, or a
+    # drop that's since been deleted, must still open a ticket - just
+    # without the project suffix, not a broken interaction.
+    settings.discord_bot_token = "tok"
+    thread_create_bodies = []
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "aco_drops" in url:
+                return FakeRes(200, [])  # drop lookup comes back empty
+            return FakeRes(200, [])
+
+        async def post(self, url, headers=None, json=None):
+            if "/threads" in url:
+                thread_create_bodies.append(json)
+                return FakeRes(200, {"id": "newthread"})
+            return FakeRes(200, {})
+
+        async def put(self, url, headers=None, json=None):
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        await main._handle_aco_support_open(_payload(channel_id="chan1"), "gonedrop")
+
+    assert thread_create_bodies[0]["name"] == "ticket-Someone"
+
+
+async def test_support_open_pings_aco_staff_role_in_the_thread():
+    settings.discord_bot_token = "tok"
+    settings.discord_aco_staff_role_id = "staffrole1"
+    thread_posts = []
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [])  # no existing open ticket
+
+        async def post(self, url, headers=None, json=None):
+            if "/threads" in url:
+                return FakeRes(200, {"id": "newthread"})
+            if "/messages" in url:
+                thread_posts.append(json)
+            return FakeRes(200, {})
+
+        async def put(self, url, headers=None, json=None):
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        await main._handle_aco_support_open(_payload(channel_id="chan1"))
+
+    assert thread_posts[0]["content"].startswith("<@&staffrole1> <@")
+
+
+async def test_support_open_skips_staff_ping_when_role_unconfigured():
+    settings.discord_bot_token = "tok"
+    settings.discord_aco_staff_role_id = ""
+    thread_posts = []
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [])
+
+        async def post(self, url, headers=None, json=None):
+            if "/threads" in url:
+                return FakeRes(200, {"id": "newthread"})
+            if "/messages" in url:
+                thread_posts.append(json)
+            return FakeRes(200, {})
+
+        async def put(self, url, headers=None, json=None):
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        await main._handle_aco_support_open(_payload(channel_id="chan1"))
+
+    assert "<@&" not in thread_posts[0]["content"]
 
 
 async def test_support_open_recovers_from_a_stale_thread_reference():
@@ -1157,6 +1279,94 @@ async def test_key_open_creates_thread_in_support_channel_never_the_announcement
     # must not itself ask for or echo back any key value.
     instructions = thread_messages[0]
     assert instructions["components"][0]["components"][0]["custom_id"] == "acokey_complete"
+
+
+async def test_key_open_names_thread_after_the_drop_when_drop_id_given():
+    settings.discord_bot_token = "tok"
+    thread_create_bodies = []
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "aco_drops" in url:
+                return FakeRes(200, [{"id": "drop1", "title": "birdNFT ACO", "status": "open",
+                                       "deadline": "2026-12-25T18:00:00+00:00"}])
+            return FakeRes(200, [])  # no existing open handoff
+
+        async def post(self, url, headers=None, json=None):
+            if "/threads" in url:
+                thread_create_bodies.append(json)
+                return FakeRes(200, {"id": "newkeythread"})
+            return FakeRes(200, {})
+
+        async def put(self, url, headers=None, json=None):
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        await main._handle_aco_key_open(_payload(channel_id="chan1"), "drop1")
+
+    assert thread_create_bodies[0]["name"] == "key-Someone-birdNFT ACO"
+
+
+async def test_key_open_falls_back_to_member_only_name_when_drop_id_missing_or_stale():
+    settings.discord_bot_token = "tok"
+    thread_create_bodies = []
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "aco_drops" in url:
+                return FakeRes(200, [])  # drop lookup comes back empty
+            return FakeRes(200, [])
+
+        async def post(self, url, headers=None, json=None):
+            if "/threads" in url:
+                thread_create_bodies.append(json)
+                return FakeRes(200, {"id": "newkeythread"})
+            return FakeRes(200, {})
+
+        async def put(self, url, headers=None, json=None):
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        await main._handle_aco_key_open(_payload(channel_id="chan1"), "gonedrop")
+
+    assert thread_create_bodies[0]["name"] == "key-Someone"
+
+
+async def test_key_open_pings_aco_staff_role_in_the_thread():
+    settings.discord_bot_token = "tok"
+    settings.discord_aco_staff_role_id = "staffrole1"
+    thread_messages = []
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [])  # no existing open handoff
+
+        async def post(self, url, headers=None, json=None):
+            if "/threads" in url:
+                return FakeRes(200, {"id": "newkeythread"})
+            if "/messages" in url:
+                thread_messages.append(json)
+            return FakeRes(200, {})
+
+        async def put(self, url, headers=None, json=None):
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        await main._handle_aco_key_open(_payload(channel_id="chan1"))
+
+    assert thread_messages[0]["content"].startswith("<@&staffrole1> <@")
 
 
 async def test_key_complete_rejects_non_staff():
