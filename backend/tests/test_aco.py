@@ -440,6 +440,44 @@ async def test_finalize_drop_rejects_already_resolved():
     assert "resolved" in result["data"]["content"].lower()
 
 
+async def test_finalize_drop_hides_wallet_count_from_public_message_when_mod_channel_configured():
+    # Same staff-only-intel rule as wallet submission: the type-7 response
+    # (which lands on the staff view, mirrored message or otherwise) always
+    # shows the wallet count, but the SEPARATE direct edit to the public
+    # announcement message must never carry it.
+    open_drop = {
+        "id": "drop1", "title": "Test", "status": "open", "chain": "Ethereum",
+        "deadline": "2026-12-25T18:00:00+00:00",
+        "discord_channel_id": "public-chan", "discord_message_id": "pubmsg1",
+        "discord_staff_channel_id": "mod-chan", "discord_staff_message_id": "staffmsg1",
+    }
+    settings.discord_aco_admin_log_channel_id = ""
+    patches = []
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "aco_drops" in url:
+                return FakeRes(200, [open_drop])
+            return FakeRes(200, [])  # ticket count query
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            if "aco_drops" in url:
+                return FakeRes(200, [dict(open_drop, status="resolved")])
+            patches.append((url, json))
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        result = await main._aco_finalize_drop("drop1", "resolved", "actor1")
+
+    staff_field_names = [f["name"] for f in result["data"]["embeds"][0]["fields"]]
+    assert "🎟️ Wallets Submitted" in staff_field_names
+
+    public_patch = next(j for u, j in patches if "public-chan" in u)
+    public_field_names = [f["name"] for f in public_patch["embeds"][0]["fields"]]
+    assert "🎟️ Wallets Submitted" not in public_field_names
+
+
 # ── Wallet submission flow ────────────────────────────────────────────────
 
 def _webhook_patch_body(patches):
@@ -550,6 +588,48 @@ async def test_wallet_submit_inserts_tickets_and_confirms():
     # carry.
     channel_patch = next(j for u, j in patches if "/channels/" in u)
     assert channel_patch["embeds"][0]["fields"][-1]["value"].startswith("**1**")
+
+
+async def test_wallet_submit_hides_wallet_count_from_public_message_when_mod_channel_configured():
+    # Wallet counts are staff-only intel - when a separate mod-channel
+    # staff message exists, the public announcement's own edit must NOT
+    # carry the "Wallets Submitted" field at all, only the mirrored
+    # staff message should.
+    from datetime import datetime, timedelta, timezone
+    open_drop = {
+        "id": "drop1", "status": "open", "title": "Test",
+        "deadline": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+        "discord_channel_id": "public-chan", "discord_message_id": "pubmsg1",
+        "discord_staff_channel_id": "mod-chan", "discord_staff_message_id": "staffmsg1",
+    }
+    patches = []
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "aco_drops" in url:
+                return FakeRes(200, [open_drop])
+            return FakeRes(200, [
+                {"discord_user_id": "user1", "wallet_address": "0x1234567890123456789012345678901234567890", "submitted_at": "x"},
+            ])
+
+        async def post(self, url, headers=None, json=None):
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            patches.append((url, json))
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        components = [{"components": [{"custom_id": "wallets", "value": "0x1234567890123456789012345678901234567890"}]}]
+        await main._handle_aco_wallet_submit(_payload(components=components), "drop1")
+
+    public_patch = next(j for u, j in patches if "public-chan" in u)
+    staff_patch = next(j for u, j in patches if "mod-chan" in u)
+    public_field_names = [f["name"] for f in public_patch["embeds"][0]["fields"]]
+    staff_field_names = [f["name"] for f in staff_patch["embeds"][0]["fields"]]
+    assert "🎟️ Wallets Submitted" not in public_field_names
+    assert "🎟️ Wallets Submitted" in staff_field_names
 
 
 async def test_wallet_submit_reports_invalid_lines():

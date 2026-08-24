@@ -1531,7 +1531,7 @@ def _aco_deadline_text(deadline_iso: str | None) -> str:
     return f"in {seconds / 86400:.1f}d"
 
 
-def _aco_drop_embed(drop: dict, ticket_count: int, member_count: int) -> dict:
+def _aco_drop_embed(drop: dict, ticket_count: int, member_count: int, *, show_wallets: bool = True) -> dict:
     status = drop.get("status", "open")
     status_label = {"open": "🟢 Open", "resolved": "✅ Resolved", "cancelled": "❌ Cancelled"}.get(status, status)
     fields = [
@@ -1545,7 +1545,15 @@ def _aco_drop_embed(drop: dict, ticket_count: int, member_count: int) -> dict:
         fields.append({"name": "Contract", "value": f"`{drop['contract_address']}`", "inline": False})
     if drop.get("checker_url"):
         fields.append({"name": "Checker", "value": drop["checker_url"], "inline": False})
-    fields.append({"name": "🎟️ Wallets Submitted", "value": f"**{ticket_count}** ({member_count} member(s))", "inline": True})
+    # Wallet counts are staff-only intel (per direct request: members
+    # comparing counts across each other's submissions has no legitimate
+    # use, and the team would rather it stay confidential) - shown only
+    # on the mod-channel embed, or on the combined single-message
+    # fallback when no separate mod channel is configured (that message
+    # IS the staff view in that case, so hiding it there would just lose
+    # the count entirely rather than make it more private).
+    if show_wallets:
+        fields.append({"name": "🎟️ Wallets Submitted", "value": f"**{ticket_count}** ({member_count} member(s))", "inline": True})
     return {
         "author": _ACO_AUTHOR,
         "title": drop["title"],
@@ -1747,7 +1755,7 @@ async def _handle_aco_create_submit(payload: dict) -> dict:
             client,
             f"{DISCORD_API}/channels/{settings.discord_aco_channel_id}/messages",
             {"Authorization": f"Bot {settings.discord_bot_token}"},
-            {"embeds": [_aco_drop_embed(drop, 0, 0)], "components": _aco_drop_components(drop["id"], "open", submit=True, staff=not staff_msg)},
+            {"embeds": [_aco_drop_embed(drop, 0, 0, show_wallets=not staff_msg)], "components": _aco_drop_components(drop["id"], "open", submit=True, staff=not staff_msg)},
         )
         posted_ok = msg_res.status_code < 300
         if posted_ok:
@@ -1853,20 +1861,25 @@ async def _handle_aco_wallet_submit(payload: dict, drop_id: str) -> dict:
             json=rows,
         )
         ticket_count, member_count, _ = await _aco_ticket_counts(client, drop_id)
-        embed = _aco_drop_embed(drop, ticket_count, member_count)
         # Only edit the public message with staff=True when there's no
         # separate staff message to carry those controls instead (see
         # _handle_aco_create_submit) - otherwise this would silently
         # re-add See Wallets/Resolve/Cancel to the public announcement.
+        # Same condition gates the wallet-count field itself: it's
+        # staff-only intel, so it only belongs on the public message
+        # when that message IS also the staff view (no separate mod
+        # channel configured).
         has_staff_msg = bool(drop.get("discord_staff_message_id"))
+        public_embed = _aco_drop_embed(drop, ticket_count, member_count, show_wallets=not has_staff_msg)
         await _discord_edit_channel_message(
             drop.get("discord_channel_id"), drop.get("discord_message_id"),
-            embed, _aco_drop_components(drop_id, drop["status"], submit=True, staff=not has_staff_msg),
+            public_embed, _aco_drop_components(drop_id, drop["status"], submit=True, staff=not has_staff_msg),
         )
         if has_staff_msg:
+            staff_embed = _aco_drop_embed(drop, ticket_count, member_count, show_wallets=True)
             await _discord_edit_channel_message(
                 drop.get("discord_staff_channel_id"), drop.get("discord_staff_message_id"),
-                embed, _aco_drop_components(drop_id, drop["status"], submit=False, staff=True),
+                staff_embed, _aco_drop_components(drop_id, drop["status"], submit=False, staff=True),
             )
 
     summary = f"✅ {len(valid)} wallet(s) submitted."
@@ -1915,25 +1928,27 @@ async def _aco_finalize_drop(drop_id: str, status: str, actor_id: str) -> dict:
     verb = {"resolved": "✅ **Drop resolved**", "cancelled": "❌ **Drop cancelled**"}.get(status, status)
     await _aco_log(f"{verb} by <@{actor_id}>: **{drop['title']}**, {ticket_count} wallet(s) from {member_count} member(s)")
 
-    embed = _aco_drop_embed(drop, ticket_count, member_count)
     has_staff_msg = bool(drop.get("discord_staff_message_id"))
     # Resolve/Cancel only ever appear on the staff view (either the
     # mirrored staff message, or the public message itself when no
     # separate staff channel is configured) - so the type-7 response
     # updating "the message this button lives in" is always the staff
-    # view. When there IS a separate staff message, the public
-    # announcement needs its own direct edit since a single interaction
-    # response can't update two different messages at once.
+    # view, and always shows the wallet count. When there IS a separate
+    # staff message, the public announcement needs its own direct edit
+    # (without the wallet count) since a single interaction response
+    # can't update two different messages at once.
     if has_staff_msg:
+        public_embed = _aco_drop_embed(drop, ticket_count, member_count, show_wallets=False)
         await _discord_edit_channel_message(
             drop.get("discord_channel_id"), drop.get("discord_message_id"),
-            embed, _aco_drop_components(drop_id, status, submit=True, staff=False),
+            public_embed, _aco_drop_components(drop_id, status, submit=True, staff=False),
         )
 
+    staff_embed = _aco_drop_embed(drop, ticket_count, member_count, show_wallets=True)
     return {
         "type": 7,
         "data": {
-            "embeds": [embed],
+            "embeds": [staff_embed],
             "components": _aco_drop_components(drop_id, status, submit=not has_staff_msg, staff=True),
         },
     }
