@@ -1513,7 +1513,14 @@ def _parse_aco_deadline(raw: str) -> datetime | None:
     return parsed
 
 
-def _aco_deadline_text(deadline_iso: str | None) -> str:
+def _aco_deadline_countdown(deadline_iso: str | None) -> str:
+    # Discord's own <t:unix:STYLE> markdown, not a string this bot
+    # computes and freezes at render time - the client renders it in
+    # each viewer's own timezone AND keeps the relative half ticking
+    # down live, automatically flipping to "X ago" once it passes, with
+    # zero bot involvement. No cron re-editing the embed every minute to
+    # keep a countdown from going stale, and no separate "Passed" branch
+    # to maintain - Discord already handles both directions natively.
     if not deadline_iso:
         return "-"
     try:
@@ -1522,15 +1529,8 @@ def _aco_deadline_text(deadline_iso: str | None) -> str:
         return "-"
     if deadline.tzinfo is None:
         deadline = deadline.replace(tzinfo=timezone.utc)
-    seconds = (deadline - datetime.now(timezone.utc)).total_seconds()
-    if seconds <= 0:
-        hours_ago = -seconds / 3600
-        return f"Passed ({hours_ago:.1f}h ago)" if hours_ago < 48 else f"Passed ({-seconds / 86400:.1f}d ago)"
-    if seconds < 3600:
-        return f"in {int(seconds / 60)}m"
-    if seconds < 172800:
-        return f"in {seconds / 3600:.1f}h"
-    return f"in {seconds / 86400:.1f}d"
+    unix = int(deadline.timestamp())
+    return f"<t:{unix}:F> (<t:{unix}:R>)"
 
 
 def _aco_drop_embed(drop: dict, ticket_count: int, member_count: int, *, show_wallets: bool = True) -> dict:
@@ -1538,7 +1538,7 @@ def _aco_drop_embed(drop: dict, ticket_count: int, member_count: int, *, show_wa
     status_label = {"open": "🟢 Open", "resolved": "✅ Resolved", "cancelled": "❌ Cancelled"}.get(status, status)
     fields = [
         {"name": "Chain", "value": drop.get("chain") or "-", "inline": True},
-        {"name": "Deadline", "value": _aco_deadline_text(drop.get("deadline")), "inline": True},
+        {"name": "⏳ Countdown", "value": _aco_deadline_countdown(drop.get("deadline")), "inline": True},
         {"name": "Status", "value": status_label, "inline": True},
     ]
     if drop.get("profit_note"):
@@ -1669,7 +1669,7 @@ async def _handle_aco_drop_command(payload: dict) -> dict:
             "components": [
                 {"type": 1, "components": [{"type": 4, "custom_id": "title", "style": 1, "label": "Title", "max_length": 100, "required": True}]},
                 {"type": 1, "components": [{"type": 4, "custom_id": "chain", "style": 1, "label": "Chain", "max_length": 50, "required": True}]},
-                {"type": 1, "components": [{"type": 4, "custom_id": "deadline", "style": 1, "label": "Deadline (e.g. 6h, 30m, 2d, or an ISO date)", "max_length": 40, "required": True}]},
+                {"type": 1, "components": [{"type": 4, "custom_id": "deadline", "style": 1, "label": "Countdown (e.g. 6h, 30m, 2d, or ISO date)", "max_length": 40, "required": True}]},
                 {"type": 1, "components": [{
                     "type": 4, "custom_id": "profit", "style": 2, "label": "Profit / Notes", "max_length": 500, "required": True,
                     "placeholder": "e.g. 30% Profit. Mega Heavy OA so expect some fails.",
@@ -1694,7 +1694,7 @@ async def _handle_aco_create_submit(payload: dict) -> dict:
     deadline = _parse_aco_deadline(values.get("deadline", ""))
     if not deadline:
         return {"type": 4, "data": {
-            "content": "Couldn't parse that deadline - use something like `6h`, `30m`, `2d`, or a full date like `2026-08-25T18:00`.",
+            "content": "Couldn't parse that countdown - use something like `6h`, `30m`, `2d`, or a full date like `2026-08-25T18:00`.",
             "flags": 64,
         }}
 
@@ -1780,7 +1780,7 @@ async def _handle_aco_create_submit(payload: dict) -> dict:
     # visible announcement anywhere, and staff had no idea anything had
     # gone wrong. Now the confirmation actually reflects what happened.
     if posted_ok:
-        await _aco_log(f"🎟️ **Drop created** by <@{row['created_by']}>: **{row['title']}** ({row['chain']}), deadline {_aco_deadline_text(row['deadline'])}")
+        await _aco_log(f"🎟️ **Drop created** by <@{row['created_by']}>: **{row['title']}** ({row['chain']}), countdown ends {_aco_deadline_countdown(row['deadline'])}")
         await _discord_edit_original_raw(token, {"embeds": [{
             "author": _ACO_AUTHOR, "title": f"✅ Drop posted in <#{settings.discord_aco_channel_id}>.", "color": _ACO_BLUE,
         }]})
@@ -1804,7 +1804,7 @@ async def _handle_aco_join_button(payload: dict, drop_id: str) -> dict:
     if drop["status"] != "open":
         return {"type": 4, "data": {"content": "This drop is no longer accepting submissions.", "flags": 64}}
     if _aco_deadline_passed(drop):
-        return {"type": 4, "data": {"content": "This drop's deadline has already passed.", "flags": 64}}
+        return {"type": 4, "data": {"content": "This drop's countdown has already ended.", "flags": 64}}
     return {
         "type": 9,
         "data": {
@@ -1853,7 +1853,7 @@ async def _handle_aco_wallet_submit(payload: dict, drop_id: str) -> dict:
             await _discord_edit_original_raw(token, {"content": "This drop is no longer accepting submissions."})
             return {"type": 5}
         if _aco_deadline_passed(drop):
-            await _discord_edit_original_raw(token, {"content": "This drop's deadline has already passed."})
+            await _discord_edit_original_raw(token, {"content": "This drop's countdown has already ended."})
             return {"type": 5}
 
         rows = [{"drop_id": drop_id, "discord_user_id": discord_user_id, "wallet_address": w} for w in valid]

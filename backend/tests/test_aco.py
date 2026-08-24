@@ -100,18 +100,30 @@ def test_rejects_garbage_input():
     assert main._parse_aco_deadline("") is None
 
 
-# ── _aco_deadline_text / _aco_deadline_passed ────────────────────────────
+# ── _aco_deadline_countdown / _aco_deadline_passed ───────────────────────
 
-def test_deadline_text_shows_passed_for_past_dates():
-    from datetime import datetime, timedelta, timezone
-    past = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
-    assert "Passed" in main._aco_deadline_text(past)
-
-
-def test_deadline_text_shows_upcoming_for_future_dates():
+def test_deadline_countdown_renders_native_discord_timestamps():
+    # Both halves are Discord's own <t:unix:STYLE> markdown - the client
+    # renders these live (in the viewer's own timezone, ticking down or
+    # flipping to "X ago" on its own), so there's no "Passed"/"in Nh"
+    # branching left on this side at all, past or future.
     from datetime import datetime, timedelta, timezone
     future = (datetime.now(timezone.utc) + timedelta(hours=6)).isoformat()
-    assert "in" in main._aco_deadline_text(future)
+    unix = int(datetime.fromisoformat(future).timestamp())
+    result = main._aco_deadline_countdown(future)
+    assert result == f"<t:{unix}:F> (<t:{unix}:R>)"
+
+
+def test_deadline_countdown_handles_past_dates_the_same_way():
+    from datetime import datetime, timedelta, timezone
+    past = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
+    unix = int(datetime.fromisoformat(past).timestamp())
+    result = main._aco_deadline_countdown(past)
+    assert result == f"<t:{unix}:F> (<t:{unix}:R>)"
+
+
+def test_deadline_countdown_handles_missing_deadline():
+    assert main._aco_deadline_countdown(None) == "-"
 
 
 def test_deadline_passed_helper():
@@ -163,7 +175,7 @@ def _drop(**overrides):
 def test_embed_includes_core_fields():
     embed = main._aco_drop_embed(_drop(), ticket_count=5, member_count=3)
     names = [f["name"] for f in embed["fields"]]
-    assert "Chain" in names and "Deadline" in names and "Status" in names
+    assert "Chain" in names and "⏳ Countdown" in names and "Status" in names
     wallets_field = next(f for f in embed["fields"] if "Wallets Submitted" in f["name"])
     assert "5" in wallets_field["value"]
 
@@ -537,7 +549,7 @@ async def test_wallet_submit_rejects_past_deadline():
         result = await main._handle_aco_wallet_submit(_payload(components=components), "drop1")
 
     assert result["type"] == 5
-    assert "deadline" in _webhook_patch_body(patches)["content"].lower()
+    assert "countdown" in _webhook_patch_body(patches)["content"].lower()
 
 
 async def test_wallet_submit_inserts_tickets_and_confirms():
