@@ -7336,6 +7336,15 @@ _NFT_INTEL_WALLET_BATCH_SIZE = 12  # wallets checked per tick - bounds each tick
 _NFT_INTEL_EVENTS_PER_WALLET = 15  # recent mint transfers fetched per wallet, per chain, per tick
 _NFT_INTEL_CO_MINTER_LOOKBACK = 30  # recent contract-wide mint transfers scanned when discovering co-minters off a fresh hit
 _NFT_INTEL_MAX_TRACKED_WALLETS = 300  # co-minter discovery ceiling - unbounded auto-growth would eventually turn every tick into a huge fan-out
+# "Not yet in nft_intel_seen_mints" alone isn't "just happened" - a newly
+# added wallet (fresh seed, or a co-minter just discovered) can have a
+# long real mint history that's simply never been polled before, and
+# every one of those old mints would otherwise look brand new the first
+# time that wallet gets checked (confirmed live: a burst of alerts across
+# many unrelated collections the moment co-minter discovery added new
+# wallets). 30 min, generous relative to the ~45s poll cadence, just
+# forgiving enough to not drop a mint that landed between two ticks.
+_NFT_INTEL_MAX_MINT_AGE_SECONDS = 1800
 _NFT_INTEL_EXPLORER_BASE = {
     "ethereum": "etherscan.io",
     "base": "basescan.org",
@@ -7493,6 +7502,7 @@ def _alchemy_transfer_to_event(transfer: dict, chain: str) -> dict | None:
         "chain": chain,
         "from_address": transfer.get("from"),
         "to_address": transfer.get("to"),
+        "block_time": (transfer.get("metadata") or {}).get("blockTimestamp"),
         "nft": {"chain": chain, "contract": contract, "identifier": token_id, "collection": None, "name": None, "image_url": None},
     }
 
@@ -7532,6 +7542,25 @@ def _nft_intel_is_mint(event: dict, wallet: str) -> bool:
         and (event.get("from_address") or "").lower() == _NFT_INTEL_NULL_ADDRESS
         and (event.get("to_address") or "").lower() == wallet.lower()
     )
+
+
+def _nft_intel_is_fresh(event: dict, max_age_seconds: int = _NFT_INTEL_MAX_MINT_AGE_SECONDS) -> bool:
+    # "Never seen before" alone isn't "just happened" - see
+    # _NFT_INTEL_MAX_MINT_AGE_SECONDS for why this exists. Fails CLOSED
+    # (not fresh) on a missing/unparseable timestamp - the whole point is
+    # blocking a flood of old mints, so a data gap should never fall back
+    # to "alert anyway."
+    block_time = event.get("block_time")
+    if not block_time:
+        return False
+    try:
+        when = datetime.fromisoformat(block_time.replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return False
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    age = (datetime.now(timezone.utc) - when).total_seconds()
+    return age <= max_age_seconds  # a slightly-future timestamp (clock skew) still counts as fresh
 
 
 async def _nft_intel_discover_co_minters(client: httpx.AsyncClient, chain: str, contract: str | None, exclude: set[str]) -> list[str]:
@@ -7735,6 +7764,17 @@ async def cron_nft_intel(request: Request):
                     continue  # not enough to dedup or link reliably - skip rather than risk a duplicate/broken alert
                 token_id = str(token_id)
                 if await _nft_intel_seen(client, chain, contract, token_id):
+                    continue
+
+                # Freshness gate: "never alerted before" isn't "just
+                # happened" - a wallet with real mint history that's simply
+                # never been polled before (a fresh seed, or a co-minter
+                # just discovered) would otherwise dump its entire history
+                # as a flood of alerts the moment it's first checked. Still
+                # marked seen either way, so a genuinely old mint is never
+                # re-evaluated on a later tick either.
+                if not _nft_intel_is_fresh(event):
+                    await _nft_intel_mark_seen(client, chain, contract, token_id, address, None)
                     continue
 
                 # Grouped-by-collection noise cap: once a collection has

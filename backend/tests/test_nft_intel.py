@@ -1,6 +1,7 @@
 """Tests for NFT Intel - wallet-following mint alerts. Deliberately a
 different product from NFT Scope: this tracks specific WALLETS and alerts
 when they mint, not collections worth discovering."""
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import main
@@ -11,12 +12,19 @@ CO_MINTER_ADDR = "0x9abd78db91e716280f42d83541a7b39268a34278"
 
 
 def _mint_event(to=SEED_ADDR, from_addr=main._NFT_INTEL_NULL_ADDRESS, event_type="transfer",
-                 chain="ethereum", contract="0xcontract", token_id=42, collection="cool-collection", name=None, image=None):
+                 chain="ethereum", contract="0xcontract", token_id=42, collection="cool-collection", name=None, image=None,
+                 block_time=None):
+    # Fresh (just now) by default - most tests care about mint-detection
+    # logic, not the freshness gate itself, so a stale default would make
+    # every one of those silently fail the gate for an unrelated reason.
+    if block_time is None:
+        block_time = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
     return {
         "event_type": event_type,
         "chain": chain,
         "from_address": from_addr,
         "to_address": to,
+        "block_time": block_time,
         "nft": {
             "chain": chain, "contract": contract, "identifier": token_id,
             "collection": collection, "name": name, "image_url": image,
@@ -129,6 +137,54 @@ def test_is_mint_false_for_non_transfer_event_types():
 def test_is_mint_case_insensitive_address_matching():
     event = _mint_event(to=SEED_ADDR.upper())
     assert main._nft_intel_is_mint(event, SEED_ADDR) is True
+
+
+# ── _nft_intel_is_fresh ──────────────────────────────────────────────────────
+
+def test_is_fresh_true_for_a_mint_from_just_now():
+    event = _mint_event(block_time=datetime.now(timezone.utc).isoformat())
+    assert main._nft_intel_is_fresh(event) is True
+
+
+def test_is_fresh_false_for_a_mint_from_hours_ago():
+    # This is the actual bug fix: a wallet's real historical mints must
+    # never be treated as "just happened" the first time that wallet gets
+    # polled - confirmed live as a flood of alerts across unrelated
+    # collections the moment co-minter discovery added new wallets.
+    old = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+    event = _mint_event(block_time=old)
+    assert main._nft_intel_is_fresh(event) is False
+
+
+def test_is_fresh_true_right_at_the_boundary():
+    just_inside = (datetime.now(timezone.utc) - timedelta(seconds=main._NFT_INTEL_MAX_MINT_AGE_SECONDS - 5)).isoformat()
+    assert main._nft_intel_is_fresh(_mint_event(block_time=just_inside)) is True
+
+
+def test_is_fresh_false_just_past_the_boundary():
+    just_outside = (datetime.now(timezone.utc) - timedelta(seconds=main._NFT_INTEL_MAX_MINT_AGE_SECONDS + 5)).isoformat()
+    assert main._nft_intel_is_fresh(_mint_event(block_time=just_outside)) is False
+
+
+def test_is_fresh_true_for_a_slightly_future_timestamp():
+    # Clock skew between this service and Alchemy's own servers shouldn't
+    # cause a genuinely brand-new mint to be treated as stale.
+    slightly_future = (datetime.now(timezone.utc) + timedelta(seconds=30)).isoformat()
+    assert main._nft_intel_is_fresh(_mint_event(block_time=slightly_future)) is True
+
+
+def test_is_fresh_fails_closed_on_missing_timestamp():
+    # The whole point is blocking a flood of old mints - a data gap must
+    # never silently fall back to "alert anyway." (_mint_event fills in a
+    # fresh default when block_time is None, so build this one directly
+    # to actually exercise a genuinely missing timestamp.)
+    event = _mint_event()
+    del event["block_time"]
+    assert main._nft_intel_is_fresh(event) is False
+
+
+def test_is_fresh_fails_closed_on_unparseable_timestamp():
+    assert main._nft_intel_is_fresh(_mint_event(block_time="not-a-real-timestamp")) is False
 
 
 # ── _nft_intel_embed ──────────────────────────────────────────────────────
@@ -438,6 +494,62 @@ async def test_cron_nft_intel_alerts_up_to_the_cap_then_shows_it_in_the_embed():
     assert bumped == [2]  # count bumped from 1 to 2, now at cap
     cap_field = next(f for f in posted[0]["fields"] if f["name"] == "Collection Alert Cap")
     assert "2/2" in cap_field["value"]
+
+
+async def test_cron_nft_intel_never_alerts_on_a_wallets_old_mint_history():
+    # The actual bug fix: a wallet that's simply never been polled before
+    # (a fresh seed, or a co-minter just discovered) can have real mint
+    # history from way in the past - none of that should flood out as
+    # alerts the first time it's checked, only genuinely fresh mints
+    # should. Confirmed live as a burst of alerts across unrelated
+    # collections right after co-minter discovery added new wallets.
+    settings.nft_cron_secret = "realsecret"
+    settings.discord_nft_intel_channel_id = "intel-chan"
+    settings.alchemy_api_key = "testkey"
+    posted = []
+    seen_marks = []
+
+    async def fake_healthy(client):
+        return True
+
+    async def fake_batch(client):
+        return [{"address": SEED_ADDR, "source": "seed", "discovered_via": None}]
+
+    async def fake_events(client, address):
+        old_time = (datetime.now(timezone.utc) - timedelta(days=10)).isoformat()
+        return [
+            _mint_event(to=address, chain="ethereum", contract="0xold1", token_id=1, block_time=old_time),
+            _mint_event(to=address, chain="ethereum", contract="0xold2", token_id=2, block_time=old_time),
+        ]
+
+    async def fake_seen(client, chain, contract, token_id):
+        return False
+
+    async def fake_mark_seen(client, chain, contract, token_id, wallet, slug):
+        seen_marks.append((chain, contract, token_id))
+
+    async def fake_post(client, channel_id, embed, content=None):
+        posted.append(embed)
+        return True
+
+    async def fake_mark_polled(client, address):
+        return None
+
+    with patch.object(main, "_alchemy_healthy", new=fake_healthy), \
+         patch.object(main, "_nft_intel_poll_batch", new=fake_batch), \
+         patch.object(main, "_nft_intel_wallet_transfer_events", new=fake_events), \
+         patch.object(main, "_nft_intel_seen", new=fake_seen), \
+         patch.object(main, "_nft_intel_mark_seen", new=fake_mark_seen), \
+         patch.object(main, "_post_channel_message", new=fake_post), \
+         patch.object(main, "_nft_intel_mark_polled", new=fake_mark_polled):
+        async with main.httpx.AsyncClient() as client:
+            result = await main.cron_nft_intel(FakeRequest("Bearer realsecret"))
+
+    assert result["alerted"] == 0
+    assert posted == []
+    # Both old mints are still recorded as seen, so neither is re-evaluated
+    # (and re-skipped, wasting a call) on every future tick forever.
+    assert set(seen_marks) == {("ethereum", "0xold1", "1"), ("ethereum", "0xold2", "2")}
 
 
 async def test_cron_nft_intel_never_reposts_an_already_seen_mint():
