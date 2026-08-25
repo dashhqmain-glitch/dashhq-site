@@ -170,6 +170,11 @@ COMMANDS = [
         "description": "Browse DASH ACO's rules and educational guides",
     },
     {
+        "name": "nft-intel-wallets",
+        "description": "Team only: see the wallets NFT Intel is tracking for mint alerts",
+        "default_member_permissions": "32",
+    },
+    {
         "name": "history",
         "description": "Team only: browse every citizenship application and its verdict",
         # Hidden from regular members entirely - Discord only shows/allows a

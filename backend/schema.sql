@@ -543,3 +543,92 @@ insert into aco_education_posts (title, emoji, sections) values
 -- runtime state, not seed content, and must survive a re-run untouched.
 on conflict (title) do update set sections = excluded.sections, emoji = excluded.emoji;
 
+-- ── NFT Intel: wallet-following mint alerts ────────────────────────────────
+-- Deliberately a different product from NFT Scope. NFT Scope scores and
+-- discovers COLLECTIONS worth watching from public trading signals - it has
+-- no idea who's buying. NFT Intel tracks a curated list of WALLETS and
+-- alerts the instant one of them mints anything, on any chain, regardless
+-- of whether that project would ever clear NFT Scope's bar. A "what is
+-- this wallet doing right now" feed, not a "here's a promising project"
+-- feed.
+create table if not exists nft_intel_tracked_wallets (
+  address          text primary key,  -- lowercased 0x address
+  source           text not null default 'seed' check (source in ('seed', 'co_minter')),
+  discovered_via   text,  -- collection slug that surfaced this wallet as a co-minter; null for seed wallets
+  added_at         timestamptz not null default now(),
+  -- Drives the poll rotation (oldest-polled-first, see cron_nft_intel) -
+  -- the same "least recently served" pattern aco_education_posts already
+  -- uses for its own rotation, so every tracked wallet gets roughly even
+  -- coverage as the list grows via co-minter discovery, not just whichever
+  -- ones happen to sort first.
+  last_polled_at   timestamptz
+);
+
+alter table nft_intel_tracked_wallets enable row level security;
+
+-- One row per real mint event ever seen, across every tracked wallet - the
+-- dedup key so the same mint never gets alerted twice. A specific token can
+-- only ever be minted once (by definition), so (chain, contract, token_id)
+-- alone is a safe global key regardless of which wallet triggered it.
+create table if not exists nft_intel_seen_mints (
+  chain             text not null,
+  contract_address  text not null,
+  token_id          text not null,
+  wallet_address    text not null,
+  collection_slug   text,
+  detected_at       timestamptz not null default now(),
+  primary key (chain, contract_address, token_id)
+);
+
+create index if not exists nft_intel_seen_mints_wallet_idx on nft_intel_seen_mints (wallet_address);
+
+alter table nft_intel_seen_mints enable row level security;
+
+-- Seed wallets - the starting list to track. ON CONFLICT DO NOTHING so
+-- re-running this file never resets a wallet's source back to 'seed' if
+-- it's since been re-discovered, or touches last_polled_at/added_at.
+insert into nft_intel_tracked_wallets (address) values
+('0x8ceec06ebd2910879a0266ca9643431cd9b5baef'),
+('0x8ff2a605f011672f0739315149c84f45b2721f8f'),
+('0x9abd78db91e716280f42d83541a7b39268a34278'),
+('0xc86c8bef011810def6104731a0dde5f9bd46244b'),
+('0xd0ff64b63df22b0491cbbb74b1389c1aa8b8b4a8'),
+('0x36229b287042f41f22ae28a1486ac590a5f2747e'),
+('0xdeed083109a7c5895ce17a4b8341c55d46e805a3'),
+('0xd70b092a3037a20abeeb267f314ed6a49db8b3b2'),
+('0x406d018dfb8596fdfdb06ab4e6301bd6f2f595bf'),
+('0x402a6fe4edb7628367ad2e44fdb561f9a029e9cf'),
+('0x117c107e1f09c24a8e461fcb48f3ec6ea807f012'),
+('0x4267c1e15c37726ec6ae91ada20e60df0119a266'),
+('0xd7b53d9628482dbfeac9c1a82da2226fae1d9482'),
+('0xe4e4c427a537e2eedde938f2813860d987e9a11e'),
+('0x630695bd92164a51af8a26d7bec053672bb3de71'),
+('0x60d15e30a02bc55ddcc1059826d4cfcc953fd0ec'),
+('0xac07f1c36c6b9a24acb4e68c1f9aa22f27ab828e'),
+('0x117f9d7288c55249af0e915ae76dceac42536183'),
+('0x75a6437f69277dda3521ae02246db96dd9f7ea2f'),
+('0x8ed3d5719d1ec5be47529a4a1d80e15634094396'),
+('0x8719b4674d9873241ba1281eed6ad4cf6b4e2370'),
+('0xeff54605b67fe19079886906b20afe806f2dfc0f'),
+('0x5e3a50dd52b56def532aadfae89094f59414e55f'),
+('0xf95f993ddac1a1ccff963c4dd264b6e0b7bec504'),
+('0x488878ee8fb012b2451cd8b955995f0fed2b0c98'),
+('0xa6cc91bd13468718ed76db2520cfe85d0c7639b4'),
+('0x539613c6cb2604f32f6d98c6daae8310a0cc36d7'),
+('0x1d6f7835eae2f9fa1a78e3ae967ad239d4339673'),
+('0xedce55ddfbbb4d908ab2e6b56f2c9073b65cba36'),
+('0xe61ec927b5f3da0cc296b8ca04f5f59449ea922f'),
+('0xd909a444cee1916c97828735be07e91dae4eaf90'),
+('0x973e920661052af6248c78e4e053b14898edf0c4'),
+('0x14f2c7b057e978d898b0dc55aa46eb8f5d1590f4'),
+('0x87d20ea99c2a75ba65bc3e2974b263ed162d248e'),
+('0x66c85b0c152fbae9308edfe5d634f59a9e5d4bf4'),
+('0x8e3951b28ccc878b4f806a0a6b6f10e43b9bf145'),
+('0xc77c31bb25d53c558473c23cfaf42b8caa472e15'),
+('0x58d7f93155b35dee2b1fe46b1dcec1a06ba85283'),
+('0x177efd8687c82bbd3dc264b05fd9dcdc6a29fcf9'),
+('0xc0828c612d7143c40c571fb2e3a328d04376a7f7'),
+('0xb57e20c15c19d172af38211170c1f7181a49a3b4'),
+('0xe01900475e7a74c4b44eccf35639d20f3e7730ad')
+on conflict (address) do nothing;
+

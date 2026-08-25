@@ -92,6 +92,15 @@ class Settings(BaseSettings):
     # place without needing to watch the public ACO channel itself.
     discord_aco_admin_log_channel_id: str = ""
 
+    # NFT Intel: wallet-following mint alerts, a deliberately different
+    # product from NFT Scope. NFT Scope scores/discovers COLLECTIONS from
+    # public trading signals with no idea who's buying. NFT Intel tracks a
+    # curated list of WALLETS and alerts the instant one of them mints
+    # anything, on any chain - a "what is this wallet doing right now"
+    # feed, not a "here's a promising project" feed. Separate channel on
+    # purpose so the two never compete for the same feed's attention.
+    discord_nft_intel_channel_id: str = ""
+
     x_client_id: str = ""
     x_client_secret: str = ""
     x_redirect_uri: str = "https://www.dashhq.site/auth/x/callback"

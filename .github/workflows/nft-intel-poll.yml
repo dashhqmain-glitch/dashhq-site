@@ -1,0 +1,49 @@
+name: NFT Intel Poll (wallet mint alerts)
+
+# Same pattern as nft-poll.yml, much tighter interval - NFT Intel needs to
+# catch a tracked wallet's mint as close to "as it happens" as a polling
+# architecture can realistically get. A raw `schedule: '*/1 * * * *'` isn't
+# reliable (GitHub Actions delays/queues short-interval schedules under its
+# own platform load - see nft-poll.yml's own history of this), so this uses
+# the same fix: an actively-running job's own wall clock via `sleep`, not
+# GH's scheduler queue. A much coarser `schedule:` restarts the loop
+# periodically, which GH does deliver on reliably.
+#
+# 45s, not 5s: cron_nft_intel polls a BATCH of tracked wallets per tick
+# (see _NFT_INTEL_WALLET_BATCH_SIZE in main.py) against the same shared
+# OpenSea key NFT Scope and every other OpenSea-backed feature depends on -
+# hammering this much faster would risk starving those other features
+# the moment OpenSea's rate limit gets hit.
+
+on:
+  schedule:
+    - cron: '0 */2 * * *'  # coarse restart cadence GH Actions actually delivers on time - NOT the real poll interval, see the loop below
+  workflow_dispatch: {}
+
+concurrency:
+  group: nft-intel-poll-chain
+  cancel-in-progress: true
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350  # under GitHub's hard 6-hour per-job cap, with margin before a forced cutoff
+    steps:
+      - name: Poll every 45 seconds using this job's own clock
+        run: |
+          set +e  # a transient network hiccup must not kill a 5.5-hour loop over one bad tick
+          deadline=$((SECONDS + 340 * 60))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            status=$(curl -s -o response.json -w "%{http_code}" \
+              -X GET "https://www.dashhq.site/cron/nft-intel" \
+              -H "Authorization: Bearer ${{ secrets.NFT_CRON_SECRET }}")
+            status=${status:-000}
+            echo "$(date -u +%H:%M:%S) HTTP $status"
+            cat response.json 2>/dev/null
+            echo
+            case "$status" in
+              ''|*[!0-9]*) echo "::warning::poll produced no valid HTTP status - continuing the loop" ;;
+              *) if [ "$status" -ge 400 ]; then echo "::warning::poll returned HTTP $status - continuing the loop"; fi ;;
+            esac
+            sleep 45
+          done
