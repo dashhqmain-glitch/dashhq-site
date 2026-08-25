@@ -217,14 +217,32 @@ def test_embed_omits_fund_required_when_absent():
     assert not any("Fund Required" in n for n in names)
 
 
-def test_embed_has_spacer_fields_between_sections_for_breathing_room():
-    # Direct staff complaint: the embed read as one dense, clustered block.
-    # A drop with every optional field present should have real blank
-    # spacer fields separating each section, not just fields back to back.
+def test_embed_has_exactly_two_spacers_not_one_before_every_field():
+    # Direct staff feedback, in two rounds: first "too clustered" (fixed by
+    # adding a spacer before every optional field), then "the space is too
+    # big" once that shipped (too many spacers). Landed on exactly two: one
+    # separating the top summary row from the detail fields, one more
+    # separating those details from the staff-only Wallets Submitted count.
     d = _drop(fund_required="0.004 ETH", profit_note="30% Profit", contract_address="0xabc", checker_url="https://x")
     embed = main._aco_drop_embed(d, ticket_count=1, member_count=1)
     spacer_count = sum(1 for f in embed["fields"] if f == main._ACO_EMBED_SPACER)
-    assert spacer_count >= 3  # before Fund Required, before Profit/Notes, before Contract+Checker, before Wallets Submitted
+    assert spacer_count == 2
+    # And nothing back-to-back-optional gets its own extra spacer - Fund
+    # Required, Profit/Notes, Contract, and Checker should sit right next
+    # to each other with no gaps between them.
+    names = [f["name"] for f in embed["fields"]]
+    detail_start = names.index("💰 Fund Required In Wallet")
+    detail_end = names.index("Checker")
+    assert "​" not in names[detail_start:detail_end + 1]  # zero-width-space spacer name, none should appear mid-group
+
+
+def test_embed_skips_the_second_spacer_when_there_are_no_details():
+    # No profit note / contract / checker / fund required at all - only
+    # one real section exists (the top row), so there's nothing for a
+    # second spacer to separate.
+    d = _drop(fund_required=None, profit_note=None, contract_address=None, checker_url=None)
+    embed = main._aco_drop_embed(d, ticket_count=0, member_count=0, show_wallets=False)
+    assert not any(f == main._ACO_EMBED_SPACER for f in embed["fields"])
 
 
 def test_open_drop_staff_only_view_has_three_buttons():
@@ -279,10 +297,17 @@ async def test_aco_drop_command_rejects_non_staff():
     assert result["type"] == 4
 
 
-async def test_aco_create_submit_rejects_non_staff():
+async def test_aco_create_step1_submit_rejects_non_staff():
     settings.discord_aco_staff_role_id = "role123"
     payload = _payload(permissions="0", roles=[], components=[])
-    result = await main._handle_aco_create_submit(payload)
+    result = await main._handle_aco_create_step1_submit(payload)
+    assert "staff only" in result["data"]["content"].lower()
+
+
+async def test_aco_create_step2_submit_rejects_non_staff():
+    settings.discord_aco_staff_role_id = "role123"
+    payload = _payload(permissions="0", roles=[], components=[])
+    result = await main._handle_aco_create_step2_submit(payload, "draft1")
     assert "staff only" in result["data"]["content"].lower()
 
 
@@ -308,33 +333,115 @@ async def test_aco_drop_command_allows_staff_role_holder():
     settings.discord_aco_staff_role_id = "role123"
     settings.discord_aco_channel_id = "chan1"
     result = await main._handle_aco_drop_command(_payload(permissions="0", roles=["role123"]))
-    assert result["type"] == 9  # opens the create-drop modal
-    assert result["data"]["custom_id"] == "acocreate"
+    assert result["type"] == 9  # opens step 1 of the create-drop modal
+    assert result["data"]["custom_id"] == "acocreate_step1"
+
+
+def _step1_components(title="Test Drop", chain="Ethereum", deadline="6h", profit="30% profit"):
+    return [
+        {"components": [{"custom_id": "title", "value": title}]},
+        {"components": [{"custom_id": "chain", "value": chain}]},
+        {"components": [{"custom_id": "deadline", "value": deadline}]},
+        {"components": [{"custom_id": "profit", "value": profit}]},
+    ]
+
+
+def _step2_components(contract="", checker="", fund_required=""):
+    return [
+        {"components": [{"custom_id": "contract", "value": contract}]},
+        {"components": [{"custom_id": "checker", "value": checker}]},
+        {"components": [{"custom_id": "fund_required", "value": fund_required}]},
+    ]
+
+
+_STEP2_DRAFT_ROW = {
+    "id": "draft1", "title": "Test Drop", "chain": "Ethereum",
+    "deadline": "2026-12-25T18:00:00+00:00", "profit_note": "30% profit", "created_by": "user1",
+}
+
+
+class DraftAwareFakeClient:
+    """Base FakeClient for step-2 tests: answers aco_drop_drafts GET with
+    _STEP2_DRAFT_ROW and treats its DELETE as a no-op, so each individual
+    test only has to implement the aco_drops/messages behavior it's
+    actually testing."""
+    async def get(self, url, headers=None, params=None):
+        if "aco_drop_drafts" in url:
+            return FakeRes(200, [_STEP2_DRAFT_ROW])
+        return FakeRes(200, [])
+
+    async def delete(self, url, headers=None, params=None):
+        return FakeRes(200, {})
 
 
 async def test_aco_drop_command_modal_stays_within_discords_five_row_cap():
-    # Discord hard-caps a modal at 5 action rows - Fund Required had to
-    # ride along on an existing field (contract_and_checker) rather than
-    # get its own row, or this would silently fail to open at all.
     settings.discord_aco_staff_role_id = "role123"
     settings.discord_aco_channel_id = "chan1"
     result = await main._handle_aco_drop_command(_payload(permissions="0", roles=["role123"]))
     assert len(result["data"]["components"]) <= 5
-    last_row_label = result["data"]["components"][-1]["components"][0]["label"]
-    assert "Fund" in last_row_label
 
 
-def _create_submit_components(contract_and_checker=""):
-    return [
-        {"components": [{"custom_id": "title", "value": "Test Drop"}]},
-        {"components": [{"custom_id": "chain", "value": "Ethereum"}]},
-        {"components": [{"custom_id": "deadline", "value": "6h"}]},
-        {"components": [{"custom_id": "profit", "value": "30% profit"}]},
-        {"components": [{"custom_id": "contract_and_checker", "value": contract_and_checker}]},
-    ]
+async def test_aco_create_step1_submit_creates_a_draft_and_opens_step2_with_its_own_fields():
+    # The actual fix: Discord's 5-row modal cap meant Contract, Checker,
+    # and Fund Required couldn't all fit alongside Title/Chain/Countdown/
+    # Profit in one modal - step 1 now hands off to a second modal where
+    # each of those three gets its own genuinely separate field, instead
+    # of one multi-line field staff kept filling in wrong.
+    settings.discord_aco_staff_role_id = "role123"
+    settings.discord_aco_channel_id = "chan1"
+    created_draft = {}
+
+    class FakeClient:
+        async def post(self, url, headers=None, json=None):
+            if "aco_drop_drafts" in url:
+                created_draft.update(json)
+                return FakeRes(200, [{**json, "id": "newdraft1"}])
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        payload = _payload(permissions="32", roles=[], components=_step1_components(title="Doll Club FCFS", chain="Ethereum", deadline="6h", profit="20% profit"))
+        result = await main._handle_aco_create_step1_submit(payload)
+
+    assert result["type"] == 9  # opens step 2
+    assert result["data"]["custom_id"] == "acocreate_step2:newdraft1"
+    labels = [row["components"][0]["label"] for row in result["data"]["components"]]
+    assert labels == ["Contract Address", "Checker URL", "Fund Required In Wallet"]
+    assert len(result["data"]["components"]) <= 5
+    # The draft actually carries step 1's real values forward.
+    assert created_draft["title"] == "Doll Club FCFS"
+    assert created_draft["profit_note"] == "20% profit"
 
 
-async def test_aco_create_submit_reports_real_success_when_channel_post_works():
+async def test_aco_create_step1_submit_rejects_an_unparseable_countdown():
+    settings.discord_aco_staff_role_id = "role123"
+    settings.discord_aco_channel_id = "chan1"
+    payload = _payload(permissions="32", roles=[], components=_step1_components(deadline="whenever"))
+    result = await main._handle_aco_create_step1_submit(payload)
+    assert result["type"] == 4
+    assert "countdown" in result["data"]["content"].lower()
+
+
+async def test_aco_create_step2_submit_reports_missing_draft():
+    # The draft expired (cron_aco_key_cleanup swept it) or step 2 was
+    # somehow submitted twice - must fail clearly, not crash or silently
+    # create a broken drop.
+    settings.discord_aco_staff_role_id = "role123"
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [])  # no matching draft
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        payload = _payload(permissions="32", roles=[], components=_step2_components())
+        result = await main._handle_aco_create_step2_submit(payload, "gonedraft")
+
+    assert result["type"] == 4
+    assert "expired" in result["data"]["content"].lower() or "again" in result["data"]["content"].lower()
+
+
+async def test_aco_create_step2_submit_reports_real_success_when_channel_post_works():
     # Regression test for a real gap: this used to say "posted" even when
     # the Discord channel post silently failed.
     settings.discord_aco_staff_role_id = "role123"
@@ -342,7 +449,7 @@ async def test_aco_create_submit_reports_real_success_when_channel_post_works():
     settings.discord_bot_token = "tok"
     patches = []
 
-    class FakeClient:
+    class FakeClient(DraftAwareFakeClient):
         async def post(self, url, headers=None, json=None):
             if "aco_drops" in url:
                 return FakeRes(200, [{"id": "drop1", "title": "Test Drop", "chain": "Ethereum", "status": "open",
@@ -357,8 +464,8 @@ async def test_aco_create_submit_reports_real_success_when_channel_post_works():
 
     with patch("main.httpx.AsyncClient") as MockClient:
         MockClient.return_value.__aenter__.return_value = FakeClient()
-        payload = _payload(permissions="32", roles=[], components=_create_submit_components())
-        result = await main._handle_aco_create_submit(payload)
+        payload = _payload(permissions="32", roles=[], components=_step2_components())
+        result = await main._handle_aco_create_step2_submit(payload, "draft1")
 
     assert result["type"] == 5
     body = _webhook_patch_body(patches)
@@ -366,16 +473,16 @@ async def test_aco_create_submit_reports_real_success_when_channel_post_works():
     assert "⚠️" not in body["embeds"][0]["title"]
 
 
-async def test_aco_create_submit_parses_fund_required_as_the_third_line():
-    # contract_and_checker is overloaded to carry a 3rd line (Fund
-    # Required) since Discord's 5-row modal cap left no room for its own
-    # field - confirms the positional parsing actually lines up.
+async def test_aco_create_step2_submit_stores_contract_checker_and_fund_required_independently():
+    # The actual fix: each was its own field now, no more splitting one
+    # multi-line value by newline position and hoping staff got the order
+    # right (confirmed live: they didn't - a real drop came out garbled).
     settings.discord_aco_staff_role_id = "role123"
     settings.discord_aco_channel_id = "chan1"
     settings.discord_bot_token = "tok"
     inserted = {}
 
-    class FakeClient:
+    class FakeClient(DraftAwareFakeClient):
         async def post(self, url, headers=None, json=None):
             if "aco_drops" in url:
                 inserted.update(json)
@@ -390,22 +497,22 @@ async def test_aco_create_submit_parses_fund_required_as_the_third_line():
 
     with patch("main.httpx.AsyncClient") as MockClient:
         MockClient.return_value.__aenter__.return_value = FakeClient()
-        components = _create_submit_components("0xabc\nhttps://opensea.io/x\n0.004 ETH")
+        components = _step2_components(contract="0xabc", checker="https://opensea.io/x", fund_required="0.004 ETH")
         payload = _payload(permissions="32", roles=[], components=components)
-        await main._handle_aco_create_submit(payload)
+        await main._handle_aco_create_step2_submit(payload, "draft1")
 
     assert inserted["contract_address"] == "0xabc"
     assert inserted["checker_url"] == "https://opensea.io/x"
     assert inserted["fund_required"] == "0.004 ETH"
 
 
-async def test_aco_create_submit_fund_required_is_none_when_only_two_lines_given():
+async def test_aco_create_step2_submit_leaves_optional_fields_none_when_left_blank():
     settings.discord_aco_staff_role_id = "role123"
     settings.discord_aco_channel_id = "chan1"
     settings.discord_bot_token = "tok"
     inserted = {}
 
-    class FakeClient:
+    class FakeClient(DraftAwareFakeClient):
         async def post(self, url, headers=None, json=None):
             if "aco_drops" in url:
                 inserted.update(json)
@@ -420,20 +527,22 @@ async def test_aco_create_submit_fund_required_is_none_when_only_two_lines_given
 
     with patch("main.httpx.AsyncClient") as MockClient:
         MockClient.return_value.__aenter__.return_value = FakeClient()
-        components = _create_submit_components("0xabc\nhttps://opensea.io/x")
+        components = _step2_components(contract="0xabc")  # checker/fund_required left blank
         payload = _payload(permissions="32", roles=[], components=components)
-        await main._handle_aco_create_submit(payload)
+        await main._handle_aco_create_step2_submit(payload, "draft1")
 
+    assert inserted["contract_address"] == "0xabc"
+    assert inserted["checker_url"] is None
     assert inserted["fund_required"] is None
 
 
-async def test_aco_create_submit_reports_real_failure_when_channel_post_fails():
+async def test_aco_create_step2_submit_reports_real_failure_when_channel_post_fails():
     settings.discord_aco_staff_role_id = "role123"
     settings.discord_aco_channel_id = "chan1"
     settings.discord_bot_token = "tok"
     patches = []
 
-    class FakeClient:
+    class FakeClient(DraftAwareFakeClient):
         async def post(self, url, headers=None, json=None):
             if "aco_drops" in url:
                 return FakeRes(200, [{"id": "drop1", "title": "Test Drop", "chain": "Ethereum", "status": "open",
@@ -448,8 +557,8 @@ async def test_aco_create_submit_reports_real_failure_when_channel_post_fails():
 
     with patch("main.httpx.AsyncClient") as MockClient:
         MockClient.return_value.__aenter__.return_value = FakeClient()
-        payload = _payload(permissions="32", roles=[], components=_create_submit_components())
-        result = await main._handle_aco_create_submit(payload)
+        payload = _payload(permissions="32", roles=[], components=_step2_components())
+        result = await main._handle_aco_create_step2_submit(payload, "draft1")
 
     assert result["type"] == 5
     body = _webhook_patch_body(patches)
@@ -460,7 +569,7 @@ async def test_aco_create_submit_reports_real_failure_when_channel_post_fails():
     assert not any("aco_drops" in u for u, _ in patches)
 
 
-async def test_aco_create_submit_mirrors_staff_controls_to_the_mod_channel():
+async def test_aco_create_step2_submit_mirrors_staff_controls_to_the_mod_channel():
     # The actual fix: See Wallets / Mark Resolved / Cancel Drop must never
     # render on the public announcement message - they live on a second
     # message posted to the moderator channel instead (not #aco-support,
@@ -472,7 +581,7 @@ async def test_aco_create_submit_mirrors_staff_controls_to_the_mod_channel():
     posts = []
     patches = []
 
-    class FakeClient:
+    class FakeClient(DraftAwareFakeClient):
         async def post(self, url, headers=None, json=None):
             if "aco_drops" in url:
                 return FakeRes(200, [{"id": "drop1", "title": "Test Drop", "chain": "Ethereum", "status": "open",
@@ -488,8 +597,8 @@ async def test_aco_create_submit_mirrors_staff_controls_to_the_mod_channel():
 
     with patch("main.httpx.AsyncClient") as MockClient:
         MockClient.return_value.__aenter__.return_value = FakeClient()
-        payload = _payload(permissions="32", roles=[], components=_create_submit_components())
-        await main._handle_aco_create_submit(payload)
+        payload = _payload(permissions="32", roles=[], components=_step2_components())
+        await main._handle_aco_create_step2_submit(payload, "draft1")
 
     # The mod channel also receives a separate plain-text audit-log entry
     # (see _aco_log) alongside the interactive staff-controls message
@@ -509,7 +618,7 @@ async def test_aco_create_submit_mirrors_staff_controls_to_the_mod_channel():
     assert drop_patch["discord_staff_message_id"] == "msg1"
 
 
-async def test_aco_create_submit_falls_back_to_one_message_when_no_mod_channel():
+async def test_aco_create_step2_submit_falls_back_to_one_message_when_no_mod_channel():
     # Degrade instead of break: with no mod channel to mirror to, the
     # staff controls must stay on the public message so the drop is
     # still manageable.
@@ -519,7 +628,7 @@ async def test_aco_create_submit_falls_back_to_one_message_when_no_mod_channel()
     settings.discord_bot_token = "tok"
     posts = []
 
-    class FakeClient:
+    class FakeClient(DraftAwareFakeClient):
         async def post(self, url, headers=None, json=None):
             if "aco_drops" in url:
                 return FakeRes(200, [{"id": "drop1", "title": "Test Drop", "chain": "Ethereum", "status": "open",
@@ -534,8 +643,8 @@ async def test_aco_create_submit_falls_back_to_one_message_when_no_mod_channel()
 
     with patch("main.httpx.AsyncClient") as MockClient:
         MockClient.return_value.__aenter__.return_value = FakeClient()
-        payload = _payload(permissions="32", roles=[], components=_create_submit_components())
-        await main._handle_aco_create_submit(payload)
+        payload = _payload(permissions="32", roles=[], components=_step2_components())
+        await main._handle_aco_create_step2_submit(payload, "draft1")
 
     assert len(posts) == 1
     labels = [c["label"] for c in posts[0][1]["components"][0]["components"]]
@@ -1568,3 +1677,36 @@ async def test_cron_aco_key_cleanup_requires_valid_secret():
         assert False, "should have raised"
     except main.HTTPException as exc:
         assert exc.status_code == 401
+
+
+async def test_cleanup_stale_drop_drafts_removes_old_rows():
+    # Safety net for a staff member who opens step 1, never finishes step
+    # 2 - the draft has no other cleanup path since only step 2 itself
+    # ever reads or deletes one.
+    class FakeClient:
+        async def delete(self, url, headers=None, params=None):
+            assert "aco_drop_drafts" in url
+            return FakeRes(200, [{"id": "old1"}, {"id": "old2"}])
+
+    count = await main._aco_cleanup_stale_drop_drafts(FakeClient(), max_age_hours=1)
+    assert count == 2
+
+
+async def test_cron_aco_key_cleanup_also_sweeps_stale_drop_drafts():
+    settings.cron_secret = "realsecret"
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [])  # no expired key handoffs
+
+        async def delete(self, url, headers=None, params=None):
+            return FakeRes(200, [{"id": "old1"}])
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        result = await main.cron_aco_key_cleanup(FakeRequest("Bearer realsecret"))
+
+    assert result["stale_drafts_removed"] == 1

@@ -673,13 +673,17 @@ async def cron_aco_key_cleanup(request: Request):
     # Safety net for a staff member who forgot to click "Mark Complete" on
     # a private-key handoff thread - force-deletes anything still open
     # past 24h so a forgotten thread can't sit around holding a live key
-    # indefinitely just because nobody remembered to close it.
+    # indefinitely just because nobody remembered to close it. Also sweeps
+    # stale /aco-drop step-1-but-never-step-2 drafts, same "abandoned
+    # mid-flow" shape - piggybacks on this existing cron rather than
+    # standing up a whole separate one for a tiny cheap cleanup.
     expected = f"Bearer {settings.cron_secret}"
     if not settings.cron_secret or request.headers.get("authorization") != expected:
         raise HTTPException(status_code=401, detail="Unauthorized")
     async with httpx.AsyncClient(timeout=30) as client:
         expired_count = await _aco_cleanup_expired_key_handoffs(client)
-    return {"expired": expired_count}
+        stale_drafts_count = await _aco_cleanup_stale_drop_drafts(client)
+    return {"expired": expired_count, "stale_drafts_removed": stale_drafts_count}
 
 
 @app.get("/cron/test-monitor-channel")
@@ -1269,8 +1273,11 @@ async def _dispatch_interaction(payload: dict, itype) -> dict:
 
     if itype == 5:  # MODAL_SUBMIT
         modal_id = payload.get("data", {}).get("custom_id", "")
-        if modal_id == "acocreate":
-            return await _handle_aco_create_submit(payload)
+        if modal_id == "acocreate_step1":
+            return await _handle_aco_create_step1_submit(payload)
+        if modal_id.startswith("acocreate_step2:"):
+            _, _, draft_id = modal_id.partition(":")
+            return await _handle_aco_create_step2_submit(payload, draft_id)
         if modal_id.startswith("acowallet:"):
             _, _, drop_id = modal_id.partition(":")
             return await _handle_aco_wallet_submit(payload, drop_id)
@@ -1551,18 +1558,19 @@ def _aco_drop_embed(drop: dict, ticket_count: int, member_count: int, *, show_wa
         {"name": "⏳ Countdown", "value": _aco_deadline_countdown(drop.get("deadline")), "inline": True},
         {"name": "Status", "value": status_label, "inline": True},
     ]
-    # Blank spacer fields between logical groups (zero-width space, the
-    # standard Discord trick - an empty name/value string renders nothing
-    # at all, this is the only way to actually get a field to show) so the
-    # embed reads as distinct sections instead of one dense block of text.
-    if drop.get("fund_required"):
+    # One blank spacer field (zero-width space, the standard Discord trick -
+    # an empty name/value string renders nothing at all, the only way to
+    # actually get a field to show) between the top summary row and the
+    # detail fields below - just enough to stop the embed reading as one
+    # dense block, without a spacer before every single field (that read
+    # as too much dead space - direct feedback after the first version).
+    has_details = drop.get("fund_required") or drop.get("profit_note") or drop.get("contract_address") or drop.get("checker_url")
+    if has_details:
         fields.append(_ACO_EMBED_SPACER)
+    if drop.get("fund_required"):
         fields.append({"name": "💰 Fund Required In Wallet", "value": drop["fund_required"], "inline": False})
     if drop.get("profit_note"):
-        fields.append(_ACO_EMBED_SPACER)
         fields.append({"name": "Profit / Notes", "value": _trunc(drop["profit_note"], 500), "inline": False})
-    if drop.get("contract_address") or drop.get("checker_url"):
-        fields.append(_ACO_EMBED_SPACER)
     if drop.get("contract_address"):
         fields.append({"name": "Contract", "value": f"`{drop['contract_address']}`", "inline": False})
     if drop.get("checker_url"):
@@ -1575,7 +1583,8 @@ def _aco_drop_embed(drop: dict, ticket_count: int, member_count: int, *, show_wa
     # IS the staff view in that case, so hiding it there would just lose
     # the count entirely rather than make it more private).
     if show_wallets:
-        fields.append(_ACO_EMBED_SPACER)
+        if has_details:
+            fields.append(_ACO_EMBED_SPACER)
         fields.append({"name": "🎟️ Wallets Submitted", "value": f"**{ticket_count}** ({member_count} member(s))", "inline": True})
     return {
         "author": _ACO_AUTHOR,
@@ -1682,11 +1691,16 @@ async def _handle_aco_drop_command(payload: dict) -> dict:
         return {"type": 4, "data": {"content": "ACO staff only.", "flags": 64}}
     if not settings.discord_aco_channel_id:
         return {"type": 4, "data": {"content": "The ACO channel isn't configured yet - set DISCORD_ACO_CHANNEL_ID.", "flags": 64}}
+    # Step 1 of 2 - Discord hard-caps a modal at 5 action rows, and giving
+    # Contract, Checker, and Fund Required each their own dedicated field
+    # (see step 2 below) needed 3 rows on their own, leaving only 4 for
+    # everything else. See _handle_aco_create_step1_submit for how state
+    # carries over to step 2.
     return {
         "type": 9,
         "data": {
-            "custom_id": "acocreate",
-            "title": "New DASH ACO Drop",
+            "custom_id": "acocreate_step1",
+            "title": "New DASH ACO Drop (1/2)",
             "components": [
                 {"type": 1, "components": [{"type": 4, "custom_id": "title", "style": 1, "label": "Title", "max_length": 100, "required": True}]},
                 {"type": 1, "components": [{"type": 4, "custom_id": "chain", "style": 1, "label": "Chain", "max_length": 50, "required": True}]},
@@ -1695,22 +1709,12 @@ async def _handle_aco_drop_command(payload: dict) -> dict:
                     "type": 4, "custom_id": "profit", "style": 2, "label": "Profit / Notes", "max_length": 500, "required": True,
                     "placeholder": "e.g. 30% Profit. Mega Heavy OA so expect some fails.",
                 }]},
-                {"type": 1, "components": [{
-                    # Discord caps a modal at 5 action rows and this is
-                    # already the 5th - Fund Required rides along as a
-                    # 3rd line here rather than displacing an existing
-                    # field. Order matters: _handle_aco_create_submit reads
-                    # these back positionally.
-                    "type": 4, "custom_id": "contract_and_checker", "style": 2,
-                    "label": "Contract / Checker / Fund Req (1 per line)", "max_length": 350, "required": False,
-                    "placeholder": "0x...\nhttps://opensea.io/collection/...\n0.004 ETH",
-                }]},
             ],
         },
     }
 
 
-async def _handle_aco_create_submit(payload: dict) -> dict:
+async def _handle_aco_create_step1_submit(payload: dict) -> dict:
     if not _is_aco_staff(payload):
         return {"type": 4, "data": {"content": "ACO staff only.", "flags": 64}}
     values: dict[str, str] = {}
@@ -1725,21 +1729,83 @@ async def _handle_aco_create_submit(payload: dict) -> dict:
             "flags": 64,
         }}
 
-    extra_lines = [l.strip() for l in values.get("contract_and_checker", "").split("\n") if l.strip()]
-    contract_address = extra_lines[0] if extra_lines else None
-    checker_url = extra_lines[1] if len(extra_lines) > 1 else None
-    fund_required = extra_lines[2] if len(extra_lines) > 2 else None
-
     member_user = payload.get("member", {}).get("user", {})
-    row = {
+    draft = {
         "title": values.get("title", "")[:100] or "Untitled Drop",
         "chain": values.get("chain", "")[:50] or "-",
         "deadline": deadline.isoformat(),
         "profit_note": values.get("profit", "")[:500] or None,
-        "contract_address": contract_address,
-        "checker_url": checker_url,
-        "fund_required": fund_required[:100] if fund_required else None,
         "created_by": member_user.get("id", ""),
+    }
+    async with httpx.AsyncClient(timeout=15) as client:
+        res = await client.post(
+            f"{settings.supabase_url}/rest/v1/aco_drop_drafts",
+            headers=_supabase_headers(),
+            json=draft,
+        )
+        res.raise_for_status()
+        draft_id = res.json()[0]["id"]
+
+    # Step 2 - Contract, Checker, and Fund Required each get their own
+    # single-line field now, rather than one multi-line field staff kept
+    # getting wrong (mixing everything onto one line instead of one per
+    # line, confirmed from a real drop that came out garbled that way).
+    return {
+        "type": 9,
+        "data": {
+            "custom_id": f"acocreate_step2:{draft_id}",
+            "title": "New DASH ACO Drop (2/2)",
+            "components": [
+                {"type": 1, "components": [{"type": 4, "custom_id": "contract", "style": 1, "label": "Contract Address", "max_length": 100, "required": False}]},
+                {"type": 1, "components": [{"type": 4, "custom_id": "checker", "style": 1, "label": "Checker URL", "max_length": 200, "required": False}]},
+                {"type": 1, "components": [{"type": 4, "custom_id": "fund_required", "style": 1, "label": "Fund Required In Wallet", "max_length": 100, "required": False, "placeholder": "e.g. 0.004 ETH"}]},
+            ],
+        },
+    }
+
+
+async def _handle_aco_create_step2_submit(payload: dict, draft_id: str) -> dict:
+    if not _is_aco_staff(payload):
+        return {"type": 4, "data": {"content": "ACO staff only.", "flags": 64}}
+    values: dict[str, str] = {}
+    for comp_row in payload.get("data", {}).get("components", []):
+        for comp in comp_row.get("components", []):
+            values[comp.get("custom_id")] = (comp.get("value") or "").strip()
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        draft_res = await client.get(
+            f"{settings.supabase_url}/rest/v1/aco_drop_drafts",
+            headers=_supabase_headers(),
+            params={"id": f"eq.{draft_id}", "select": "*", "limit": "1"},
+        )
+        draft_res.raise_for_status()
+        drafts = draft_res.json()
+        if not drafts:
+            return {"type": 4, "data": {
+                "content": "That drop draft expired or was already used - please run `/aco-drop` again from the start.",
+                "flags": 64,
+            }}
+        draft = drafts[0]
+        # Best-effort: an orphaned draft row is harmless (cron_aco_key_cleanup
+        # sweeps anything stale) and must never block finishing the drop.
+        try:
+            await client.delete(
+                f"{settings.supabase_url}/rest/v1/aco_drop_drafts",
+                headers=_supabase_headers(prefer="return=minimal"),
+                params={"id": f"eq.{draft_id}"},
+            )
+        except httpx.HTTPError:
+            logger.exception("Failed to delete used ACO drop draft %s", draft_id)
+
+    row = {
+        "title": draft["title"],
+        "chain": draft["chain"],
+        "deadline": draft["deadline"],
+        "profit_note": draft.get("profit_note"),
+        "contract_address": values.get("contract") or None,
+        "checker_url": values.get("checker") or None,
+        "fund_required": values.get("fund_required")[:100] if values.get("fund_required") else None,
+        "created_by": draft["created_by"],
         "discord_channel_id": settings.discord_aco_channel_id,
     }
 
@@ -2394,6 +2460,23 @@ async def _aco_cleanup_expired_key_handoffs(client: httpx.AsyncClient, max_age_h
         )
         await _aco_log(f"⏰ **Key handoff expired** (>{max_age_hours}h, nobody marked it complete) - opener: <@{row['discord_user_id']}>, thread deleted")
     return len(expired)
+
+
+async def _aco_cleanup_stale_drop_drafts(client: httpx.AsyncClient, max_age_hours: int = 1) -> int:
+    # Safety net for staff who abandon the two-step /aco-drop flow between
+    # step 1 and step 2 (closed the modal, Discord timed it out, etc.) - a
+    # draft has no other cleanup path since it's only ever read/deleted by
+    # step 2 itself. 1 hour, not 24 like the key-handoff cleanup - there's
+    # no reason a real drop creation should ever take that long between
+    # its two steps.
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
+    res = await client.delete(
+        f"{settings.supabase_url}/rest/v1/aco_drop_drafts",
+        headers=_supabase_headers(prefer="return=representation"),
+        params={"created_at": f"lt.{cutoff}"},
+    )
+    res.raise_for_status()
+    return len(res.json())
 
 
 _ACO_EDUCATION_MAX_EMBEDS = 10  # Discord's own per-message cap
