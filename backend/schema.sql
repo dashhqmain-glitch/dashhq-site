@@ -445,28 +445,21 @@ create index if not exists aco_drops_status_idx on aco_drops (status);
 
 alter table aco_drops enable row level security;
 
--- Bridges the two-step /aco-drop modal flow: Discord hard-caps a modal at
--- 5 action rows, and Title + Chain + Countdown + Profit/Notes already used
--- all 5 - Contract, Checker, and Fund Required each needing their OWN
--- field (not crammed onto one multi-line field, which staff kept getting
--- wrong) meant a second modal, and Discord has no native way to carry
--- state between two separate modal submissions. This table is that
--- carry-over: step 1 writes a draft row and opens step 2 with the row's
--- id in its custom_id; step 2 reads the draft back, deletes it, and
--- finishes creating the real drop. A row only lives between step 1 and
--- step 2 - see cron_aco_key_cleanup for the safety-net cleanup of
--- anything abandoned mid-flow.
-create table if not exists aco_drop_drafts (
-  id            uuid primary key default gen_random_uuid(),
-  title         text not null,
-  chain         text not null,
-  deadline      timestamptz not null,
-  profit_note   text,
-  created_by    text not null,
-  created_at    timestamptz not null default now()
-);
-
-alter table aco_drop_drafts enable row level security;
+-- The two-step /aco-drop modal flow (Contract/Checker/Fund Required each
+-- get their own field, needing a 2nd modal since Title+Chain+Countdown+
+-- Profit/Notes already used Discord's 5-row modal cap) used to carry step
+-- 1's data to step 2 via a draft row here. Real bug, confirmed live: a
+-- modal response can never be deferred - it has to be Discord's immediate
+-- reply - so the network round-trip a database write requires was, on a
+-- cold start, enough on its own to blow past Discord's ~3s window and
+-- show staff "Something went wrong" even though the draft was written
+-- successfully a moment later. Replaced with a pre-filled, JSON-encoded
+-- field on step 2's own modal instead - Discord already round-trips a
+-- modal's field values natively, so carrying state that way needs zero
+-- network calls and can never time out. This table is dead - dropped so
+-- re-running this file actually cleans it up instead of leaving an
+-- unused table behind.
+drop table if exists aco_drop_drafts;
 
 -- Uniqueness is on (drop, member, wallet), not (drop, member) - submitting
 -- the exact same wallet twice is a harmless no-op (upserted, not doubled),

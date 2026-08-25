@@ -673,17 +673,13 @@ async def cron_aco_key_cleanup(request: Request):
     # Safety net for a staff member who forgot to click "Mark Complete" on
     # a private-key handoff thread - force-deletes anything still open
     # past 24h so a forgotten thread can't sit around holding a live key
-    # indefinitely just because nobody remembered to close it. Also sweeps
-    # stale /aco-drop step-1-but-never-step-2 drafts, same "abandoned
-    # mid-flow" shape - piggybacks on this existing cron rather than
-    # standing up a whole separate one for a tiny cheap cleanup.
+    # indefinitely just because nobody remembered to close it.
     expected = f"Bearer {settings.cron_secret}"
     if not settings.cron_secret or request.headers.get("authorization") != expected:
         raise HTTPException(status_code=401, detail="Unauthorized")
     async with httpx.AsyncClient(timeout=30) as client:
         expired_count = await _aco_cleanup_expired_key_handoffs(client)
-        stale_drafts_count = await _aco_cleanup_stale_drop_drafts(client)
-    return {"expired": expired_count, "stale_drafts_removed": stale_drafts_count}
+    return {"expired": expired_count}
 
 
 @app.get("/cron/test-monitor-channel")
@@ -1275,9 +1271,8 @@ async def _dispatch_interaction(payload: dict, itype) -> dict:
         modal_id = payload.get("data", {}).get("custom_id", "")
         if modal_id == "acocreate_step1":
             return await _handle_aco_create_step1_submit(payload)
-        if modal_id.startswith("acocreate_step2:"):
-            _, _, draft_id = modal_id.partition(":")
-            return await _handle_aco_create_step2_submit(payload, draft_id)
+        if modal_id == "acocreate_step2":
+            return await _handle_aco_create_step2_submit(payload)
         if modal_id.startswith("acowallet:"):
             _, _, drop_id = modal_id.partition(":")
             return await _handle_aco_wallet_submit(payload, drop_id)
@@ -1737,34 +1732,43 @@ async def _handle_aco_create_step1_submit(payload: dict) -> dict:
         "profit_note": values.get("profit", "")[:500] or None,
         "created_by": member_user.get("id", ""),
     }
-    async with httpx.AsyncClient(timeout=15) as client:
-        res = await client.post(
-            f"{settings.supabase_url}/rest/v1/aco_drop_drafts",
-            headers=_supabase_headers(),
-            json=draft,
-        )
-        res.raise_for_status()
-        draft_id = res.json()[0]["id"]
 
     # Step 2 - Contract, Checker, and Fund Required each get their own
     # single-line field now, rather than one multi-line field staff kept
     # getting wrong (mixing everything onto one line instead of one per
     # line, confirmed from a real drop that came out garbled that way).
+    #
+    # Step 1's data carries forward as a pre-filled, JSON-encoded 4th
+    # field on step 2's modal instead of a database row - a real bug,
+    # confirmed live: a modal response can never be deferred (it has to
+    # be Discord's immediate reply, unlike every other interaction type
+    # this bot handles), so the network round-trip a database write
+    # requires was enough on its own, on a cold start, to blow past
+    # Discord's ~3s window and show staff "Something went wrong" even
+    # though the draft was written successfully a moment later. Discord
+    # already round-trips a modal's field values natively - encoding the
+    # carry-over as a pre-filled field needs zero network calls in this
+    # handler, so it can never be slow enough to time out.
+    carry = json.dumps({"t": draft["title"], "c": draft["chain"], "d": draft["deadline"], "p": draft["profit_note"], "u": draft["created_by"]})
     return {
         "type": 9,
         "data": {
-            "custom_id": f"acocreate_step2:{draft_id}",
+            "custom_id": "acocreate_step2",
             "title": "New DASH ACO Drop (2/2)",
             "components": [
                 {"type": 1, "components": [{"type": 4, "custom_id": "contract", "style": 1, "label": "Contract Address", "max_length": 100, "required": False}]},
                 {"type": 1, "components": [{"type": 4, "custom_id": "checker", "style": 1, "label": "Checker URL", "max_length": 200, "required": False}]},
                 {"type": 1, "components": [{"type": 4, "custom_id": "fund_required", "style": 1, "label": "Fund Required In Wallet", "max_length": 100, "required": False, "placeholder": "e.g. 0.004 ETH"}]},
+                {"type": 1, "components": [{
+                    "type": 4, "custom_id": "carry", "style": 2, "required": True, "value": carry, "max_length": 3900,
+                    "label": "Do not edit - carries step 1 forward",
+                }]},
             ],
         },
     }
 
 
-async def _handle_aco_create_step2_submit(payload: dict, draft_id: str) -> dict:
+async def _handle_aco_create_step2_submit(payload: dict) -> dict:
     if not _is_aco_staff(payload):
         return {"type": 4, "data": {"content": "ACO staff only.", "flags": 64}}
     values: dict[str, str] = {}
@@ -1772,40 +1776,24 @@ async def _handle_aco_create_step2_submit(payload: dict, draft_id: str) -> dict:
         for comp in comp_row.get("components", []):
             values[comp.get("custom_id")] = (comp.get("value") or "").strip()
 
-    async with httpx.AsyncClient(timeout=15) as client:
-        draft_res = await client.get(
-            f"{settings.supabase_url}/rest/v1/aco_drop_drafts",
-            headers=_supabase_headers(),
-            params={"id": f"eq.{draft_id}", "select": "*", "limit": "1"},
-        )
-        draft_res.raise_for_status()
-        drafts = draft_res.json()
-        if not drafts:
-            return {"type": 4, "data": {
-                "content": "That drop draft expired or was already used - please run `/aco-drop` again from the start.",
-                "flags": 64,
-            }}
-        draft = drafts[0]
-        # Best-effort: an orphaned draft row is harmless (cron_aco_key_cleanup
-        # sweeps anything stale) and must never block finishing the drop.
-        try:
-            await client.delete(
-                f"{settings.supabase_url}/rest/v1/aco_drop_drafts",
-                headers=_supabase_headers(prefer="return=minimal"),
-                params={"id": f"eq.{draft_id}"},
-            )
-        except httpx.HTTPError:
-            logger.exception("Failed to delete used ACO drop draft %s", draft_id)
+    try:
+        draft = json.loads(values.get("carry", ""))
+        title, chain, deadline_iso, profit_note, created_by = draft["t"], draft["c"], draft["d"], draft.get("p"), draft["u"]
+    except (json.JSONDecodeError, KeyError, TypeError):
+        return {"type": 4, "data": {
+            "content": "The carried-over step 1 data didn't come through correctly - please run `/aco-drop` again from the start, and don't edit the last field.",
+            "flags": 64,
+        }}
 
     row = {
-        "title": draft["title"],
-        "chain": draft["chain"],
-        "deadline": draft["deadline"],
-        "profit_note": draft.get("profit_note"),
+        "title": title,
+        "chain": chain,
+        "deadline": deadline_iso,
+        "profit_note": profit_note,
         "contract_address": values.get("contract") or None,
         "checker_url": values.get("checker") or None,
         "fund_required": values.get("fund_required")[:100] if values.get("fund_required") else None,
-        "created_by": draft["created_by"],
+        "created_by": created_by,
         "discord_channel_id": settings.discord_aco_channel_id,
     }
 
@@ -2460,23 +2448,6 @@ async def _aco_cleanup_expired_key_handoffs(client: httpx.AsyncClient, max_age_h
         )
         await _aco_log(f"⏰ **Key handoff expired** (>{max_age_hours}h, nobody marked it complete) - opener: <@{row['discord_user_id']}>, thread deleted")
     return len(expired)
-
-
-async def _aco_cleanup_stale_drop_drafts(client: httpx.AsyncClient, max_age_hours: int = 1) -> int:
-    # Safety net for staff who abandon the two-step /aco-drop flow between
-    # step 1 and step 2 (closed the modal, Discord timed it out, etc.) - a
-    # draft has no other cleanup path since it's only ever read/deleted by
-    # step 2 itself. 1 hour, not 24 like the key-handoff cleanup - there's
-    # no reason a real drop creation should ever take that long between
-    # its two steps.
-    cutoff = (datetime.now(timezone.utc) - timedelta(hours=max_age_hours)).isoformat()
-    res = await client.delete(
-        f"{settings.supabase_url}/rest/v1/aco_drop_drafts",
-        headers=_supabase_headers(prefer="return=representation"),
-        params={"created_at": f"lt.{cutoff}"},
-    )
-    res.raise_for_status()
-    return len(res.json())
 
 
 _ACO_EDUCATION_MAX_EMBEDS = 10  # Discord's own per-message cap

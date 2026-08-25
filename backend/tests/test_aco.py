@@ -307,7 +307,7 @@ async def test_aco_create_step1_submit_rejects_non_staff():
 async def test_aco_create_step2_submit_rejects_non_staff():
     settings.discord_aco_staff_role_id = "role123"
     payload = _payload(permissions="0", roles=[], components=[])
-    result = await main._handle_aco_create_step2_submit(payload, "draft1")
+    result = await main._handle_aco_create_step2_submit(payload)
     assert "staff only" in result["data"]["content"].lower()
 
 
@@ -346,32 +346,36 @@ def _step1_components(title="Test Drop", chain="Ethereum", deadline="6h", profit
     ]
 
 
-def _step2_components(contract="", checker="", fund_required=""):
+_STEP2_CARRY = main.json.dumps({
+    "t": "Test Drop", "c": "Ethereum", "d": "2026-12-25T18:00:00+00:00",
+    "p": "30% profit", "u": "user1",
+})
+
+
+def _step2_components(contract="", checker="", fund_required="", carry=_STEP2_CARRY):
     return [
         {"components": [{"custom_id": "contract", "value": contract}]},
         {"components": [{"custom_id": "checker", "value": checker}]},
         {"components": [{"custom_id": "fund_required", "value": fund_required}]},
+        {"components": [{"custom_id": "carry", "value": carry}]},
     ]
 
 
-_STEP2_DRAFT_ROW = {
-    "id": "draft1", "title": "Test Drop", "chain": "Ethereum",
-    "deadline": "2026-12-25T18:00:00+00:00", "profit_note": "30% profit", "created_by": "user1",
-}
+class ExplodingClient:
+    """Raises on any network call - proves a handler makes none at all,
+    which is exactly the guarantee a modal response needs since it can
+    never be deferred and must return within Discord's ~3s window."""
+    async def get(self, *a, **k):
+        raise AssertionError("should not have made a network call")
 
+    async def post(self, *a, **k):
+        raise AssertionError("should not have made a network call")
 
-class DraftAwareFakeClient:
-    """Base FakeClient for step-2 tests: answers aco_drop_drafts GET with
-    _STEP2_DRAFT_ROW and treats its DELETE as a no-op, so each individual
-    test only has to implement the aco_drops/messages behavior it's
-    actually testing."""
-    async def get(self, url, headers=None, params=None):
-        if "aco_drop_drafts" in url:
-            return FakeRes(200, [_STEP2_DRAFT_ROW])
-        return FakeRes(200, [])
+    async def patch(self, *a, **k):
+        raise AssertionError("should not have made a network call")
 
-    async def delete(self, url, headers=None, params=None):
-        return FakeRes(200, {})
+    async def delete(self, *a, **k):
+        raise AssertionError("should not have made a network call")
 
 
 async def test_aco_drop_command_modal_stays_within_discords_five_row_cap():
@@ -381,36 +385,33 @@ async def test_aco_drop_command_modal_stays_within_discords_five_row_cap():
     assert len(result["data"]["components"]) <= 5
 
 
-async def test_aco_create_step1_submit_creates_a_draft_and_opens_step2_with_its_own_fields():
-    # The actual fix: Discord's 5-row modal cap meant Contract, Checker,
-    # and Fund Required couldn't all fit alongside Title/Chain/Countdown/
-    # Profit in one modal - step 1 now hands off to a second modal where
-    # each of those three gets its own genuinely separate field, instead
-    # of one multi-line field staff kept filling in wrong.
+async def test_aco_create_step1_submit_makes_no_network_calls_and_opens_step2_with_its_own_fields():
+    # The actual fix: a modal response can never be deferred - it has to
+    # be Discord's immediate reply within ~3s - so step 1 used to blow
+    # that window on a cold start doing a Supabase write to stash a draft
+    # row. Now it makes zero network calls at all (proven here via
+    # ExplodingClient) and instead hands step 1's data forward as a
+    # pre-filled, hidden field on step 2's own modal - Contract, Checker,
+    # and Fund Required each get their own genuinely separate field too,
+    # instead of the one multi-line field staff kept filling in wrong.
     settings.discord_aco_staff_role_id = "role123"
     settings.discord_aco_channel_id = "chan1"
-    created_draft = {}
-
-    class FakeClient:
-        async def post(self, url, headers=None, json=None):
-            if "aco_drop_drafts" in url:
-                created_draft.update(json)
-                return FakeRes(200, [{**json, "id": "newdraft1"}])
-            return FakeRes(200, {})
 
     with patch("main.httpx.AsyncClient") as MockClient:
-        MockClient.return_value.__aenter__.return_value = FakeClient()
+        MockClient.return_value.__aenter__.return_value = ExplodingClient()
         payload = _payload(permissions="32", roles=[], components=_step1_components(title="Doll Club FCFS", chain="Ethereum", deadline="6h", profit="20% profit"))
         result = await main._handle_aco_create_step1_submit(payload)
 
     assert result["type"] == 9  # opens step 2
-    assert result["data"]["custom_id"] == "acocreate_step2:newdraft1"
-    labels = [row["components"][0]["label"] for row in result["data"]["components"]]
-    assert labels == ["Contract Address", "Checker URL", "Fund Required In Wallet"]
+    assert result["data"]["custom_id"] == "acocreate_step2"
+    labels = [row["components"][0].get("label") for row in result["data"]["components"]]
+    assert labels == ["Contract Address", "Checker URL", "Fund Required In Wallet", "Do not edit - carries step 1 forward"]
     assert len(result["data"]["components"]) <= 5
-    # The draft actually carries step 1's real values forward.
-    assert created_draft["title"] == "Doll Club FCFS"
-    assert created_draft["profit_note"] == "20% profit"
+    # The carried-forward field actually contains step 1's real values.
+    carry_value = result["data"]["components"][-1]["components"][0]["value"]
+    carried = main.json.loads(carry_value)
+    assert carried["t"] == "Doll Club FCFS"
+    assert carried["p"] == "20% profit"
 
 
 async def test_aco_create_step1_submit_rejects_an_unparseable_countdown():
@@ -422,23 +423,20 @@ async def test_aco_create_step1_submit_rejects_an_unparseable_countdown():
     assert "countdown" in result["data"]["content"].lower()
 
 
-async def test_aco_create_step2_submit_reports_missing_draft():
-    # The draft expired (cron_aco_key_cleanup swept it) or step 2 was
-    # somehow submitted twice - must fail clearly, not crash or silently
-    # create a broken drop.
+async def test_aco_create_step2_submit_reports_malformed_carry_without_any_network_call():
+    # The hidden carry field somehow came through empty or edited - must
+    # fail clearly and immediately (no network call at all, matching this
+    # handler's non-deferrable modal-response constraint), not crash or
+    # silently create a broken drop.
     settings.discord_aco_staff_role_id = "role123"
 
-    class FakeClient:
-        async def get(self, url, headers=None, params=None):
-            return FakeRes(200, [])  # no matching draft
-
     with patch("main.httpx.AsyncClient") as MockClient:
-        MockClient.return_value.__aenter__.return_value = FakeClient()
-        payload = _payload(permissions="32", roles=[], components=_step2_components())
-        result = await main._handle_aco_create_step2_submit(payload, "gonedraft")
+        MockClient.return_value.__aenter__.return_value = ExplodingClient()
+        payload = _payload(permissions="32", roles=[], components=_step2_components(carry="not valid json"))
+        result = await main._handle_aco_create_step2_submit(payload)
 
     assert result["type"] == 4
-    assert "expired" in result["data"]["content"].lower() or "again" in result["data"]["content"].lower()
+    assert "again" in result["data"]["content"].lower()
 
 
 async def test_aco_create_step2_submit_reports_real_success_when_channel_post_works():
@@ -449,7 +447,7 @@ async def test_aco_create_step2_submit_reports_real_success_when_channel_post_wo
     settings.discord_bot_token = "tok"
     patches = []
 
-    class FakeClient(DraftAwareFakeClient):
+    class FakeClient:
         async def post(self, url, headers=None, json=None):
             if "aco_drops" in url:
                 return FakeRes(200, [{"id": "drop1", "title": "Test Drop", "chain": "Ethereum", "status": "open",
@@ -465,7 +463,7 @@ async def test_aco_create_step2_submit_reports_real_success_when_channel_post_wo
     with patch("main.httpx.AsyncClient") as MockClient:
         MockClient.return_value.__aenter__.return_value = FakeClient()
         payload = _payload(permissions="32", roles=[], components=_step2_components())
-        result = await main._handle_aco_create_step2_submit(payload, "draft1")
+        result = await main._handle_aco_create_step2_submit(payload)
 
     assert result["type"] == 5
     body = _webhook_patch_body(patches)
@@ -482,7 +480,7 @@ async def test_aco_create_step2_submit_stores_contract_checker_and_fund_required
     settings.discord_bot_token = "tok"
     inserted = {}
 
-    class FakeClient(DraftAwareFakeClient):
+    class FakeClient:
         async def post(self, url, headers=None, json=None):
             if "aco_drops" in url:
                 inserted.update(json)
@@ -499,7 +497,7 @@ async def test_aco_create_step2_submit_stores_contract_checker_and_fund_required
         MockClient.return_value.__aenter__.return_value = FakeClient()
         components = _step2_components(contract="0xabc", checker="https://opensea.io/x", fund_required="0.004 ETH")
         payload = _payload(permissions="32", roles=[], components=components)
-        await main._handle_aco_create_step2_submit(payload, "draft1")
+        await main._handle_aco_create_step2_submit(payload)
 
     assert inserted["contract_address"] == "0xabc"
     assert inserted["checker_url"] == "https://opensea.io/x"
@@ -512,7 +510,7 @@ async def test_aco_create_step2_submit_leaves_optional_fields_none_when_left_bla
     settings.discord_bot_token = "tok"
     inserted = {}
 
-    class FakeClient(DraftAwareFakeClient):
+    class FakeClient:
         async def post(self, url, headers=None, json=None):
             if "aco_drops" in url:
                 inserted.update(json)
@@ -529,7 +527,7 @@ async def test_aco_create_step2_submit_leaves_optional_fields_none_when_left_bla
         MockClient.return_value.__aenter__.return_value = FakeClient()
         components = _step2_components(contract="0xabc")  # checker/fund_required left blank
         payload = _payload(permissions="32", roles=[], components=components)
-        await main._handle_aco_create_step2_submit(payload, "draft1")
+        await main._handle_aco_create_step2_submit(payload)
 
     assert inserted["contract_address"] == "0xabc"
     assert inserted["checker_url"] is None
@@ -542,7 +540,7 @@ async def test_aco_create_step2_submit_reports_real_failure_when_channel_post_fa
     settings.discord_bot_token = "tok"
     patches = []
 
-    class FakeClient(DraftAwareFakeClient):
+    class FakeClient:
         async def post(self, url, headers=None, json=None):
             if "aco_drops" in url:
                 return FakeRes(200, [{"id": "drop1", "title": "Test Drop", "chain": "Ethereum", "status": "open",
@@ -558,7 +556,7 @@ async def test_aco_create_step2_submit_reports_real_failure_when_channel_post_fa
     with patch("main.httpx.AsyncClient") as MockClient:
         MockClient.return_value.__aenter__.return_value = FakeClient()
         payload = _payload(permissions="32", roles=[], components=_step2_components())
-        result = await main._handle_aco_create_step2_submit(payload, "draft1")
+        result = await main._handle_aco_create_step2_submit(payload)
 
     assert result["type"] == 5
     body = _webhook_patch_body(patches)
@@ -581,7 +579,7 @@ async def test_aco_create_step2_submit_mirrors_staff_controls_to_the_mod_channel
     posts = []
     patches = []
 
-    class FakeClient(DraftAwareFakeClient):
+    class FakeClient:
         async def post(self, url, headers=None, json=None):
             if "aco_drops" in url:
                 return FakeRes(200, [{"id": "drop1", "title": "Test Drop", "chain": "Ethereum", "status": "open",
@@ -598,7 +596,7 @@ async def test_aco_create_step2_submit_mirrors_staff_controls_to_the_mod_channel
     with patch("main.httpx.AsyncClient") as MockClient:
         MockClient.return_value.__aenter__.return_value = FakeClient()
         payload = _payload(permissions="32", roles=[], components=_step2_components())
-        await main._handle_aco_create_step2_submit(payload, "draft1")
+        await main._handle_aco_create_step2_submit(payload)
 
     # The mod channel also receives a separate plain-text audit-log entry
     # (see _aco_log) alongside the interactive staff-controls message
@@ -628,7 +626,7 @@ async def test_aco_create_step2_submit_falls_back_to_one_message_when_no_mod_cha
     settings.discord_bot_token = "tok"
     posts = []
 
-    class FakeClient(DraftAwareFakeClient):
+    class FakeClient:
         async def post(self, url, headers=None, json=None):
             if "aco_drops" in url:
                 return FakeRes(200, [{"id": "drop1", "title": "Test Drop", "chain": "Ethereum", "status": "open",
@@ -644,7 +642,7 @@ async def test_aco_create_step2_submit_falls_back_to_one_message_when_no_mod_cha
     with patch("main.httpx.AsyncClient") as MockClient:
         MockClient.return_value.__aenter__.return_value = FakeClient()
         payload = _payload(permissions="32", roles=[], components=_step2_components())
-        await main._handle_aco_create_step2_submit(payload, "draft1")
+        await main._handle_aco_create_step2_submit(payload)
 
     assert len(posts) == 1
     labels = [c["label"] for c in posts[0][1]["components"][0]["components"]]
@@ -1679,34 +1677,3 @@ async def test_cron_aco_key_cleanup_requires_valid_secret():
         assert exc.status_code == 401
 
 
-async def test_cleanup_stale_drop_drafts_removes_old_rows():
-    # Safety net for a staff member who opens step 1, never finishes step
-    # 2 - the draft has no other cleanup path since only step 2 itself
-    # ever reads or deletes one.
-    class FakeClient:
-        async def delete(self, url, headers=None, params=None):
-            assert "aco_drop_drafts" in url
-            return FakeRes(200, [{"id": "old1"}, {"id": "old2"}])
-
-    count = await main._aco_cleanup_stale_drop_drafts(FakeClient(), max_age_hours=1)
-    assert count == 2
-
-
-async def test_cron_aco_key_cleanup_also_sweeps_stale_drop_drafts():
-    settings.cron_secret = "realsecret"
-
-    class FakeClient:
-        async def get(self, url, headers=None, params=None):
-            return FakeRes(200, [])  # no expired key handoffs
-
-        async def delete(self, url, headers=None, params=None):
-            return FakeRes(200, [{"id": "old1"}])
-
-        async def patch(self, url, headers=None, params=None, json=None):
-            return FakeRes(200, {})
-
-    with patch("main.httpx.AsyncClient") as MockClient:
-        MockClient.return_value.__aenter__.return_value = FakeClient()
-        result = await main.cron_aco_key_cleanup(FakeRequest("Bearer realsecret"))
-
-    assert result["stale_drafts_removed"] == 1
