@@ -385,15 +385,18 @@ async def test_aco_drop_command_modal_stays_within_discords_five_row_cap():
     assert len(result["data"]["components"]) <= 5
 
 
-async def test_aco_create_step1_submit_makes_no_network_calls_and_opens_step2_with_its_own_fields():
-    # The actual fix: a modal response can never be deferred - it has to
-    # be Discord's immediate reply within ~3s - so step 1 used to blow
-    # that window on a cold start doing a Supabase write to stash a draft
-    # row. Now it makes zero network calls at all (proven here via
-    # ExplodingClient) and instead hands step 1's data forward as a
-    # pre-filled, hidden field on step 2's own modal - Contract, Checker,
-    # and Fund Required each get their own genuinely separate field too,
-    # instead of the one multi-line field staff kept filling in wrong.
+async def test_aco_create_step1_submit_makes_no_network_calls_and_offers_a_continue_button():
+    # The actual fix: Discord's own docs say MODAL is "Not available for
+    # MODAL_SUBMIT" interactions - a modal can NEVER chain directly into
+    # another modal, no matter how fast the response is (confirmed live:
+    # an earlier version of this handler returned a structurally valid
+    # type-9 modal in ~100-200ms and Discord's client STILL showed
+    # "Something went wrong" - a hard API rule, not a timing bug). So
+    # step 1 now answers with an ordinary message (zero network calls,
+    # proven here via ExplodingClient) plus a Continue button - clicking
+    # a button is a different interaction type that DOES support opening
+    # a modal, which is where step 2's own Contract/Checker/Fund Required
+    # fields actually get shown (see the continue-button test below).
     settings.discord_aco_staff_role_id = "role123"
     settings.discord_aco_channel_id = "chan1"
 
@@ -402,14 +405,14 @@ async def test_aco_create_step1_submit_makes_no_network_calls_and_opens_step2_wi
         payload = _payload(permissions="32", roles=[], components=_step1_components(title="Doll Club FCFS", chain="Ethereum", deadline="6h", profit="20% profit"))
         result = await main._handle_aco_create_step1_submit(payload)
 
-    assert result["type"] == 9  # opens step 2
-    assert result["data"]["custom_id"] == "acocreate_step2"
-    labels = [row["components"][0].get("label") for row in result["data"]["components"]]
-    assert labels == ["Contract Address", "Checker URL", "Fund Required In Wallet", "Do not edit - carries step 1 forward"]
-    assert len(result["data"]["components"]) <= 5
-    # The carried-forward field actually contains step 1's real values.
-    carry_value = result["data"]["components"][-1]["components"][0]["value"]
-    carried = main.json.loads(carry_value)
+    assert result["type"] == 4  # an ordinary ephemeral message, not a modal
+    assert result["data"]["flags"] == 64
+    labels = [c["label"] for c in result["data"]["components"][0]["components"]]
+    assert labels == ["Continue"]
+    assert result["data"]["components"][0]["components"][0]["custom_id"] == "acocreate_continue"
+    # Step 1's real values ride along in the message content itself, so
+    # the continue button can recover them with zero network calls too.
+    carried = main.json.loads(result["data"]["content"].split(main._ACO_CARRY_MARKER, 1)[1].rstrip("|").strip())
     assert carried["t"] == "Doll Club FCFS"
     assert carried["p"] == "20% profit"
 
@@ -421,6 +424,49 @@ async def test_aco_create_step1_submit_rejects_an_unparseable_countdown():
     result = await main._handle_aco_create_step1_submit(payload)
     assert result["type"] == 4
     assert "countdown" in result["data"]["content"].lower()
+
+
+def _continue_payload(message_content, **kwargs):
+    p = _payload(custom_id="acocreate_continue", components=None, **kwargs)
+    p["message"] = {"content": message_content}
+    return p
+
+
+async def test_continue_button_rejects_non_staff():
+    settings.discord_aco_staff_role_id = "role123"
+    result = await main._handle_aco_create_continue_button(_continue_payload("anything", permissions="0", roles=[]))
+    assert "staff only" in result["data"]["content"].lower()
+
+
+async def test_continue_button_opens_step2_modal_with_its_own_fields_and_no_network_calls():
+    # MESSAGE_COMPONENT interactions DO support a MODAL response (unlike
+    # MODAL_SUBMIT), so this is where step 2's Contract/Checker/Fund
+    # Required fields actually get shown - each genuinely its own field,
+    # not one multi-line field staff kept filling in wrong.
+    settings.discord_aco_staff_role_id = "role123"
+    carry = main.json.dumps({"t": "Doll Club FCFS", "c": "Ethereum", "d": "2026-12-25T18:00:00+00:00", "p": "20% profit", "u": "user1"})
+    message_content = f"**Step 1 saved.** Click **Continue**...\n\n||{main._ACO_CARRY_MARKER}{carry}||"
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = ExplodingClient()
+        result = await main._handle_aco_create_continue_button(_continue_payload(message_content, permissions="32", roles=[]))
+
+    assert result["type"] == 9
+    assert result["data"]["custom_id"] == "acocreate_step2"
+    labels = [row["components"][0].get("label") for row in result["data"]["components"]]
+    assert labels == ["Contract Address", "Checker URL", "Fund Required In Wallet", "Do not edit - carries step 1 forward"]
+    assert len(result["data"]["components"]) <= 5
+    carry_value = result["data"]["components"][-1]["components"][0]["value"]
+    carried = main.json.loads(carry_value)
+    assert carried["t"] == "Doll Club FCFS"
+    assert carried["p"] == "20% profit"
+
+
+async def test_continue_button_reports_missing_carry_data_clearly():
+    settings.discord_aco_staff_role_id = "role123"
+    result = await main._handle_aco_create_continue_button(_continue_payload("some unrelated message", permissions="32", roles=[]))
+    assert result["type"] == 4
+    assert "again" in result["data"]["content"].lower()
 
 
 async def test_aco_create_step2_submit_reports_malformed_carry_without_any_network_call():

@@ -1338,6 +1338,8 @@ async def _dispatch_interaction(payload: dict, itype) -> dict:
     if history_id.startswith("acowallets:"):
         _, _, drop_id = history_id.partition(":")
         return await _handle_aco_wallets_button(payload, drop_id)
+    if history_id == "acocreate_continue":
+        return await _handle_aco_create_continue_button(payload)
     if history_id.startswith("acoresolve:"):
         _, _, drop_id = history_id.partition(":")
         return await _handle_aco_resolve_button(payload, drop_id)
@@ -1759,18 +1761,58 @@ async def _handle_aco_create_step1_submit(payload: dict) -> dict:
     # getting wrong (mixing everything onto one line instead of one per
     # line, confirmed from a real drop that came out garbled that way).
     #
-    # Step 1's data carries forward as a pre-filled, JSON-encoded 4th
-    # field on step 2's modal instead of a database row - a real bug,
-    # confirmed live: a modal response can never be deferred (it has to
-    # be Discord's immediate reply, unlike every other interaction type
-    # this bot handles), so the network round-trip a database write
-    # requires was enough on its own, on a cold start, to blow past
-    # Discord's ~3s window and show staff "Something went wrong" even
-    # though the draft was written successfully a moment later. Discord
-    # already round-trips a modal's field values natively - encoding the
-    # carry-over as a pre-filled field needs zero network calls in this
-    # handler, so it can never be slow enough to time out.
+    # Discord's own docs are explicit that MODAL is "Not available for
+    # MODAL_SUBMIT" - you can NEVER respond to a modal submission with
+    # another modal, no matter how fast. An earlier version of this fix
+    # (returning type 9 straight from this handler) looked structurally
+    # valid and even round-tripped fine end-to-end in production logs,
+    # but Discord's own client still silently rejected it with the same
+    # "Something went wrong" - it's a hard API rule, not a timing bug.
+    # So this responds with an ordinary message plus a Continue button
+    # instead - MODAL_SUBMIT can. Clicking that button is a genuinely
+    # different interaction type (MESSAGE_COMPONENT), which DOES support
+    # a MODAL response (see _handle_aco_create_continue_button), so step
+    # 2's modal opens from there. Step 1's data still needs to survive
+    # that hop with zero network calls, so it rides along as a plainly
+    # visible marker line in this message's own content - Discord hands
+    # the full message object back on the button click, so reading it
+    # off payload["message"]["content"] needs no lookup either.
     carry = json.dumps({"t": draft["title"], "c": draft["chain"], "d": draft["deadline"], "p": draft["profit_note"], "u": draft["created_by"]})
+    return {
+        "type": 4,
+        "data": {
+            "flags": 64,
+            "content": (
+                "**Step 1 saved.** Click **Continue** to add Contract Address, Checker URL, "
+                "and Fund Required (all optional), then post the drop.\n\n"
+                f"||{_ACO_CARRY_MARKER}{carry}||"
+            ),
+            "components": [{"type": 1, "components": [
+                {"type": 2, "style": 1, "label": "Continue", "custom_id": "acocreate_continue"},
+            ]}],
+        },
+    }
+
+
+_ACO_CARRY_MARKER = "CARRY::"
+
+
+async def _handle_aco_create_continue_button(payload: dict) -> dict:
+    if not _is_aco_staff(payload):
+        return {"type": 4, "data": {"content": "ACO staff only.", "flags": 64}}
+    message_content = (payload.get("message") or {}).get("content", "")
+    if _ACO_CARRY_MARKER not in message_content:
+        return {"type": 4, "data": {
+            "content": "Couldn't find step 1's data on this message - please run `/aco-drop` again from the start.",
+            "flags": 64,
+        }}
+    carry = message_content.split(_ACO_CARRY_MARKER, 1)[1].rstrip("|").strip()
+
+    # Same non-deferrable-modal constraint as step 1: MODAL is allowed as
+    # a response to a MESSAGE_COMPONENT interaction (unlike MODAL_SUBMIT),
+    # but it still has to be the immediate, synchronous reply - so this
+    # carries step 1's data forward the same zero-network-call way, as a
+    # pre-filled hidden field on step 2's own modal.
     return {
         "type": 9,
         "data": {
