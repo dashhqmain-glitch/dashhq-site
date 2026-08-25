@@ -194,6 +194,39 @@ def test_embed_omits_optional_fields_when_absent():
     assert "Profit / Notes" not in names and "Contract" not in names and "Checker" not in names
 
 
+def test_embed_status_shows_closed_for_resolved_and_cancelled():
+    # Direct staff request: "Open" must become "Closed", not silently stay
+    # readable as just "Resolved"/"Cancelled" with no obvious "done" word.
+    resolved_status = next(f for f in main._aco_drop_embed(_drop(status="resolved"), 0, 0)["fields"] if f["name"] == "Status")
+    cancelled_status = next(f for f in main._aco_drop_embed(_drop(status="cancelled"), 0, 0)["fields"] if f["name"] == "Status")
+    open_status = next(f for f in main._aco_drop_embed(_drop(status="open"), 0, 0)["fields"] if f["name"] == "Status")
+    assert "Closed" in resolved_status["value"] and "Resolved" in resolved_status["value"]
+    assert "Closed" in cancelled_status["value"] and "Cancelled" in cancelled_status["value"]
+    assert open_status["value"] == "🟢 Open"
+
+
+def test_embed_includes_fund_required_when_set():
+    embed = main._aco_drop_embed(_drop(fund_required="0.004 ETH"), 0, 0)
+    fund_field = next(f for f in embed["fields"] if "Fund Required" in f["name"])
+    assert fund_field["value"] == "0.004 ETH"
+
+
+def test_embed_omits_fund_required_when_absent():
+    embed = main._aco_drop_embed(_drop(fund_required=None), 0, 0)
+    names = [f["name"] for f in embed["fields"]]
+    assert not any("Fund Required" in n for n in names)
+
+
+def test_embed_has_spacer_fields_between_sections_for_breathing_room():
+    # Direct staff complaint: the embed read as one dense, clustered block.
+    # A drop with every optional field present should have real blank
+    # spacer fields separating each section, not just fields back to back.
+    d = _drop(fund_required="0.004 ETH", profit_note="30% Profit", contract_address="0xabc", checker_url="https://x")
+    embed = main._aco_drop_embed(d, ticket_count=1, member_count=1)
+    spacer_count = sum(1 for f in embed["fields"] if f == main._ACO_EMBED_SPACER)
+    assert spacer_count >= 3  # before Fund Required, before Profit/Notes, before Contract+Checker, before Wallets Submitted
+
+
 def test_open_drop_staff_only_view_has_three_buttons():
     # This is the mirrored staff-controls message (a separate Discord
     # message from the public announcement) - it never carries Submit
@@ -279,13 +312,25 @@ async def test_aco_drop_command_allows_staff_role_holder():
     assert result["data"]["custom_id"] == "acocreate"
 
 
-def _create_submit_components():
+async def test_aco_drop_command_modal_stays_within_discords_five_row_cap():
+    # Discord hard-caps a modal at 5 action rows - Fund Required had to
+    # ride along on an existing field (contract_and_checker) rather than
+    # get its own row, or this would silently fail to open at all.
+    settings.discord_aco_staff_role_id = "role123"
+    settings.discord_aco_channel_id = "chan1"
+    result = await main._handle_aco_drop_command(_payload(permissions="0", roles=["role123"]))
+    assert len(result["data"]["components"]) <= 5
+    last_row_label = result["data"]["components"][-1]["components"][0]["label"]
+    assert "Fund" in last_row_label
+
+
+def _create_submit_components(contract_and_checker=""):
     return [
         {"components": [{"custom_id": "title", "value": "Test Drop"}]},
         {"components": [{"custom_id": "chain", "value": "Ethereum"}]},
         {"components": [{"custom_id": "deadline", "value": "6h"}]},
         {"components": [{"custom_id": "profit", "value": "30% profit"}]},
-        {"components": [{"custom_id": "contract_and_checker", "value": ""}]},
+        {"components": [{"custom_id": "contract_and_checker", "value": contract_and_checker}]},
     ]
 
 
@@ -319,6 +364,67 @@ async def test_aco_create_submit_reports_real_success_when_channel_post_works():
     body = _webhook_patch_body(patches)
     assert "posted" in body["embeds"][0]["title"].lower()
     assert "⚠️" not in body["embeds"][0]["title"]
+
+
+async def test_aco_create_submit_parses_fund_required_as_the_third_line():
+    # contract_and_checker is overloaded to carry a 3rd line (Fund
+    # Required) since Discord's 5-row modal cap left no room for its own
+    # field - confirms the positional parsing actually lines up.
+    settings.discord_aco_staff_role_id = "role123"
+    settings.discord_aco_channel_id = "chan1"
+    settings.discord_bot_token = "tok"
+    inserted = {}
+
+    class FakeClient:
+        async def post(self, url, headers=None, json=None):
+            if "aco_drops" in url:
+                inserted.update(json)
+                return FakeRes(200, [{"id": "drop1", "title": "Test Drop", "chain": "Ethereum", "status": "open",
+                                       "deadline": "2026-12-25T18:00:00+00:00", "fund_required": json.get("fund_required")}])
+            if "/messages" in url:
+                return FakeRes(200, {"id": "msg1"})
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        components = _create_submit_components("0xabc\nhttps://opensea.io/x\n0.004 ETH")
+        payload = _payload(permissions="32", roles=[], components=components)
+        await main._handle_aco_create_submit(payload)
+
+    assert inserted["contract_address"] == "0xabc"
+    assert inserted["checker_url"] == "https://opensea.io/x"
+    assert inserted["fund_required"] == "0.004 ETH"
+
+
+async def test_aco_create_submit_fund_required_is_none_when_only_two_lines_given():
+    settings.discord_aco_staff_role_id = "role123"
+    settings.discord_aco_channel_id = "chan1"
+    settings.discord_bot_token = "tok"
+    inserted = {}
+
+    class FakeClient:
+        async def post(self, url, headers=None, json=None):
+            if "aco_drops" in url:
+                inserted.update(json)
+                return FakeRes(200, [{"id": "drop1", "title": "Test Drop", "chain": "Ethereum", "status": "open",
+                                       "deadline": "2026-12-25T18:00:00+00:00"}])
+            if "/messages" in url:
+                return FakeRes(200, {"id": "msg1"})
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        components = _create_submit_components("0xabc\nhttps://opensea.io/x")
+        payload = _payload(permissions="32", roles=[], components=components)
+        await main._handle_aco_create_submit(payload)
+
+    assert inserted["fund_required"] is None
 
 
 async def test_aco_create_submit_reports_real_failure_when_channel_post_fails():

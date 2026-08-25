@@ -434,6 +434,13 @@ create table if not exists aco_drops (
 alter table aco_drops add column if not exists discord_staff_channel_id text;
 alter table aco_drops add column if not exists discord_staff_message_id text;
 
+-- How much the member needs funded into the burner wallet before the team
+-- can bot it (e.g. "0.004 ETH") - free text on purpose, since the real
+-- number depends on mint price + gas headroom the staff creating the drop
+-- already has to reason about anyway. Purely informational for staff
+-- reading the embed, not a balance the bot tracks or moves itself.
+alter table aco_drops add column if not exists fund_required text;
+
 create index if not exists aco_drops_status_idx on aco_drops (status);
 
 alter table aco_drops enable row level security;

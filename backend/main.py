@@ -1535,16 +1535,34 @@ def _aco_deadline_countdown(deadline_iso: str | None) -> str:
     return f"<t:{unix}:F> (<t:{unix}:R>)"
 
 
+_ACO_EMBED_SPACER = {"name": "​", "value": "​", "inline": False}
+
+
 def _aco_drop_embed(drop: dict, ticket_count: int, member_count: int, *, show_wallets: bool = True) -> dict:
     status = drop.get("status", "open")
-    status_label = {"open": "🟢 Open", "resolved": "✅ Resolved", "cancelled": "❌ Cancelled"}.get(status, status)
+    # "Closed" appears in both non-open labels on purpose (direct staff
+    # request) - resolved/cancelled still carry their own icon/word so the
+    # distinction isn't lost, but "is this drop still open" needs to read
+    # at a glance without parsing "Resolved" vs "Cancelled" as synonyms
+    # for done.
+    status_label = {"open": "🟢 Open", "resolved": "🔒 Closed (Resolved)", "cancelled": "🔒 Closed (Cancelled)"}.get(status, status)
     fields = [
         {"name": "Chain", "value": drop.get("chain") or "-", "inline": True},
         {"name": "⏳ Countdown", "value": _aco_deadline_countdown(drop.get("deadline")), "inline": True},
         {"name": "Status", "value": status_label, "inline": True},
     ]
+    # Blank spacer fields between logical groups (zero-width space, the
+    # standard Discord trick - an empty name/value string renders nothing
+    # at all, this is the only way to actually get a field to show) so the
+    # embed reads as distinct sections instead of one dense block of text.
+    if drop.get("fund_required"):
+        fields.append(_ACO_EMBED_SPACER)
+        fields.append({"name": "💰 Fund Required In Wallet", "value": drop["fund_required"], "inline": False})
     if drop.get("profit_note"):
+        fields.append(_ACO_EMBED_SPACER)
         fields.append({"name": "Profit / Notes", "value": _trunc(drop["profit_note"], 500), "inline": False})
+    if drop.get("contract_address") or drop.get("checker_url"):
+        fields.append(_ACO_EMBED_SPACER)
     if drop.get("contract_address"):
         fields.append({"name": "Contract", "value": f"`{drop['contract_address']}`", "inline": False})
     if drop.get("checker_url"):
@@ -1557,6 +1575,7 @@ def _aco_drop_embed(drop: dict, ticket_count: int, member_count: int, *, show_wa
     # IS the staff view in that case, so hiding it there would just lose
     # the count entirely rather than make it more private).
     if show_wallets:
+        fields.append(_ACO_EMBED_SPACER)
         fields.append({"name": "🎟️ Wallets Submitted", "value": f"**{ticket_count}** ({member_count} member(s))", "inline": True})
     return {
         "author": _ACO_AUTHOR,
@@ -1677,8 +1696,14 @@ async def _handle_aco_drop_command(payload: dict) -> dict:
                     "placeholder": "e.g. 30% Profit. Mega Heavy OA so expect some fails.",
                 }]},
                 {"type": 1, "components": [{
+                    # Discord caps a modal at 5 action rows and this is
+                    # already the 5th - Fund Required rides along as a
+                    # 3rd line here rather than displacing an existing
+                    # field. Order matters: _handle_aco_create_submit reads
+                    # these back positionally.
                     "type": 4, "custom_id": "contract_and_checker", "style": 2,
-                    "label": "Contract + Checker URL (one per line)", "max_length": 300, "required": False,
+                    "label": "Contract / Checker / Fund Req (1 per line)", "max_length": 350, "required": False,
+                    "placeholder": "0x...\nhttps://opensea.io/collection/...\n0.004 ETH",
                 }]},
             ],
         },
@@ -1703,6 +1728,7 @@ async def _handle_aco_create_submit(payload: dict) -> dict:
     extra_lines = [l.strip() for l in values.get("contract_and_checker", "").split("\n") if l.strip()]
     contract_address = extra_lines[0] if extra_lines else None
     checker_url = extra_lines[1] if len(extra_lines) > 1 else None
+    fund_required = extra_lines[2] if len(extra_lines) > 2 else None
 
     member_user = payload.get("member", {}).get("user", {})
     row = {
@@ -1712,6 +1738,7 @@ async def _handle_aco_create_submit(payload: dict) -> dict:
         "profit_note": values.get("profit", "")[:500] or None,
         "contract_address": contract_address,
         "checker_url": checker_url,
+        "fund_required": fund_required[:100] if fund_required else None,
         "created_by": member_user.get("id", ""),
         "discord_channel_id": settings.discord_aco_channel_id,
     }
