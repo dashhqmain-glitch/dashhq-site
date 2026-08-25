@@ -7251,6 +7251,8 @@ _NFT_INTEL_ALCHEMY_CHAINS = {
     "polygon": "polygon-mainnet",
     "optimism": "opt-mainnet",
     "arbitrum": "arb-mainnet",
+    "robinhood": "robinhood-mainnet",
+    "ink": "ink-mainnet",
 }
 
 
