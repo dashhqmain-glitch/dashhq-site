@@ -1235,16 +1235,37 @@ async def discord_interactions(request: Request):
     if itype == 1:  # PING — Discord sends this to validate the endpoint URL
         return {"type": 1}
 
+    # TEMP DIAGNOSTIC (remove once the /aco-drop modal timeout is root-caused):
+    # a Discord interaction id is a snowflake, which embeds the exact
+    # millisecond Discord created the interaction - decoding it gives the
+    # real end-to-end latency (cold start + everything else) up to the
+    # moment we're about to answer, which is the number that actually
+    # decides whether Discord's client shows "Something went wrong" for a
+    # non-deferrable modal response, not just our own handler's internal time.
+    interaction_id = payload.get("id")
+    created_ms = None
+    if interaction_id:
+        try:
+            created_ms = (int(interaction_id) >> 22) + 1420070400000
+        except (ValueError, TypeError):
+            pass
+
     # Safety net: whatever this specific interaction ends up doing, a bug
     # anywhere in that path must never leave Discord with no response at
     # all ("This interaction failed", visible to whoever ran the command) -
     # always fall back to a clean, ephemeral, generic error instead of a
     # raw exception bubbling up to FastAPI's default handler.
     try:
-        return await _dispatch_interaction(payload, itype)
+        result = await _dispatch_interaction(payload, itype)
     except Exception:
         logger.exception("Unhandled error dispatching Discord interaction (type=%s)", itype)
-        return {"type": 4, "data": {"content": "⚠️ Something went wrong running that. Please try again in a moment.", "flags": 64}}
+        result = {"type": 4, "data": {"content": "⚠️ Something went wrong running that. Please try again in a moment.", "flags": 64}}
+
+    if created_ms is not None:
+        elapsed_ms = time.time() * 1000 - created_ms
+        modal_id = (payload.get("data") or {}).get("custom_id")
+        logger.info("interaction diag: type=%s modal=%s response_type=%s elapsed_ms=%.0f", itype, modal_id, result.get("type"), elapsed_ms)
+    return result
 
 
 async def _dispatch_interaction(payload: dict, itype) -> dict:
