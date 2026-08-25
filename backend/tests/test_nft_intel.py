@@ -24,6 +24,70 @@ def _mint_event(to=SEED_ADDR, from_addr=main._NFT_INTEL_NULL_ADDRESS, event_type
     }
 
 
+# ── _alchemy_transfer_to_event ──────────────────────────────────────────────
+
+def test_alchemy_transfer_converts_hex_token_id_to_decimal_string():
+    transfer = {
+        "from": main._NFT_INTEL_NULL_ADDRESS, "to": SEED_ADDR,
+        "tokenId": "0x00000000000000000000000000000000000000000000000000000000000015b1",
+        "rawContract": {"address": "0xabc"},
+    }
+    event = main._alchemy_transfer_to_event(transfer, "ethereum")
+    assert event["nft"]["identifier"] == str(int("15b1", 16))  # 5553
+    assert event["nft"]["contract"] == "0xabc"
+    assert event["chain"] == "ethereum"
+    assert event["from_address"] == main._NFT_INTEL_NULL_ADDRESS
+    assert event["to_address"] == SEED_ADDR
+
+
+def test_alchemy_transfer_handles_plain_integer_token_id():
+    # Not every response necessarily hex-encodes tokenId - handle a plain
+    # int/string the same as a "0x..." one rather than assuming one shape.
+    transfer = {"from": main._NFT_INTEL_NULL_ADDRESS, "to": SEED_ADDR, "tokenId": "42", "rawContract": {"address": "0xabc"}}
+    event = main._alchemy_transfer_to_event(transfer, "ethereum")
+    assert event["nft"]["identifier"] == "42"
+
+
+def test_alchemy_transfer_returns_none_when_contract_or_token_id_missing():
+    assert main._alchemy_transfer_to_event({"from": "0x0", "to": SEED_ADDR, "tokenId": "0x1", "rawContract": {}}, "ethereum") is None
+    assert main._alchemy_transfer_to_event({"from": "0x0", "to": SEED_ADDR, "rawContract": {"address": "0xabc"}}, "ethereum") is None
+
+
+# ── _alchemy_rpc / _alchemy_get_nft_metadata: safe no-op without a key ──────
+
+async def test_alchemy_rpc_returns_none_without_a_configured_key_and_makes_no_network_call():
+    settings.alchemy_api_key = ""
+
+    class ExplodingClient:
+        async def post(self, *a, **kw):
+            raise AssertionError("must not make a network call with no API key configured")
+
+    result = await main._alchemy_rpc(ExplodingClient(), "ethereum", "alchemy_getAssetTransfers", {})
+    assert result is None
+
+
+async def test_alchemy_rpc_returns_none_for_an_unknown_chain():
+    settings.alchemy_api_key = "testkey"
+
+    class ExplodingClient:
+        async def post(self, *a, **kw):
+            raise AssertionError("must not make a network call for a chain with no subdomain mapping")
+
+    result = await main._alchemy_rpc(ExplodingClient(), "some-unmapped-chain", "alchemy_getAssetTransfers", {})
+    assert result is None
+
+
+async def test_alchemy_get_nft_metadata_returns_none_without_a_configured_key():
+    settings.alchemy_api_key = ""
+
+    class ExplodingClient:
+        async def get(self, *a, **kw):
+            raise AssertionError("must not make a network call with no API key configured")
+
+    result = await main._alchemy_get_nft_metadata(ExplodingClient(), "ethereum", "0xabc", "1")
+    assert result is None
+
+
 # ── _nft_intel_explorer_url ────────────────────────────────────────────────
 
 def test_explorer_url_known_chain():
@@ -145,17 +209,27 @@ async def test_cron_nft_intel_noop_when_channel_not_configured():
     assert "not configured" in result["reason"]
 
 
-async def test_cron_nft_intel_skips_tick_when_opensea_unhealthy():
+async def test_cron_nft_intel_noop_when_alchemy_key_not_configured():
     settings.nft_cron_secret = "realsecret"
     settings.discord_nft_intel_channel_id = "intel-chan"
+    settings.alchemy_api_key = ""
+    result = await main.cron_nft_intel(FakeRequest("Bearer realsecret"))
+    assert result["polled"] == 0
+    assert "Alchemy" in result["reason"]
+
+
+async def test_cron_nft_intel_skips_tick_when_alchemy_unhealthy():
+    settings.nft_cron_secret = "realsecret"
+    settings.discord_nft_intel_channel_id = "intel-chan"
+    settings.alchemy_api_key = "testkey"
 
     async def fake_unhealthy(client):
         return False
 
     async def fake_batch(client):
-        raise AssertionError("should never fetch a batch when OpenSea is unhealthy")
+        raise AssertionError("should never fetch a batch when Alchemy is unhealthy")
 
-    with patch.object(main, "_opensea_healthy", new=fake_unhealthy), \
+    with patch.object(main, "_alchemy_healthy", new=fake_unhealthy), \
          patch.object(main, "_nft_intel_poll_batch", new=fake_batch):
         async with main.httpx.AsyncClient() as client:
             result = await main.cron_nft_intel(FakeRequest("Bearer realsecret"))
@@ -169,6 +243,7 @@ async def test_cron_nft_intel_skips_tick_when_opensea_unhealthy():
 async def test_cron_nft_intel_detects_a_new_mint_and_alerts_once():
     settings.nft_cron_secret = "realsecret"
     settings.discord_nft_intel_channel_id = "intel-chan"
+    settings.alchemy_api_key = "testkey"
     posted = []
     seen_store = set()
     polled_marks = []
@@ -188,6 +263,9 @@ async def test_cron_nft_intel_detects_a_new_mint_and_alerts_once():
     async def fake_mark_seen(client, chain, contract, token_id, wallet, slug):
         seen_store.add((chain, contract, token_id))
 
+    async def fake_metadata(client, chain, contract, token_id):
+        return {"name": "Cool #1", "image": {"cachedUrl": "https://img"}, "contract": {"openSeaMetadata": {"collectionName": "cool-collection"}}}
+
     async def fake_post(client, channel_id, embed, content=None):
         posted.append((channel_id, embed))
         return True
@@ -198,17 +276,18 @@ async def test_cron_nft_intel_detects_a_new_mint_and_alerts_once():
     async def fake_tracked_count(client):
         return 1
 
-    async def fake_discover(client, slug, exclude):
+    async def fake_discover(client, chain, contract, exclude):
         return []
 
-    async def fake_add_co_minters(client, addresses, slug):
+    async def fake_add_co_minters(client, addresses, label):
         return 0
 
-    with patch.object(main, "_opensea_healthy", new=fake_healthy), \
+    with patch.object(main, "_alchemy_healthy", new=fake_healthy), \
          patch.object(main, "_nft_intel_poll_batch", new=fake_batch), \
          patch.object(main, "_nft_intel_wallet_transfer_events", new=fake_events), \
          patch.object(main, "_nft_intel_seen", new=fake_seen), \
          patch.object(main, "_nft_intel_mark_seen", new=fake_mark_seen), \
+         patch.object(main, "_alchemy_get_nft_metadata", new=fake_metadata), \
          patch.object(main, "_post_channel_message", new=fake_post), \
          patch.object(main, "_nft_intel_mark_polled", new=fake_mark_polled), \
          patch.object(main, "_nft_intel_tracked_count", new=fake_tracked_count), \
@@ -221,12 +300,16 @@ async def test_cron_nft_intel_detects_a_new_mint_and_alerts_once():
     assert result["alerted"] == 1
     assert len(posted) == 1
     assert posted[0][0] == "intel-chan"
+    # Enrichment landed in the posted embed - proves the metadata lookup
+    # actually feeds the alert, not just gets called and discarded.
+    assert "Cool #1" in posted[0][1]["title"]
     assert polled_marks == [SEED_ADDR]
 
 
 async def test_cron_nft_intel_never_reposts_an_already_seen_mint():
     settings.nft_cron_secret = "realsecret"
     settings.discord_nft_intel_channel_id = "intel-chan"
+    settings.alchemy_api_key = "testkey"
     posted = []
 
     async def fake_healthy(client):
@@ -248,7 +331,7 @@ async def test_cron_nft_intel_never_reposts_an_already_seen_mint():
     async def fake_mark_polled(client, address):
         return None
 
-    with patch.object(main, "_opensea_healthy", new=fake_healthy), \
+    with patch.object(main, "_alchemy_healthy", new=fake_healthy), \
          patch.object(main, "_nft_intel_poll_batch", new=fake_batch), \
          patch.object(main, "_nft_intel_wallet_transfer_events", new=fake_events), \
          patch.object(main, "_nft_intel_seen", new=fake_seen), \
@@ -266,6 +349,7 @@ async def test_cron_nft_intel_ignores_non_mint_transfer_events():
     # never be mistaken for a mint and alerted on.
     settings.nft_cron_secret = "realsecret"
     settings.discord_nft_intel_channel_id = "intel-chan"
+    settings.alchemy_api_key = "testkey"
     posted = []
 
     async def fake_healthy(client):
@@ -284,7 +368,7 @@ async def test_cron_nft_intel_ignores_non_mint_transfer_events():
     async def fake_mark_polled(client, address):
         return None
 
-    with patch.object(main, "_opensea_healthy", new=fake_healthy), \
+    with patch.object(main, "_alchemy_healthy", new=fake_healthy), \
          patch.object(main, "_nft_intel_poll_batch", new=fake_batch), \
          patch.object(main, "_nft_intel_wallet_transfer_events", new=fake_events), \
          patch.object(main, "_post_channel_message", new=fake_post), \
@@ -302,6 +386,7 @@ async def test_cron_nft_intel_triggers_co_minter_discovery_only_for_seed_wallets
     # unboundedly off nothing but the graph's own momentum.
     settings.nft_cron_secret = "realsecret"
     settings.discord_nft_intel_channel_id = "intel-chan"
+    settings.alchemy_api_key = "testkey"
     discover_calls = []
 
     async def fake_healthy(client):
@@ -319,21 +404,25 @@ async def test_cron_nft_intel_triggers_co_minter_discovery_only_for_seed_wallets
     async def fake_mark_seen(client, chain, contract, token_id, wallet, slug):
         return None
 
+    async def fake_metadata(client, chain, contract, token_id):
+        return None
+
     async def fake_post(client, channel_id, embed, content=None):
         return True
 
     async def fake_mark_polled(client, address):
         return None
 
-    async def fake_discover(client, slug, exclude):
-        discover_calls.append(slug)
+    async def fake_discover(client, chain, contract, exclude):
+        discover_calls.append(contract)
         return []
 
-    with patch.object(main, "_opensea_healthy", new=fake_healthy), \
+    with patch.object(main, "_alchemy_healthy", new=fake_healthy), \
          patch.object(main, "_nft_intel_poll_batch", new=fake_batch), \
          patch.object(main, "_nft_intel_wallet_transfer_events", new=fake_events), \
          patch.object(main, "_nft_intel_seen", new=fake_seen), \
          patch.object(main, "_nft_intel_mark_seen", new=fake_mark_seen), \
+         patch.object(main, "_alchemy_get_nft_metadata", new=fake_metadata), \
          patch.object(main, "_post_channel_message", new=fake_post), \
          patch.object(main, "_nft_intel_mark_polled", new=fake_mark_polled), \
          patch.object(main, "_nft_intel_discover_co_minters", new=fake_discover):
@@ -346,6 +435,7 @@ async def test_cron_nft_intel_triggers_co_minter_discovery_only_for_seed_wallets
 async def test_cron_nft_intel_stops_discovering_co_minters_once_cap_reached():
     settings.nft_cron_secret = "realsecret"
     settings.discord_nft_intel_channel_id = "intel-chan"
+    settings.alchemy_api_key = "testkey"
     discover_calls = []
 
     async def fake_healthy(client):
@@ -363,6 +453,9 @@ async def test_cron_nft_intel_stops_discovering_co_minters_once_cap_reached():
     async def fake_mark_seen(client, chain, contract, token_id, wallet, slug):
         return None
 
+    async def fake_metadata(client, chain, contract, token_id):
+        return None
+
     async def fake_post(client, channel_id, embed, content=None):
         return True
 
@@ -372,15 +465,16 @@ async def test_cron_nft_intel_stops_discovering_co_minters_once_cap_reached():
     async def fake_tracked_count(client):
         return main._NFT_INTEL_MAX_TRACKED_WALLETS  # already at the ceiling
 
-    async def fake_discover(client, slug, exclude):
-        discover_calls.append(slug)
+    async def fake_discover(client, chain, contract, exclude):
+        discover_calls.append(contract)
         return []
 
-    with patch.object(main, "_opensea_healthy", new=fake_healthy), \
+    with patch.object(main, "_alchemy_healthy", new=fake_healthy), \
          patch.object(main, "_nft_intel_poll_batch", new=fake_batch), \
          patch.object(main, "_nft_intel_wallet_transfer_events", new=fake_events), \
          patch.object(main, "_nft_intel_seen", new=fake_seen), \
          patch.object(main, "_nft_intel_mark_seen", new=fake_mark_seen), \
+         patch.object(main, "_alchemy_get_nft_metadata", new=fake_metadata), \
          patch.object(main, "_post_channel_message", new=fake_post), \
          patch.object(main, "_nft_intel_mark_polled", new=fake_mark_polled), \
          patch.object(main, "_nft_intel_tracked_count", new=fake_tracked_count), \

@@ -7222,10 +7222,10 @@ async def nft_poll(request: Request):
 # the same attention.
 _NFT_INTEL_COLOR = 0x8B5CF6  # violet - visually distinct from ACO blue, NFT Scope's traffic-light tiers
 _NFT_INTEL_NULL_ADDRESS = "0x0000000000000000000000000000000000000000"
-_NFT_INTEL_WALLET_BATCH_SIZE = 12  # wallets checked per tick - bounds each tick's OpenSea call volume so this stays shared-safe alongside NFT Scope
-_NFT_INTEL_EVENTS_PER_WALLET = 15  # recent transfer events fetched per wallet per tick
-_NFT_INTEL_CO_MINTER_LOOKBACK = 30  # recent collection-wide mint events scanned when discovering co-minters off a fresh hit
-_NFT_INTEL_MAX_TRACKED_WALLETS = 300  # co-minter discovery ceiling - unbounded auto-growth would eventually turn every tick into a huge fan-out and blow the shared OpenSea budget
+_NFT_INTEL_WALLET_BATCH_SIZE = 12  # wallets checked per tick - bounds each tick's Alchemy call volume
+_NFT_INTEL_EVENTS_PER_WALLET = 15  # recent mint transfers fetched per wallet, per chain, per tick
+_NFT_INTEL_CO_MINTER_LOOKBACK = 30  # recent contract-wide mint transfers scanned when discovering co-minters off a fresh hit
+_NFT_INTEL_MAX_TRACKED_WALLETS = 300  # co-minter discovery ceiling - unbounded auto-growth would eventually turn every tick into a huge fan-out
 _NFT_INTEL_EXPLORER_BASE = {
     "ethereum": "etherscan.io",
     "base": "basescan.org",
@@ -7237,11 +7237,87 @@ _NFT_INTEL_EXPLORER_BASE = {
     "zora": "explorer.zora.energy",
     "blast": "blastscan.io",
 }
+# Reads mint detection straight from the chain via Alchemy, deliberately
+# NOT through OpenSea's own API - OpenSea only surfaces what its own
+# indexer has caught up to, which can meaningfully lag a fresh contract's
+# actual on-chain mints. Alchemy's subdomain naming per chain; a chain
+# missing here, or not enabled on the given API key, is skipped gracefully
+# (see _alchemy_rpc) rather than failing the whole tick. Candidate list,
+# not a guarantee every one is enabled - /nft-intel-wallets and the cron's
+# own logs are how to tell which chains are actually live for a given key.
+_NFT_INTEL_ALCHEMY_CHAINS = {
+    "ethereum": "eth-mainnet",
+    "base": "base-mainnet",
+    "polygon": "polygon-mainnet",
+    "optimism": "opt-mainnet",
+    "arbitrum": "arb-mainnet",
+}
 
 
 def _nft_intel_explorer_url(chain: str | None, contract: str) -> str | None:
     base = _NFT_INTEL_EXPLORER_BASE.get((chain or "").lower())
     return f"https://{base}/token/{contract}" if base else None
+
+
+async def _alchemy_rpc(client: httpx.AsyncClient, chain: str, method: str, params: dict) -> dict | None:
+    subdomain = _NFT_INTEL_ALCHEMY_CHAINS.get(chain)
+    if not settings.alchemy_api_key or not subdomain:
+        return None
+    try:
+        res = await client.post(
+            f"https://{subdomain}.g.alchemy.com/v2/{settings.alchemy_api_key}",
+            json={"jsonrpc": "2.0", "id": 1, "method": method, "params": [params]},
+        )
+    except httpx.HTTPError:
+        logger.exception("nft-intel: Alchemy request failed (%s, %s)", chain, method)
+        return None
+    if res.status_code == 429:
+        # Ground-truth rate-limit signal, same shared-state pattern
+        # _opensea_get already uses for OpenSea - lets a future tick back
+        # off automatically instead of hammering into an active limit.
+        try:
+            await _nft_alert_state_set(client, "__alchemy__", "rate_limited", 0)
+        except httpx.HTTPError:
+            pass
+        return None
+    if res.status_code != 200:
+        # A chain simply not enabled on this API key (e.g. a 403) is not
+        # an error worth logging on every tick - just means this chain
+        # is unreachable for now, skip it and keep going.
+        return None
+    data = res.json()
+    if "error" in data:
+        return None
+    return data.get("result")
+
+
+async def _alchemy_healthy(client: httpx.AsyncClient) -> bool:
+    try:
+        state = await _nft_alert_state_get(client, "__alchemy__", "rate_limited")
+    except httpx.HTTPError:
+        return True
+    return _nft_alert_cooled_down(state, cooldown_seconds=_NFT_SCOPE_RATE_LIMIT_BACKOFF_SECONDS)
+
+
+async def _alchemy_get_nft_metadata(client: httpx.AsyncClient, chain: str, contract: str, token_id: str) -> dict | None:
+    # Separate from alchemy_getAssetTransfers on purpose - the transfer
+    # feed alone carries no name/image/collection info, only the raw
+    # transfer. Only called for a genuinely NEW mint (see cron_nft_intel),
+    # never on every poll tick, so this extra call is cheap in practice.
+    subdomain = _NFT_INTEL_ALCHEMY_CHAINS.get(chain)
+    if not settings.alchemy_api_key or not subdomain:
+        return None
+    try:
+        res = await client.get(
+            f"https://{subdomain}.g.alchemy.com/nft/v3/{settings.alchemy_api_key}/getNFTMetadata",
+            params={"contractAddress": contract, "tokenId": token_id, "refreshCache": "false"},
+        )
+    except httpx.HTTPError:
+        logger.exception("nft-intel: Alchemy metadata lookup failed (%s, %s, %s)", chain, contract, token_id)
+        return None
+    if res.status_code != 200:
+        return None
+    return res.json()
 
 
 async def _nft_intel_seen(client: httpx.AsyncClient, chain: str, contract: str, token_id: str) -> bool:
@@ -7262,20 +7338,61 @@ async def _nft_intel_mark_seen(client: httpx.AsyncClient, chain: str, contract: 
     )
 
 
+def _alchemy_transfer_to_event(transfer: dict, chain: str) -> dict | None:
+    # Normalizes an Alchemy alchemy_getAssetTransfers row into the same
+    # shape the rest of NFT Intel already works with (originally shaped
+    # around OpenSea's event schema) - keeps _nft_intel_is_mint and
+    # _nft_intel_embed entirely unaware of which data source is behind
+    # them. name/image/collection are left unset here on purpose - the
+    # transfer feed alone doesn't carry them; see _alchemy_get_nft_metadata
+    # for the enrichment step, only ever called for a genuinely new mint.
+    contract = (transfer.get("rawContract") or {}).get("address")
+    raw_token_id = transfer.get("tokenId")
+    if not contract or raw_token_id is None:
+        return None
+    try:
+        token_id = str(int(raw_token_id, 16)) if isinstance(raw_token_id, str) and raw_token_id.startswith("0x") else str(raw_token_id)
+    except ValueError:
+        return None
+    return {
+        "event_type": "transfer",
+        "chain": chain,
+        "from_address": transfer.get("from"),
+        "to_address": transfer.get("to"),
+        "nft": {"chain": chain, "contract": contract, "identifier": token_id, "collection": None, "name": None, "image_url": None},
+    }
+
+
 async def _nft_intel_wallet_transfer_events(client: httpx.AsyncClient, address: str) -> list[dict]:
-    # No chain filter on purpose - the account-events endpoint already
-    # covers every chain the wallet has activity on, which is exactly the
-    # "post alerts as mints happen on different chains" requirement with
-    # no per-chain special-casing needed.
-    data = await _opensea_get(client, f"/events/accounts/{address}", {"event_type": "transfer", "limit": _NFT_INTEL_EVENTS_PER_WALLET})
-    if not data:
-        return []
-    return data.get("asset_events", [])
+    # Fans out across every chain this key has enabled (see
+    # _NFT_INTEL_ALCHEMY_CHAINS) - a chain that isn't enabled or hiccups
+    # just returns nothing from _alchemy_rpc rather than failing the
+    # others, so "post alerts as mints happen on different chains" degrades
+    # gracefully instead of breaking outright if one chain is unavailable.
+    events = []
+    for chain in _NFT_INTEL_ALCHEMY_CHAINS:
+        result = await _alchemy_rpc(client, chain, "alchemy_getAssetTransfers", {
+            "fromAddress": _NFT_INTEL_NULL_ADDRESS,
+            "toAddress": address,
+            "category": ["erc721", "erc1155"],
+            "maxCount": hex(_NFT_INTEL_EVENTS_PER_WALLET),
+            "order": "desc",
+            "withMetadata": True,
+        })
+        if not result:
+            continue
+        for transfer in result.get("transfers", []):
+            event = _alchemy_transfer_to_event(transfer, chain)
+            if event:
+                events.append(event)
+    return events
 
 
 def _nft_intel_is_mint(event: dict, wallet: str) -> bool:
     # A mint is a transfer from the null address - the standard on-chain
     # signature of a token's first-ever transfer, regardless of chain.
+    # Alchemy's query already filters to exactly this (fromAddress=null),
+    # so this is a defense-in-depth check, not the primary filter.
     return (
         event.get("event_type") == "transfer"
         and (event.get("from_address") or "").lower() == _NFT_INTEL_NULL_ADDRESS
@@ -7283,22 +7400,26 @@ def _nft_intel_is_mint(event: dict, wallet: str) -> bool:
     )
 
 
-async def _nft_intel_discover_co_minters(client: httpx.AsyncClient, slug: str | None, exclude: set[str]) -> list[str]:
+async def _nft_intel_discover_co_minters(client: httpx.AsyncClient, chain: str, contract: str | None, exclude: set[str]) -> list[str]:
     # "Similar wallets" per the agreed definition: anyone else who minted
-    # the SAME collection recently - a real "these wallets move together"
-    # behavioral signal, not a vague lookalike heuristic. Collection-slug
-    # scoped to match the events/collection endpoint NFT Scope already uses
-    # elsewhere in this file, same OpenSea event shape either way.
-    if not slug:
+    # the SAME contract recently - a real "these wallets move together"
+    # behavioral signal, not a vague lookalike heuristic. Contract-scoped
+    # (not an OpenSea collection slug) since that's what Alchemy's chain-
+    # native data actually knows about.
+    if not contract:
         return []
-    data = await _opensea_get(client, f"/events/collection/{slug}", {"event_type": "transfer", "limit": _NFT_INTEL_CO_MINTER_LOOKBACK})
-    if not data:
+    result = await _alchemy_rpc(client, chain, "alchemy_getAssetTransfers", {
+        "fromAddress": _NFT_INTEL_NULL_ADDRESS,
+        "contractAddresses": [contract],
+        "category": ["erc721", "erc1155"],
+        "maxCount": hex(_NFT_INTEL_CO_MINTER_LOOKBACK),
+        "order": "desc",
+    })
+    if not result:
         return []
     found = set()
-    for event in data.get("asset_events", []):
-        if (event.get("from_address") or "").lower() != _NFT_INTEL_NULL_ADDRESS:
-            continue
-        to = (event.get("to_address") or "").lower()
+    for transfer in result.get("transfers", []):
+        to = (transfer.get("to") or "").lower()
         if to and to not in exclude:
             found.add(to)
     return list(found)
@@ -7438,16 +7559,17 @@ async def cron_nft_intel(request: Request):
     if not settings.discord_nft_intel_channel_id:
         return {"polled": 0, "alerted": 0, "reason": "NFT Intel channel not configured"}
 
+    if not settings.alchemy_api_key:
+        return {"polled": 0, "alerted": 0, "reason": "Alchemy API key not configured"}
+
     async with httpx.AsyncClient(timeout=20) as client:
-        # Shares OpenSea's rate-limit state with NFT Scope and every other
-        # OpenSea-backed feature (_opensea_healthy) - skipping this tick
-        # outright when OpenSea was recently 429'd is what keeps a very
-        # tight polling cadence (see .github/workflows/nft-intel-poll.yml)
-        # from starving those other features the moment the shared key
-        # gets throttled, instead of hammering further into an already
-        # rate-limited window.
-        if not await _opensea_healthy(client):
-            return {"polled": 0, "alerted": 0, "reason": "OpenSea rate-limited, skipping this tick"}
+        # Alchemy's rate-limit state, tracked separately from OpenSea's own
+        # (_opensea_healthy) since they're independent budgets - skipping
+        # this tick outright when Alchemy was recently 429'd is what keeps
+        # a tight polling cadence (see .github/workflows/nft-intel-poll.yml)
+        # from hammering further into an already rate-limited window.
+        if not await _alchemy_healthy(client):
+            return {"polled": 0, "alerted": 0, "reason": "Alchemy rate-limited, skipping this tick"}
 
         batch = await _nft_intel_poll_batch(client)
         if not batch:
@@ -7474,24 +7596,36 @@ async def cron_nft_intel(request: Request):
                 token_id = str(token_id)
                 if await _nft_intel_seen(client, chain, contract, token_id):
                     continue
-                slug = nft.get("collection")
+
+                # Enrichment only for a genuinely NEW mint, never on every
+                # poll tick - the transfer feed alone carries no name/
+                # image/collection info (see _alchemy_transfer_to_event).
+                meta = await _alchemy_get_nft_metadata(client, chain, contract, token_id)
+                collection_name = None
+                if meta:
+                    nft["name"] = meta.get("name")
+                    nft["image_url"] = (meta.get("image") or {}).get("cachedUrl")
+                    opensea_meta = ((meta.get("contract") or {}).get("openSeaMetadata")) or {}
+                    collection_name = opensea_meta.get("collectionName") or (meta.get("contract") or {}).get("name")
+                    nft["collection"] = collection_name
+
                 delivered = await _post_channel_message(client, settings.discord_nft_intel_channel_id, _nft_intel_embed(event, wallet_row))
                 if not delivered:
                     continue
-                await _nft_intel_mark_seen(client, chain, contract, token_id, address, slug)
-                alerted.append({"wallet": address, "collection": slug, "token_id": token_id})
+                await _nft_intel_mark_seen(client, chain, contract, token_id, address, collection_name)
+                alerted.append({"wallet": address, "collection": collection_name, "contract": contract, "token_id": token_id})
 
                 # Co-minter discovery only fans out off a SEED wallet's own
                 # mint, never a co-minter's - otherwise a chain of
                 # co-minters-of-co-minters could grow the tracked list
                 # unboundedly fast off nothing but the graph's own
                 # momentum, with no real new signal each extra hop adds.
-                if wallet_row.get("source") == "seed" and slug:
+                if wallet_row.get("source") == "seed":
                     total_tracked = await _nft_intel_tracked_count(client)
                     if total_tracked < _NFT_INTEL_MAX_TRACKED_WALLETS:
-                        co_minters = await _nft_intel_discover_co_minters(client, slug, {address})
+                        co_minters = await _nft_intel_discover_co_minters(client, chain, contract, {address})
                         room = _NFT_INTEL_MAX_TRACKED_WALLETS - total_tracked
-                        await _nft_intel_add_co_minters(client, co_minters[:room], slug)
+                        await _nft_intel_add_co_minters(client, co_minters[:room], collection_name or contract)
 
             await _nft_intel_mark_polled(client, address)
 

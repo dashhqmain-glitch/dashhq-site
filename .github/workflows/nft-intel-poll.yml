@@ -10,10 +10,11 @@ name: NFT Intel Poll (wallet mint alerts)
 # periodically, which GH does deliver on reliably.
 #
 # 45s, not 5s: cron_nft_intel polls a BATCH of tracked wallets per tick
-# (see _NFT_INTEL_WALLET_BATCH_SIZE in main.py) against the same shared
-# OpenSea key NFT Scope and every other OpenSea-backed feature depends on -
-# hammering this much faster would risk starving those other features
-# the moment OpenSea's rate limit gets hit.
+# (see _NFT_INTEL_WALLET_BATCH_SIZE in main.py) against Alchemy's API,
+# fanned out across every enabled chain per wallet - hammering much faster
+# than this would risk burning through Alchemy's rate limit for no real
+# gain, since _alchemy_healthy already backs a tick off automatically the
+# moment that happens.
 
 on:
   schedule:
