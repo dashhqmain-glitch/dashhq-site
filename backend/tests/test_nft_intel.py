@@ -282,12 +282,20 @@ async def test_cron_nft_intel_detects_a_new_mint_and_alerts_once():
     async def fake_add_co_minters(client, addresses, label):
         return 0
 
+    async def fake_alert_count(client, chain, contract):
+        return 0
+
+    async def fake_bump_alert_count(client, chain, contract, new_count):
+        return None
+
     with patch.object(main, "_alchemy_healthy", new=fake_healthy), \
          patch.object(main, "_nft_intel_poll_batch", new=fake_batch), \
          patch.object(main, "_nft_intel_wallet_transfer_events", new=fake_events), \
          patch.object(main, "_nft_intel_seen", new=fake_seen), \
          patch.object(main, "_nft_intel_mark_seen", new=fake_mark_seen), \
          patch.object(main, "_alchemy_get_nft_metadata", new=fake_metadata), \
+         patch.object(main, "_nft_intel_collection_alert_count", new=fake_alert_count), \
+         patch.object(main, "_nft_intel_bump_collection_alert_count", new=fake_bump_alert_count), \
          patch.object(main, "_post_channel_message", new=fake_post), \
          patch.object(main, "_nft_intel_mark_polled", new=fake_mark_polled), \
          patch.object(main, "_nft_intel_tracked_count", new=fake_tracked_count), \
@@ -304,6 +312,132 @@ async def test_cron_nft_intel_detects_a_new_mint_and_alerts_once():
     # actually feeds the alert, not just gets called and discarded.
     assert "Cool #1" in posted[0][1]["title"]
     assert polled_marks == [SEED_ADDR]
+
+
+async def test_cron_nft_intel_suppresses_alert_once_collection_cap_reached():
+    # Grouped-by-collection noise cap: a collection that's already hit its
+    # alert quota must not post again, even for a genuinely new, distinct
+    # mint (different token, different wallet) from that same collection.
+    settings.nft_cron_secret = "realsecret"
+    settings.discord_nft_intel_channel_id = "intel-chan"
+    settings.alchemy_api_key = "testkey"
+    posted = []
+    seen_marks = []
+
+    async def fake_healthy(client):
+        return True
+
+    async def fake_batch(client):
+        return [{"address": SEED_ADDR, "source": "seed", "discovered_via": None}]
+
+    async def fake_events(client, address):
+        return [_mint_event(to=address, chain="ethereum", contract="0xabc", token_id=99, collection="cool-collection")]
+
+    async def fake_seen(client, chain, contract, token_id):
+        return False  # this exact token is new...
+
+    async def fake_mark_seen(client, chain, contract, token_id, wallet, slug):
+        seen_marks.append((chain, contract, token_id))
+
+    async def fake_alert_count(client, chain, contract):
+        return main._NFT_INTEL_MAX_ALERTS_PER_COLLECTION  # ...but this COLLECTION is already at cap
+
+    async def fake_metadata(client, chain, contract, token_id):
+        raise AssertionError("must not spend an enrichment call once the collection is already capped")
+
+    async def fake_post(client, channel_id, embed, content=None):
+        posted.append(embed)
+        return True
+
+    async def fake_mark_polled(client, address):
+        return None
+
+    with patch.object(main, "_alchemy_healthy", new=fake_healthy), \
+         patch.object(main, "_nft_intel_poll_batch", new=fake_batch), \
+         patch.object(main, "_nft_intel_wallet_transfer_events", new=fake_events), \
+         patch.object(main, "_nft_intel_seen", new=fake_seen), \
+         patch.object(main, "_nft_intel_mark_seen", new=fake_mark_seen), \
+         patch.object(main, "_nft_intel_collection_alert_count", new=fake_alert_count), \
+         patch.object(main, "_alchemy_get_nft_metadata", new=fake_metadata), \
+         patch.object(main, "_post_channel_message", new=fake_post), \
+         patch.object(main, "_nft_intel_mark_polled", new=fake_mark_polled):
+        async with main.httpx.AsyncClient() as client:
+            result = await main.cron_nft_intel(FakeRequest("Bearer realsecret"))
+
+    assert result["alerted"] == 0
+    assert posted == []
+    # Still recorded as seen, so this exact mint is never re-evaluated on
+    # a future tick even though it was never alerted on.
+    assert seen_marks == [("ethereum", "0xabc", "99")]
+
+
+async def test_cron_nft_intel_alerts_up_to_the_cap_then_shows_it_in_the_embed():
+    settings.nft_cron_secret = "realsecret"
+    settings.discord_nft_intel_channel_id = "intel-chan"
+    settings.alchemy_api_key = "testkey"
+    posted = []
+    bumped = []
+
+    async def fake_healthy(client):
+        return True
+
+    async def fake_batch(client):
+        return [{"address": SEED_ADDR, "source": "seed", "discovered_via": None}]
+
+    async def fake_events(client, address):
+        return [_mint_event(to=address, chain="ethereum", contract="0xabc", token_id=2, collection="cool-collection")]
+
+    async def fake_seen(client, chain, contract, token_id):
+        return False
+
+    async def fake_mark_seen(client, chain, contract, token_id, wallet, slug):
+        return None
+
+    async def fake_alert_count(client, chain, contract):
+        return 1  # one alert already sent for this collection - this is the 2nd, still under the cap of 2
+
+    async def fake_bump(client, chain, contract, new_count):
+        bumped.append(new_count)
+
+    async def fake_metadata(client, chain, contract, token_id):
+        return None
+
+    async def fake_post(client, channel_id, embed, content=None):
+        posted.append(embed)
+        return True
+
+    async def fake_mark_polled(client, address):
+        return None
+
+    async def fake_tracked_count(client):
+        return 1
+
+    async def fake_discover(client, chain, contract, exclude):
+        return []
+
+    async def fake_add_co_minters(client, addresses, label):
+        return 0
+
+    with patch.object(main, "_alchemy_healthy", new=fake_healthy), \
+         patch.object(main, "_nft_intel_poll_batch", new=fake_batch), \
+         patch.object(main, "_nft_intel_wallet_transfer_events", new=fake_events), \
+         patch.object(main, "_nft_intel_seen", new=fake_seen), \
+         patch.object(main, "_nft_intel_mark_seen", new=fake_mark_seen), \
+         patch.object(main, "_nft_intel_collection_alert_count", new=fake_alert_count), \
+         patch.object(main, "_nft_intel_bump_collection_alert_count", new=fake_bump), \
+         patch.object(main, "_alchemy_get_nft_metadata", new=fake_metadata), \
+         patch.object(main, "_post_channel_message", new=fake_post), \
+         patch.object(main, "_nft_intel_mark_polled", new=fake_mark_polled), \
+         patch.object(main, "_nft_intel_tracked_count", new=fake_tracked_count), \
+         patch.object(main, "_nft_intel_discover_co_minters", new=fake_discover), \
+         patch.object(main, "_nft_intel_add_co_minters", new=fake_add_co_minters):
+        async with main.httpx.AsyncClient() as client:
+            result = await main.cron_nft_intel(FakeRequest("Bearer realsecret"))
+
+    assert result["alerted"] == 1
+    assert bumped == [2]  # count bumped from 1 to 2, now at cap
+    cap_field = next(f for f in posted[0]["fields"] if f["name"] == "Collection Alert Cap")
+    assert "2/2" in cap_field["value"]
 
 
 async def test_cron_nft_intel_never_reposts_an_already_seen_mint():
@@ -417,12 +551,20 @@ async def test_cron_nft_intel_triggers_co_minter_discovery_only_for_seed_wallets
         discover_calls.append(contract)
         return []
 
+    async def fake_alert_count(client, chain, contract):
+        return 0
+
+    async def fake_bump_alert_count(client, chain, contract, new_count):
+        return None
+
     with patch.object(main, "_alchemy_healthy", new=fake_healthy), \
          patch.object(main, "_nft_intel_poll_batch", new=fake_batch), \
          patch.object(main, "_nft_intel_wallet_transfer_events", new=fake_events), \
          patch.object(main, "_nft_intel_seen", new=fake_seen), \
          patch.object(main, "_nft_intel_mark_seen", new=fake_mark_seen), \
          patch.object(main, "_alchemy_get_nft_metadata", new=fake_metadata), \
+         patch.object(main, "_nft_intel_collection_alert_count", new=fake_alert_count), \
+         patch.object(main, "_nft_intel_bump_collection_alert_count", new=fake_bump_alert_count), \
          patch.object(main, "_post_channel_message", new=fake_post), \
          patch.object(main, "_nft_intel_mark_polled", new=fake_mark_polled), \
          patch.object(main, "_nft_intel_discover_co_minters", new=fake_discover):
@@ -469,12 +611,20 @@ async def test_cron_nft_intel_stops_discovering_co_minters_once_cap_reached():
         discover_calls.append(contract)
         return []
 
+    async def fake_alert_count(client, chain, contract):
+        return 0
+
+    async def fake_bump_alert_count(client, chain, contract, new_count):
+        return None
+
     with patch.object(main, "_alchemy_healthy", new=fake_healthy), \
          patch.object(main, "_nft_intel_poll_batch", new=fake_batch), \
          patch.object(main, "_nft_intel_wallet_transfer_events", new=fake_events), \
          patch.object(main, "_nft_intel_seen", new=fake_seen), \
          patch.object(main, "_nft_intel_mark_seen", new=fake_mark_seen), \
          patch.object(main, "_alchemy_get_nft_metadata", new=fake_metadata), \
+         patch.object(main, "_nft_intel_collection_alert_count", new=fake_alert_count), \
+         patch.object(main, "_nft_intel_bump_collection_alert_count", new=fake_bump_alert_count), \
          patch.object(main, "_post_channel_message", new=fake_post), \
          patch.object(main, "_nft_intel_mark_polled", new=fake_mark_polled), \
          patch.object(main, "_nft_intel_tracked_count", new=fake_tracked_count), \

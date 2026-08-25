@@ -7340,6 +7340,28 @@ async def _nft_intel_mark_seen(client: httpx.AsyncClient, chain: str, contract: 
     )
 
 
+_NFT_INTEL_MAX_ALERTS_PER_COLLECTION = 2  # caps a hot collection's noise - see cron_nft_intel; every mint is still recorded via _nft_intel_mark_seen regardless, this only gates the alert itself
+
+
+async def _nft_intel_collection_alert_count(client: httpx.AsyncClient, chain: str, contract: str) -> int:
+    res = await client.get(
+        f"{settings.supabase_url}/rest/v1/nft_intel_collection_alert_counts",
+        headers=_supabase_headers(),
+        params={"chain": f"eq.{chain}", "contract_address": f"eq.{contract}", "select": "alert_count", "limit": "1"},
+    )
+    res.raise_for_status()
+    rows = res.json()
+    return rows[0]["alert_count"] if rows else 0
+
+
+async def _nft_intel_bump_collection_alert_count(client: httpx.AsyncClient, chain: str, contract: str, new_count: int) -> None:
+    await client.post(
+        f"{settings.supabase_url}/rest/v1/nft_intel_collection_alert_counts",
+        headers=_supabase_headers(prefer="resolution=merge-duplicates,return=minimal"),
+        json=[{"chain": chain, "contract_address": contract, "alert_count": new_count, "last_alerted_at": datetime.now(timezone.utc).isoformat()}],
+    )
+
+
 def _alchemy_transfer_to_event(transfer: dict, chain: str) -> dict | None:
     # Normalizes an Alchemy alchemy_getAssetTransfers row into the same
     # shape the rest of NFT Intel already works with (originally shaped
@@ -7477,7 +7499,7 @@ async def _nft_intel_tracked_count(client: httpx.AsyncClient) -> int:
     return len(res.json())
 
 
-def _nft_intel_embed(event: dict, wallet_row: dict) -> dict:
+def _nft_intel_embed(event: dict, wallet_row: dict, alert_number: int | None = None) -> dict:
     nft = event.get("nft") or {}
     chain = event.get("chain") or nft.get("chain") or "-"
     contract = nft.get("contract") or "-"
@@ -7508,6 +7530,12 @@ def _nft_intel_embed(event: dict, wallet_row: dict) -> dict:
     if links:
         fields.append({"name": "Links", "value": links, "inline": False})
     fields.append({"name": "Contract", "value": f"`{contract}`", "inline": False})
+    if alert_number is not None:
+        fields.append({
+            "name": "Collection Alert Cap",
+            "value": f"{alert_number}/{_NFT_INTEL_MAX_ALERTS_PER_COLLECTION} for **{collection}** - further mints from this collection go quiet to avoid flooding the channel.",
+            "inline": False,
+        })
 
     return {
         "title": f"🕵️ NFT Intel · Tracked Wallet Just Minted — {name}",
@@ -7599,9 +7627,21 @@ async def cron_nft_intel(request: Request):
                 if await _nft_intel_seen(client, chain, contract, token_id):
                     continue
 
-                # Enrichment only for a genuinely NEW mint, never on every
-                # poll tick - the transfer feed alone carries no name/
-                # image/collection info (see _alchemy_transfer_to_event).
+                # Grouped-by-collection noise cap: once a collection has
+                # hit its alert quota, every further mint from it (any
+                # wallet, tracked or co-minter) still gets recorded as
+                # seen - so it's never re-evaluated on a later tick - but
+                # stops short of enrichment, posting, or co-minter
+                # discovery, none of which serve any purpose once nothing
+                # further will actually alert.
+                alert_count = await _nft_intel_collection_alert_count(client, chain, contract)
+                if alert_count >= _NFT_INTEL_MAX_ALERTS_PER_COLLECTION:
+                    await _nft_intel_mark_seen(client, chain, contract, token_id, address, None)
+                    continue
+
+                # Enrichment only for a genuinely NEW, under-cap mint, never
+                # on every poll tick - the transfer feed alone carries no
+                # name/image/collection info (see _alchemy_transfer_to_event).
                 meta = await _alchemy_get_nft_metadata(client, chain, contract, token_id)
                 collection_name = None
                 if meta:
@@ -7611,10 +7651,12 @@ async def cron_nft_intel(request: Request):
                     collection_name = opensea_meta.get("collectionName") or (meta.get("contract") or {}).get("name")
                     nft["collection"] = collection_name
 
-                delivered = await _post_channel_message(client, settings.discord_nft_intel_channel_id, _nft_intel_embed(event, wallet_row))
+                embed = _nft_intel_embed(event, wallet_row, alert_number=alert_count + 1)
+                delivered = await _post_channel_message(client, settings.discord_nft_intel_channel_id, embed)
                 if not delivered:
                     continue
                 await _nft_intel_mark_seen(client, chain, contract, token_id, address, collection_name)
+                await _nft_intel_bump_collection_alert_count(client, chain, contract, alert_count + 1)
                 alerted.append({"wallet": address, "collection": collection_name, "contract": contract, "token_id": token_id})
 
                 # Co-minter discovery only fans out off a SEED wallet's own

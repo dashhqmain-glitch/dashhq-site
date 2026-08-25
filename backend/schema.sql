@@ -584,6 +584,21 @@ create index if not exists nft_intel_seen_mints_wallet_idx on nft_intel_seen_min
 
 alter table nft_intel_seen_mints enable row level security;
 
+-- Caps alerts per collection so a hot drop with many tracked/co-minter
+-- wallets minting in a burst doesn't flood the channel - see
+-- _NFT_INTEL_MAX_ALERTS_PER_COLLECTION in main.py. Every mint still gets
+-- recorded in nft_intel_seen_mints regardless (so it's never re-evaluated
+-- on a later tick), this table only gates whether an ALERT gets posted.
+create table if not exists nft_intel_collection_alert_counts (
+  chain             text not null,
+  contract_address  text not null,
+  alert_count       int not null default 0,
+  last_alerted_at   timestamptz,
+  primary key (chain, contract_address)
+);
+
+alter table nft_intel_collection_alert_counts enable row level security;
+
 -- Seed wallets - the starting list to track. ON CONFLICT DO NOTHING so
 -- re-running this file never resets a wallet's source back to 'seed' if
 -- it's since been re-discovered, or touches last_polled_at/added_at.
