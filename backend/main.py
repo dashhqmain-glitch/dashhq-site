@@ -1259,7 +1259,14 @@ async def discord_interactions(request: Request):
         result = await _dispatch_interaction(payload, itype)
     except Exception:
         logger.exception("Unhandled error dispatching Discord interaction (type=%s)", itype)
-        result = {"type": 4, "data": {"content": "⚠️ Something went wrong running that. Please try again in a moment.", "flags": 64}}
+        # type 4 (a visible message) is not a valid response to an
+        # autocomplete interaction - Discord requires type 8 there
+        # regardless of outcome, so the fallback has to match, not just
+        # the happy path handled inside _dispatch_interaction.
+        result = (
+            {"type": 8, "data": {"choices": []}} if itype == 4
+            else {"type": 4, "data": {"content": "⚠️ Something went wrong running that. Please try again in a moment.", "flags": 64}}
+        )
 
     if created_ms is not None:
         elapsed_ms = time.time() * 1000 - created_ms
@@ -1284,6 +1291,12 @@ async def _dispatch_interaction(payload: dict, itype) -> dict:
         if cmd_name == "nft-intel-wallets":
             return await _handle_nft_intel_wallets_command(payload)
         return await _handle_toolkit_command(payload)
+
+    if itype == 4:  # APPLICATION_COMMAND_AUTOCOMPLETE
+        cmd_name = (payload.get("data") or {}).get("name")
+        if cmd_name == "pnl":
+            return await _handle_pnl_autocomplete(payload)
+        return {"type": 8, "data": {"choices": []}}
 
     member_user = payload.get("member", {}).get("user", {})
     reviewer = member_user.get("global_name") or member_user.get("username", "someone")
@@ -3816,6 +3829,53 @@ async def _nft_search_core(q: str) -> list[dict]:
                 stats = None
             out.append(_enrich_with_cached_meta(_nft_collection_shape(c, stats)))
         return out
+
+
+async def _nft_autocomplete_choices(q: str) -> list[dict]:
+    # Deliberately lighter than _nft_search_core - skips the per-result
+    # stats fetch (not needed for a name/slug dropdown) to stay well under
+    # Discord's response window. Like MODAL, an autocomplete response can
+    # never be deferred - it has to answer within the same ~3s a slash
+    # command gets to even acknowledge, so this has to be fast on its own,
+    # not just correct. Returning the SLUG as each choice's value (not the
+    # display name) is what actually closes the ambiguity gap: picking a
+    # choice makes collection_query literally equal to a real slug, so the
+    # exact-match preference in _pnl_render_core trivially matches it -
+    # selecting from the list is a guaranteed-correct lookup, the same
+    # tier as a raw contract address, without the user needing to know one.
+    q = (q or "").strip()
+    if len(q) < 2:
+        return []
+    async with httpx.AsyncClient(timeout=5) as client:
+        data = await _opensea_get(client, "/search", {"query": q})
+    if not data:
+        return []
+    choices = []
+    for r in (data.get("results") or []):
+        if r.get("type") != "collection" or not r.get("collection"):
+            continue
+        c = r["collection"]
+        slug = c.get("collection")
+        name = c.get("name") or slug
+        if not slug:
+            continue
+        choices.append({"name": name[:100], "value": slug[:100]})
+        if len(choices) >= 25:  # Discord's own hard cap on autocomplete choices
+            break
+    return choices
+
+
+async def _handle_pnl_autocomplete(payload: dict) -> dict:
+    options = (payload.get("data") or {}).get("options") or []
+    focused = next((o for o in options if o.get("focused")), None)
+    if not focused or focused.get("name") != "collection":
+        return {"type": 8, "data": {"choices": []}}
+    try:
+        choices = await _nft_autocomplete_choices(focused.get("value", ""))
+    except Exception:
+        logger.exception("/pnl autocomplete failed")
+        choices = []
+    return {"type": 8, "data": {"choices": choices}}
 
 
 @app.get("/toolkit/nft-search")
