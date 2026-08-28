@@ -3846,6 +3846,28 @@ async def _nft_autocomplete_choices(q: str) -> list[dict]:
     q = (q or "").strip()
     if len(q) < 2:
         return []
+
+    # A pasted OpenSea URL or raw contract address doesn't match anything
+    # in OpenSea's own NAME search (confirmed live: typing the URL showed
+    # zero suggestions, even though it names one real collection exactly)
+    # - recognize it the same way _pnl_render_core's final resolution
+    # already does, and confirm it directly with a single authoritative
+    # choice instead of running it through fuzzy text search at all.
+    url_slug = _extract_opensea_slug(q)
+    direct_slug = url_slug if url_slug else (q if _EVM_ADDRESS_RE.match(q) else None)
+    if direct_slug:
+        try:
+            if url_slug:
+                c = await _nft_collection_core(direct_slug)
+            else:
+                async with httpx.AsyncClient(timeout=5) as client:
+                    c = await _nft_resolve_by_contract(client, direct_slug)
+                if not c:
+                    return []
+        except HTTPException:
+            return []
+        return [{"name": (c.get("name") or c["slug"])[:100], "value": c["slug"][:100]}]
+
     async with httpx.AsyncClient(timeout=5) as client:
         data = await _opensea_get(client, "/search", {"query": q})
     if not data:

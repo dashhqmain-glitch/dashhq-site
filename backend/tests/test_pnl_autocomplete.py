@@ -51,6 +51,51 @@ async def test_autocomplete_returns_slug_as_value_not_display_name():
     ]
 
 
+async def test_autocomplete_recognizes_pasted_opensea_url_directly():
+    # Real live report: typing/pasting the OpenSea URL showed zero
+    # suggestions, since it doesn't match anything in OpenSea's own NAME
+    # search. Must be recognized and confirmed directly, not fuzzy-searched.
+    async def fake_collection_core(slug):
+        assert slug == "naives-by-mannay"
+        return {"slug": "naives-by-mannay----", "name": "Naives by Mannay"}
+
+    async def exploding_search(client, path, params=None):
+        raise AssertionError("a recognized URL should never fall through to fuzzy text search")
+
+    with patch.object(main, "_nft_collection_core", new=fake_collection_core), \
+         patch.object(main, "_opensea_get", new=exploding_search):
+        choices = await main._nft_autocomplete_choices("https://opensea.io/collection/naives-by-mannay")
+
+    assert choices == [{"name": "Naives by Mannay", "value": "naives-by-mannay----"}]
+
+
+async def test_autocomplete_recognizes_raw_contract_address_directly():
+    GOOD_ADDR = "0x263f61210bf2a0e0dc56fbd35813ccf04050ebfb"
+
+    async def fake_resolve_by_contract(client, address):
+        assert address == GOOD_ADDR
+        return {"slug": "naives-by-mannay----", "name": "Naives by Mannay"}
+
+    async def exploding_search(client, path, params=None):
+        raise AssertionError("a recognized address should never fall through to fuzzy text search")
+
+    with patch.object(main, "_nft_resolve_by_contract", new=fake_resolve_by_contract), \
+         patch.object(main, "_opensea_get", new=exploding_search):
+        choices = await main._nft_autocomplete_choices(GOOD_ADDR)
+
+    assert choices == [{"name": "Naives by Mannay", "value": "naives-by-mannay----"}]
+
+
+async def test_autocomplete_returns_empty_for_a_url_that_does_not_resolve():
+    async def fake_collection_core(slug):
+        raise main.HTTPException(status_code=404, detail="Collection not found")
+
+    with patch.object(main, "_nft_collection_core", new=fake_collection_core):
+        choices = await main._nft_autocomplete_choices("https://opensea.io/collection/does-not-exist")
+
+    assert choices == []
+
+
 async def test_autocomplete_skips_search_for_very_short_input():
     async def exploding_opensea_get(client, path, params=None):
         raise AssertionError("should not search OpenSea for input under 2 chars")
