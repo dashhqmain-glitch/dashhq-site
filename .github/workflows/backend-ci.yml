@@ -157,6 +157,29 @@ jobs:
             exit 1
           fi
 
+      - name: Live /pnl collection-resolution regression check
+        # Pins the actual production bug this check was added for: /pnl
+        # used to trust OpenSea's raw search ranking, so a real project
+        # ("Naives by Mannay") could silently resolve to a same-stemmed,
+        # unrelated one ("Naïve by Olga Fradina") when searched by its
+        # exact name. Confirms production is still returning the CORRECT
+        # top slug for that exact name, not just that the endpoint is up -
+        # the smoke test above only proves it doesn't 5xx, which stayed
+        # true the entire time this bug was live.
+        run: |
+          slug=$(curl -s "https://www.dashhq.site/toolkit/nft-search?q=Naives%20by%20Mannay" | python3 -c "
+          import json, sys
+          data = json.load(sys.stdin)
+          results = data.get('results', [])
+          print(results[0]['slug'] if results else '')
+          ")
+          echo "Top result slug for 'Naives by Mannay': $slug"
+          case "$slug" in
+            naives-by-mannay*) echo "Correct project resolved." ;;
+            "") echo "::warning::No search results at all for 'Naives by Mannay' - OpenSea may be degraded, not necessarily a regression." ;;
+            *) echo "::error::Search for 'Naives by Mannay' resolved to '$slug' instead - the collection-matching regression may be back."; exit 1 ;;
+          esac
+
       - name: Live frontend page check
         # The API responding correctly says nothing about whether the
         # static pages built cleanly - a broken vercel.json route or a

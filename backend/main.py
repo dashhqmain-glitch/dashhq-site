@@ -8376,15 +8376,71 @@ async def _cmd_nft(query: str) -> dict:
     }
 
 
-async def _pnl_render_core(collection_query: str, mint_price_raw, amount_minted: int, x_username: str, exit_price_raw=None) -> bytes:
-    results = await _nft_search_core(collection_query)
-    if not results:
-        raise HTTPException(status_code=404, detail=f'No OpenSea results for "{collection_query}".')
-    slug = results[0]["slug"]
-    try:
-        c = await _nft_collection_core(slug)
-    except HTTPException:
-        c = results[0]
+def _normalize_collection_key(s: str) -> str:
+    # Slug and free-typed name forms of the same collection should compare
+    # equal - "Naives by Mannay" and "naives-by-mannay----" (OpenSea pads a
+    # slug with trailing dashes to dedupe against an existing one) both
+    # collapse to "naives-by-mannay" here.
+    s = re.sub(r"[\s_]+", "-", s.strip().lower())
+    s = re.sub(r"-+", "-", s)
+    return s.strip("-")
+
+
+async def _pnl_render_core(
+    collection_query: str, mint_price_raw, amount_minted: int, x_username: str,
+    exit_price_raw=None, contract_address: str | None = None,
+) -> tuple[bytes, bool]:
+    """Returns (png_bytes, matched_exactly). matched_exactly is False only
+    for the free-text fallback case where nothing in OpenSea's results
+    named the query exactly - the one case that can't be made certain by
+    matching alone, since the query itself doesn't uniquely identify a
+    project (this is exactly the gap a brand-new, never-looked-up-before
+    project falls into - there's no local knowledge to check it against,
+    only OpenSea's own possibly-ambiguous search). The caller surfaces this
+    so a wrong guess is visible immediately instead of silently trusted."""
+    matched_exactly = True
+    if contract_address:
+        # Authoritative path: a contract address names exactly one
+        # collection on exactly one chain, with zero ambiguity - skips text
+        # search entirely instead of merely narrowing it. This is the
+        # strongest guarantee available, since even an exact NAME match can
+        # still theoretically collide if two collections share a name.
+        if not _EVM_ADDRESS_RE.match(contract_address.strip()):
+            raise HTTPException(status_code=400, detail=f'"{contract_address}" is not a valid contract address.')
+        async with httpx.AsyncClient(timeout=10) as lookup_client:
+            c = await _nft_resolve_by_contract(lookup_client, contract_address.strip())
+        if not c:
+            raise HTTPException(status_code=404, detail=f'No OpenSea collection found for contract "{contract_address}".')
+        slug = c["slug"]
+    else:
+        results = await _nft_search_core(collection_query)
+        if not results:
+            raise HTTPException(status_code=404, detail=f'No OpenSea results for "{collection_query}".')
+        # OpenSea's own search ranking is by relevance/popularity, not exact
+        # match - a short or partial query (e.g. "naive" for "Naives by
+        # Mannay") can rank a completely different, unrelated collection
+        # first (confirmed live: "naive" alone top-hits "Naïve by Olga
+        # Fradina" and never returns "Naives by Mannay" at all). When the
+        # query exactly names one of the returned collections, that's almost
+        # certainly the one meant, regardless of where OpenSea ranked it -
+        # only fall back to position 0 when nothing matches exactly. Still
+        # not airtight against two real collections sharing one name - pass
+        # contract_address for a guaranteed-correct lookup instead.
+        normalized_query = _normalize_collection_key(collection_query)
+        exact = next(
+            (r for r in results if normalized_query in (
+                _normalize_collection_key(r.get("slug") or ""),
+                _normalize_collection_key(r.get("name") or ""),
+            )),
+            None,
+        )
+        chosen = exact or results[0]
+        matched_exactly = chosen is exact
+        slug = chosen["slug"]
+        try:
+            c = await _nft_collection_core(slug)
+        except HTTPException:
+            c = chosen
 
     async with httpx.AsyncClient(timeout=15) as client:
         mint_price = await _parse_eth_amount(client, mint_price_raw, "mint price")
@@ -8423,7 +8479,7 @@ async def _pnl_render_core(collection_query: str, mint_price_raw, amount_minted:
         "symbol": c.get("symbol") or "ETH",
         "eth_usd": c.get("listingUsdRate") or 0,
     }
-    return pnl_card.render_pnl_card(data, project_thumb_bytes=thumb_bytes)
+    return pnl_card.render_pnl_card(data, project_thumb_bytes=thumb_bytes), matched_exactly
 
 
 async def _cmd_wallet(address: str) -> dict:
@@ -8636,7 +8692,7 @@ TOOLKIT_TOOLS = {
     "pnl": {
         "emoji": "📊", "label": "PnL Card",
         "short": "Generate a shareable branded card showing your realized profit/loss on a mint",
-        "usage": "/pnl collection:<name or contract address> mint_price:<ETH or $USD> amount_minted:<count> x_username:<optional>",
+        "usage": "/pnl collection:<name or contract address> mint_price:<ETH or $USD> amount_minted:<count> x_username:<optional> contract_address:<optional, guarantees the right project>",
         "example": "/pnl collection:Pudgy Penguins mint_price:0.03 amount_minted:2",
     },
     "my-aco": {
@@ -8761,9 +8817,19 @@ async def _handle_toolkit_command(payload: dict) -> dict:
             mint_price_raw = opts.get("mint_price", "0")
             amount_minted = int(opts.get("amount_minted", 1))
             exit_price_raw = opts.get("exit_price")
+            contract_address = opts.get("contract_address")
             x_username = (opts.get("x_username") or member_user.get("global_name") or member_user.get("username") or "citizen").strip()
-            png_bytes = await _pnl_render_core(collection, mint_price_raw, amount_minted, x_username, exit_price_raw)
-            await _discord_edit_original_with_file(token, "pnl.png", png_bytes)
+            png_bytes, matched_exactly = await _pnl_render_core(collection, mint_price_raw, amount_minted, x_username, exit_price_raw, contract_address)
+            # A non-exact match is OpenSea's own best guess at free text
+            # that didn't name any result precisely - the case a brand-new
+            # or unfamiliar project falls into, since there's nothing local
+            # to check it against. Flag it plainly rather than let a wrong
+            # guess look identical to a certain one.
+            caption = None if matched_exactly else (
+                "⚠️ No exact match for that name - showing OpenSea's closest result. "
+                "If this isn't the right project, re-run with `contract_address:` for a guaranteed match."
+            )
+            await _discord_edit_original_with_file(token, "pnl.png", png_bytes, content=caption)
         except Exception as exc:
             if not isinstance(exc, HTTPException):
                 logger.exception("/pnl command failed")

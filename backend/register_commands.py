@@ -113,6 +113,7 @@ COMMANDS = [
             {"name": "amount_minted", "description": "How many you minted", "type": 4, "required": True},
             {"name": "exit_price", "description": "What you sold at, per NFT - ETH (0.05) or USD ($80) - omit to use live floor price", "type": 3, "required": False},
             {"name": "x_username", "description": "Your X handle to show on the card (default: your Discord name)", "type": 3, "required": False},
+            {"name": "contract_address", "description": "Exact contract address - guarantees the right project when the name is ambiguous or shared", "type": 3, "required": False},
         ],
     },
     {
