@@ -205,6 +205,28 @@ def test_embed_status_shows_closed_for_resolved_and_cancelled():
     assert open_status["value"] == "🟢 Open"
 
 
+def test_embed_status_shows_closed_expired_when_deadline_passed_but_still_open():
+    # The actual fix: a countdown that's already passed must read as
+    # Closed, not silently sit on Open forever until staff happens to
+    # touch the drop for an unrelated reason.
+    from datetime import datetime, timedelta, timezone
+    past_deadline = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    expired_status = next(f for f in main._aco_drop_embed(_drop(status="open", deadline=past_deadline), 0, 0)["fields"] if f["name"] == "Status")
+    assert expired_status["value"] == "🔒 Closed (Expired)"
+
+
+def test_embed_status_resolved_and_cancelled_are_unaffected_by_a_past_deadline():
+    # A drop staff already finalized keeps its real disposition label even
+    # once its (by-then-irrelevant) countdown is in the past - expiry only
+    # ever applies to status=="open".
+    from datetime import datetime, timedelta, timezone
+    past_deadline = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    resolved_status = next(f for f in main._aco_drop_embed(_drop(status="resolved", deadline=past_deadline), 0, 0)["fields"] if f["name"] == "Status")
+    cancelled_status = next(f for f in main._aco_drop_embed(_drop(status="cancelled", deadline=past_deadline), 0, 0)["fields"] if f["name"] == "Status")
+    assert resolved_status["value"] == "🔒 Closed (Resolved)"
+    assert cancelled_status["value"] == "🔒 Closed (Cancelled)"
+
+
 def test_embed_includes_fund_required_when_set():
     embed = main._aco_drop_embed(_drop(fund_required="0.004 ETH"), 0, 0)
     fund_field = next(f for f in embed["fields"] if "Fund Required" in f["name"])
@@ -282,6 +304,23 @@ def test_open_drop_public_view_only_has_submit_button():
 
 def test_resolved_drop_public_view_has_no_buttons():
     assert main._aco_drop_components("drop1", "resolved", staff=False) == []
+
+
+def test_expired_drop_public_view_has_no_submit_button():
+    # The actual fix: a drop past its deadline stops accepting
+    # submissions (already enforced at wallet-submit time) - the button
+    # itself must disappear too, not just reject a click after the fact.
+    assert main._aco_drop_components("drop1", "open", staff=False, expired=True) == []
+
+
+def test_expired_drop_staff_view_keeps_resolve_and_cancel():
+    # The critical part of the fix: staff must NOT lose the ability to
+    # finalize a drop just because its countdown passed - that's the
+    # normal timing for resolving a drop (deadline = submissions close,
+    # resolved = outcome known, which comes later), not an edge case.
+    components = main._aco_drop_components("drop1", "open", submit=False, staff=True, expired=True)
+    labels = [c["label"] for c in components[0]["components"]]
+    assert labels == ["See Wallets", "Mark Resolved", "Cancel Drop"]
 
 
 def test_drop_components_defaults_to_public_view():
@@ -1872,5 +1911,103 @@ async def test_cron_aco_key_cleanup_requires_valid_secret():
         assert False, "should have raised"
     except main.HTTPException as exc:
         assert exc.status_code == 401
+
+
+# ── ACO drop expiry - display-only, never touches the status column ──────
+
+async def test_expire_stale_drops_refreshes_both_public_and_staff_messages():
+    settings.discord_bot_token = "tok"
+    from datetime import datetime, timedelta, timezone
+    stale_drop = {
+        "id": "drop1", "title": "Stale Drop", "status": "open", "chain": "Ethereum",
+        "deadline": (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
+        "discord_channel_id": "public-chan", "discord_message_id": "pubmsg1",
+        "discord_staff_channel_id": "mod-chan", "discord_staff_message_id": "staffmsg1",
+    }
+    edits = []
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "aco_drops" in url:
+                assert params["status"] == "eq.open"
+                assert "deadline" in params and params["deadline"].startswith("lt.")
+                return FakeRes(200, [stale_drop])
+            return FakeRes(200, [])  # ticket count query
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            edits.append((url, json))
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        refreshed = await main._aco_expire_stale_drops()
+
+    assert refreshed == 1
+    public_edit = next(j for u, j in edits if "public-chan" in u)
+    staff_edit = next(j for u, j in edits if "mod-chan" in u)
+    public_status = next(f for f in public_edit["embeds"][0]["fields"] if f["name"] == "Status")
+    staff_status = next(f for f in staff_edit["embeds"][0]["fields"] if f["name"] == "Status")
+    assert public_status["value"] == "🔒 Closed (Expired)"
+    assert staff_status["value"] == "🔒 Closed (Expired)"
+    # Public message must lose Submit Wallet(s) entirely (no components
+    # left at all, since that was its only button); staff message must
+    # KEEP Mark Resolved/Cancel Drop - the whole point of the fix.
+    assert public_edit["components"] == []
+    staff_labels = [c["label"] for c in staff_edit["components"][0]["components"]]
+    assert staff_labels == ["See Wallets", "Mark Resolved", "Cancel Drop"]
+
+
+async def test_expire_stale_drops_does_nothing_when_none_are_stale():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [])
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        refreshed = await main._aco_expire_stale_drops()
+
+    assert refreshed == 0
+
+
+async def test_expire_stale_drops_only_queries_open_status():
+    # The query itself is the real guardrail against ever touching an
+    # already-resolved/cancelled drop - status=eq.open in the filter, not
+    # a post-hoc check.
+    captured_params = {}
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "aco_drops" in url:
+                captured_params.update(params)
+            return FakeRes(200, [])
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        await main._aco_expire_stale_drops()
+
+    assert captured_params["status"] == "eq.open"
+
+
+async def test_cron_aco_expire_drops_requires_valid_secret():
+    settings.aco_cron_secret = "realsecret"
+    try:
+        await main.cron_aco_expire_drops(FakeRequest())
+        assert False, "should have raised"
+    except main.HTTPException as exc:
+        assert exc.status_code == 401
+
+
+async def test_cron_aco_expire_drops_returns_refreshed_count():
+    settings.aco_cron_secret = "realsecret"
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [])
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        result = await main.cron_aco_expire_drops(FakeRequest("Bearer realsecret"))
+
+    assert result == {"refreshed": 0}
 
 

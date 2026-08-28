@@ -1,0 +1,47 @@
+name: ACO Drop Expiry Poll
+
+# Same pattern as nft-intel-poll.yml: a raw `schedule: '*/2 * * * *'` isn't
+# reliable (GitHub Actions delays/queues short-interval schedules under its
+# own platform load), so this uses an actively-running job's own wall clock
+# via `sleep` instead. A much coarser `schedule:` restarts the loop
+# periodically, which GH does deliver on reliably.
+#
+# 120s, not tighter: staff noticing a drop still reads "Open" an hour after
+# its countdown ended is the real complaint this exists for - a couple
+# minutes of lag before the badge flips to Closed is nowhere near that,
+# and the check itself is cheap (one Supabase query, a handful of Discord
+# message edits only for drops that are actually stale), so there's no
+# real cost to polling this often, just no reason to go faster either.
+
+on:
+  schedule:
+    - cron: '0 */2 * * *'  # coarse restart cadence GH Actions actually delivers on time - NOT the real poll interval, see the loop below
+  workflow_dispatch: {}
+
+concurrency:
+  group: aco-expire-poll
+  cancel-in-progress: true
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350  # under GitHub's hard 6-hour per-job cap, with margin before a forced cutoff
+    steps:
+      - name: Poll every 120 seconds using this job's own clock
+        run: |
+          set +e  # a transient network hiccup must not kill a 5.5-hour loop over one bad tick
+          deadline=$((SECONDS + 340 * 60))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            status=$(curl -s -o response.json -w "%{http_code}" \
+              -X GET "https://www.dashhq.site/cron/aco-expire-drops" \
+              -H "Authorization: Bearer ${{ secrets.ACO_CRON_SECRET }}")
+            status=${status:-000}
+            echo "$(date -u +%H:%M:%S) HTTP $status"
+            cat response.json 2>/dev/null
+            echo
+            case "$status" in
+              ''|*[!0-9]*) echo "::warning::poll produced no valid HTTP status - continuing the loop" ;;
+              *) if [ "$status" -ge 400 ]; then echo "::warning::poll returned HTTP $status - continuing the loop"; fi ;;
+            esac
+            sleep 120
+          done

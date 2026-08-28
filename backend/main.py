@@ -682,6 +682,21 @@ async def cron_aco_key_cleanup(request: Request):
     return {"expired": expired_count}
 
 
+@app.get("/cron/aco-expire-drops")
+async def cron_aco_expire_drops(request: Request):
+    # Vercel's Hobby-tier cron only runs daily at coarsest, far too slow
+    # for a Status badge staff expects to flip promptly once a countdown
+    # ends - this is meant to be hit by a tight self-looping GitHub
+    # Actions workflow instead (same pattern as nft-intel-poll.yml), not
+    # Vercel's own cron schedule. Guarded by its own scoped secret, not
+    # the shared cron_secret - see aco_cron_secret in config.py.
+    expected = f"Bearer {settings.aco_cron_secret}"
+    if not settings.aco_cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    refreshed_count = await _aco_expire_stale_drops()
+    return {"refreshed": refreshed_count}
+
+
 @app.get("/cron/test-monitor-channel")
 async def test_monitor_channel(request: Request, channel_id: str = Query(None, min_length=1, max_length=32)):
     # Verifies a channel is actually postable end-to-end - env var
@@ -1583,7 +1598,20 @@ def _aco_drop_embed(drop: dict, ticket_count: int, member_count: int, *, show_wa
     # distinction isn't lost, but "is this drop still open" needs to read
     # at a glance without parsing "Resolved" vs "Cancelled" as synonyms
     # for done.
-    status_label = {"open": "🟢 Open", "resolved": "🔒 Closed (Resolved)", "cancelled": "🔒 Closed (Cancelled)"}.get(status, status)
+    #
+    # Expiry is display-only, computed from the deadline every render,
+    # never written to the status column: staff still needs Mark
+    # Resolved/Cancel Drop to work on a drop whose countdown already
+    # passed (confirmed real workflow - the deadline is when submissions
+    # stop, not when the drop's actual outcome is known, which is
+    # normally settled well after). Storing a real "expired" status would
+    # have made _aco_drop_components treat it like resolved/cancelled and
+    # strip those buttons - this keeps the badge honest without taking
+    # away staff's ability to finalize it whenever they're ready.
+    if status == "open" and _aco_deadline_passed(drop):
+        status_label = "🔒 Closed (Expired)"
+    else:
+        status_label = {"open": "🟢 Open", "resolved": "🔒 Closed (Resolved)", "cancelled": "🔒 Closed (Cancelled)"}.get(status, status)
     fields = [
         {"name": "Chain", "value": drop.get("chain") or "-", "inline": True},
         {"name": "⏳ Countdown", "value": _aco_deadline_countdown(drop.get("deadline")), "inline": True},
@@ -1626,7 +1654,7 @@ def _aco_drop_embed(drop: dict, ticket_count: int, member_count: int, *, show_wa
     }
 
 
-def _aco_drop_components(drop_id: str, status: str, *, submit: bool = True, staff: bool = False) -> list:
+def _aco_drop_components(drop_id: str, status: str, *, submit: bool = True, staff: bool = False, expired: bool = False) -> list:
     # `submit` and `staff` are independent, not two ends of one toggle:
     # the public announcement message gets submit=True, staff=False; the
     # mirrored staff-controls message (see _handle_aco_create_submit) gets
@@ -1637,8 +1665,14 @@ def _aco_drop_components(drop_id: str, status: str, *, submit: bool = True, staf
     # view - Discord has no per-viewer component visibility within one
     # message, so not rendering them there is the only real way to keep
     # non-staff from seeing them at all.
+    #
+    # `expired` only ever hides Submit Wallet(s) - Mark Resolved/Cancel
+    # Drop stay available on status=="open" regardless, since staff still
+    # needs to finalize a drop whose countdown has already passed (the
+    # normal case, not an edge one - see _aco_drop_embed for the full
+    # reasoning on why expiry never touches the actual status value).
     buttons = []
-    if submit and status == "open":
+    if submit and status == "open" and not expired:
         buttons.append({"type": 2, "style": 1, "label": "Submit Wallet(s)", "custom_id": f"acojoin:{drop_id}"})
     if staff:
         buttons.append({"type": 2, "style": 2, "label": "See Wallets", "custom_id": f"acowallets:{drop_id}"})
@@ -2115,6 +2149,52 @@ async def _aco_finalize_drop(drop_id: str, status: str, actor_id: str) -> dict:
             "components": _aco_drop_components(drop_id, status, submit=not has_staff_msg, staff=True),
         },
     }
+
+
+async def _aco_refresh_expired_drop_display(client: httpx.AsyncClient, drop: dict) -> None:
+    # Re-edits a drop's already-posted message(s) so the Status badge
+    # actually reflects its countdown having passed, instead of sitting
+    # on a stale "Open" until the next unrelated edit happens to touch it
+    # (a wallet submission, staff clicking something). status itself is
+    # never written here - see _aco_drop_embed for why. Same
+    # public/staff-mirror editing pattern as _handle_aco_wallet_submit.
+    drop_id = drop["id"]
+    ticket_count, member_count, _ = await _aco_ticket_counts(client, drop_id)
+    has_staff_msg = bool(drop.get("discord_staff_message_id"))
+    public_embed = _aco_drop_embed(drop, ticket_count, member_count, show_wallets=not has_staff_msg)
+    await _discord_edit_channel_message(
+        drop.get("discord_channel_id"), drop.get("discord_message_id"),
+        public_embed, _aco_drop_components(drop_id, drop["status"], submit=True, staff=not has_staff_msg, expired=True),
+    )
+    if has_staff_msg:
+        staff_embed = _aco_drop_embed(drop, ticket_count, member_count, show_wallets=True)
+        await _discord_edit_channel_message(
+            drop.get("discord_staff_channel_id"), drop.get("discord_staff_message_id"),
+            staff_embed, _aco_drop_components(drop_id, drop["status"], submit=False, staff=True, expired=True),
+        )
+
+
+async def _aco_expire_stale_drops() -> int:
+    # Finds every still-open drop whose countdown has already passed and
+    # refreshes its live message(s) to show Closed (Expired). Deliberately
+    # does NOT write to aco_drops.status - see _aco_drop_embed for why
+    # that would silently take away staff's Mark Resolved/Cancel Drop
+    # buttons, which they still need after the deadline in the normal
+    # case, not just an edge one.
+    async with httpx.AsyncClient(timeout=30) as client:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/aco_drops",
+            headers=_supabase_headers(),
+            params={"status": "eq.open", "deadline": f"lt.{datetime.now(timezone.utc).isoformat()}", "select": "*"},
+        )
+        res.raise_for_status()
+        stale_drops = res.json()
+        for drop in stale_drops:
+            try:
+                await _aco_refresh_expired_drop_display(client, drop)
+            except httpx.HTTPError:
+                logger.exception("Failed to refresh expired-display for ACO drop %s", drop.get("id"))
+    return len(stale_drops)
 
 
 async def _handle_aco_resolve_button(payload: dict, drop_id: str) -> dict:

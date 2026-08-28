@@ -49,6 +49,16 @@ class Settings(BaseSettings):
     # distinct limits the blast radius if it ever leaks.
     nft_cron_secret: str = ""
 
+    # Same isolation reasoning as nft_cron_secret, for the same structural
+    # reason: the ACO drop-expiry poller also has to run every couple
+    # minutes via a self-looping GitHub Actions workflow (Vercel's Hobby
+    # cron tier only runs daily, far too coarse for a Status badge staff
+    # expects to flip promptly), putting it on that same frequently-
+    # exposed log surface. Kept scoped to only this one low-stakes,
+    # idempotent endpoint rather than the shared cron_secret that also
+    # guards aco-key-cleanup's thread-deletion.
+    aco_cron_secret: str = ""
+
     # Pidgin AutoMod: English-only enforcement in #general (10-min timeout),
     # exempting every other channel (Discord AutoMod has no "only apply in
     # these channels" allowlist - only an exempt-list) so #lifestyle-chat
