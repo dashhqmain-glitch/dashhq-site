@@ -2228,15 +2228,19 @@ async def _handle_aco_support_open(payload: dict, drop_id: str | None = None) ->
     await _discord_deferred_ack(interaction_id, token, ephemeral=True)
 
     async with httpx.AsyncClient(timeout=20) as client:
-        # Confirmed live gap: a member submitting wallets to several
-        # drops in a row could click "Need Help?" after each one and
-        # accumulate multiple simultaneous open tickets, with no way to
-        # tell they already had one. Point them back to the existing
-        # thread instead of spawning a duplicate.
+        # Dedup is scoped PER DROP, not globally per member - a member
+        # working 5 different projects can have 5 genuinely separate open
+        # tickets at once, one per drop, instead of every "Need Help?"
+        # click after the first getting redirected back to whichever
+        # project's thread happened to be open first. A generic ticket
+        # (no drop_id) still dedupes against other generic ones, since
+        # there's no project to distinguish those by.
+        dedup_params = {"discord_user_id": f"eq.{discord_user_id}", "status": "eq.open", "select": "thread_id", "limit": "1"}
+        dedup_params["drop_id"] = f"eq.{drop_id}" if drop_id else "is.null"
         existing_res = await client.get(
             f"{settings.supabase_url}/rest/v1/aco_support_tickets",
             headers=_supabase_headers(),
-            params={"discord_user_id": f"eq.{discord_user_id}", "status": "eq.open", "select": "thread_id", "limit": "1"},
+            params=dedup_params,
         )
         existing_res.raise_for_status()
         existing = existing_res.json()
@@ -2310,7 +2314,7 @@ async def _handle_aco_support_open(payload: dict, drop_id: str | None = None) ->
         await client.post(
             f"{settings.supabase_url}/rest/v1/aco_support_tickets",
             headers=_supabase_headers(prefer="return=minimal"),
-            json={"discord_user_id": discord_user_id, "thread_id": thread_id},
+            json={"discord_user_id": discord_user_id, "thread_id": thread_id, "drop_id": drop_id},
         )
     await _aco_log(f"🎫 **Support ticket opened** by <@{discord_user_id}>: <#{thread_id}>")
     await _discord_edit_original_raw(token, {"content": f"✅ Ticket opened: <#{thread_id}>"})
@@ -2374,10 +2378,15 @@ async def _handle_aco_key_open(payload: dict, drop_id: str | None = None) -> dic
     await _discord_deferred_ack(interaction_id, token, ephemeral=True)
 
     async with httpx.AsyncClient(timeout=20) as client:
+        # Same per-drop dedup scoping as support tickets - different drops
+        # routinely need different burner wallets, so a handoff open for
+        # drop A must not block opening a genuinely separate one for drop B.
+        dedup_params = {"discord_user_id": f"eq.{discord_user_id}", "status": "eq.open", "select": "thread_id", "limit": "1"}
+        dedup_params["drop_id"] = f"eq.{drop_id}" if drop_id else "is.null"
         existing_res = await client.get(
             f"{settings.supabase_url}/rest/v1/aco_key_handoffs",
             headers=_supabase_headers(),
-            params={"discord_user_id": f"eq.{discord_user_id}", "status": "eq.open", "select": "thread_id", "limit": "1"},
+            params=dedup_params,
         )
         existing_res.raise_for_status()
         existing = existing_res.json()
@@ -2444,7 +2453,7 @@ async def _handle_aco_key_open(payload: dict, drop_id: str | None = None) -> dic
         await client.post(
             f"{settings.supabase_url}/rest/v1/aco_key_handoffs",
             headers=_supabase_headers(prefer="return=minimal"),
-            json={"discord_user_id": discord_user_id, "thread_id": thread_id},
+            json={"discord_user_id": discord_user_id, "thread_id": thread_id, "drop_id": drop_id},
         )
     # Metadata only in the log line too - a thread reference and who
     # opened it, never anything about what's inside.

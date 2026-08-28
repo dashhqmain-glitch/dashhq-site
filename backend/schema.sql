@@ -498,6 +498,17 @@ create index if not exists aco_support_tickets_status_idx on aco_support_tickets
 
 alter table aco_support_tickets enable row level security;
 
+-- Which drop this ticket is about - null for a generic ticket opened with
+-- no specific project in context. Nullable, and on delete set null rather
+-- than cascade: a closed ticket's history is a real support record staff
+-- may still want to review, so it must survive the drop it was about
+-- eventually being deleted, just losing the link. This is what makes
+-- per-project ticket dedup possible - a member with an open ticket for
+-- drop A can still open a genuinely separate one for drop B, instead of
+-- being pointed back at A's thread regardless of which drop they meant.
+alter table aco_support_tickets add column if not exists drop_id uuid references aco_drops(id) on delete set null;
+create index if not exists aco_support_tickets_user_drop_idx on aco_support_tickets (discord_user_id, drop_id, status);
+
 -- Private-key handoff tracking - deliberately METADATA ONLY. This table
 -- (and every line of Python that touches it) never stores, reads, or
 -- forwards the key itself - only that a handoff thread exists, who
@@ -521,6 +532,13 @@ create table if not exists aco_key_handoffs (
 create index if not exists aco_key_handoffs_status_idx on aco_key_handoffs (status);
 
 alter table aco_key_handoffs enable row level security;
+
+-- Same reasoning as aco_support_tickets.drop_id: a member handing off a
+-- burner-wallet key for drop A must still be able to open a genuinely
+-- separate handoff for drop B, since different drops routinely need
+-- different burner wallets.
+alter table aco_key_handoffs add column if not exists drop_id uuid references aco_drops(id) on delete set null;
+create index if not exists aco_key_handoffs_user_drop_idx on aco_key_handoffs (discord_user_id, drop_id, status);
 
 -- Rotating educational/rules content, posted automatically on a schedule
 -- (see /cron/aco-education) - adding a new guide later is just an insert

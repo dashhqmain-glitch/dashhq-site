@@ -970,6 +970,81 @@ async def test_support_open_reuses_existing_open_ticket_instead_of_duplicating()
     assert "existingthread" in body["content"]
 
 
+async def test_support_open_dedup_is_scoped_per_drop_not_globally():
+    # The actual feature request: a member with an open ticket for drop A
+    # must still be able to open a genuinely separate one for drop B - not
+    # get redirected back to A's thread just because they have ANY open
+    # ticket. FakeClient answers the dedup GET based on which drop_id the
+    # query is actually scoped to, simulating "drop1 has an open ticket,
+    # drop2 does not".
+    settings.discord_bot_token = "tok"
+    inserted = {}
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "aco_drops" in url:
+                return FakeRes(200, [{"id": "drop2", "title": "Second Project", "status": "open", "deadline": "2026-12-25T18:00:00+00:00"}])
+            if "aco_support_tickets" in url:
+                if params.get("drop_id") == "eq.drop1":
+                    return FakeRes(200, [{"thread_id": "drop1thread"}])
+                return FakeRes(200, [])  # no existing ticket scoped to drop2 (or any other drop_id)
+            return FakeRes(200, [])
+
+        async def post(self, url, headers=None, json=None):
+            if "/threads" in url:
+                return FakeRes(200, {"id": "newthreadfordrop2"})
+            if "aco_support_tickets" in url:
+                inserted.update(json)
+            return FakeRes(200, {})
+
+        async def put(self, url, headers=None, json=None):
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        result = await main._handle_aco_support_open(_payload(channel_id="chan1"), "drop2")
+
+    assert result["type"] == 5
+    assert inserted["drop_id"] == "drop2"
+    assert inserted["thread_id"] == "newthreadfordrop2"
+
+
+async def test_support_open_dedup_still_reuses_thread_for_the_same_drop():
+    settings.discord_bot_token = "tok"
+    patches = []
+    thread_created = {"called": False}
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "aco_support_tickets" in url and params.get("drop_id") == "eq.drop1":
+                return FakeRes(200, [{"thread_id": "existingdrop1thread"}])
+            return FakeRes(200, [{"thread_id": "existingdrop1thread"}]) if "channels" in url else FakeRes(200, [])
+
+        async def post(self, url, headers=None, json=None):
+            if "/threads" in url:
+                thread_created["called"] = True
+            return FakeRes(200, {"id": "shouldnotbeused"})
+
+        async def put(self, url, headers=None, json=None):
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            patches.append((url, json))
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        result = await main._handle_aco_support_open(_payload(channel_id="chan1"), "drop1")
+
+    assert result["type"] == 5
+    assert thread_created["called"] is False
+    body = _webhook_patch_body(patches)
+    assert "existingdrop1thread" in body["content"]
+
+
 async def test_support_open_creates_a_new_thread_when_none_open():
     settings.discord_bot_token = "tok"
     patches = []
@@ -1470,6 +1545,82 @@ async def test_key_open_reuses_existing_open_handoff():
     assert thread_created["called"] is False
     body = _webhook_patch_body(patches)
     assert "existingkeythread" in body["content"]
+
+
+async def test_key_open_dedup_is_scoped_per_drop_not_globally():
+    # Same feature as support tickets: different drops routinely need
+    # different burner wallets, so a handoff open for drop1 must not block
+    # opening a genuinely separate one for drop2.
+    settings.discord_bot_token = "tok"
+    settings.discord_aco_support_channel_id = "support-chan"
+    inserted = {}
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "aco_drops" in url:
+                return FakeRes(200, [{"id": "drop2", "title": "Second Project", "status": "open", "deadline": "2026-12-25T18:00:00+00:00"}])
+            if "aco_key_handoffs" in url:
+                if params.get("drop_id") == "eq.drop1":
+                    return FakeRes(200, [{"thread_id": "drop1keythread"}])
+                return FakeRes(200, [])
+            return FakeRes(200, [])
+
+        async def post(self, url, headers=None, json=None):
+            if "/threads" in url:
+                return FakeRes(200, {"id": "newkeythreadfordrop2"})
+            if "aco_key_handoffs" in url:
+                inserted.update(json)
+            return FakeRes(200, {})
+
+        async def put(self, url, headers=None, json=None):
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        result = await main._handle_aco_key_open(_payload(channel_id="announcement-chan"), "drop2")
+
+    assert result["type"] == 5
+    assert inserted["drop_id"] == "drop2"
+    assert inserted["thread_id"] == "newkeythreadfordrop2"
+
+
+async def test_key_open_dedup_still_reuses_thread_for_the_same_drop():
+    settings.discord_bot_token = "tok"
+    settings.discord_aco_support_channel_id = "support-chan"
+    patches = []
+    thread_created = {"called": False}
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "aco_key_handoffs" in url and params.get("drop_id") == "eq.drop1":
+                return FakeRes(200, [{"thread_id": "existingdrop1keythread"}])
+            if "channels" in url:
+                return FakeRes(200, {"id": "existingdrop1keythread"})
+            return FakeRes(200, [])
+
+        async def post(self, url, headers=None, json=None):
+            if "/threads" in url:
+                thread_created["called"] = True
+            return FakeRes(200, {"id": "shouldnotbeused"})
+
+        async def put(self, url, headers=None, json=None):
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            patches.append((url, json))
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        result = await main._handle_aco_key_open(_payload(channel_id="announcement-chan"), "drop1")
+
+    assert result["type"] == 5
+    assert thread_created["called"] is False
+    body = _webhook_patch_body(patches)
+    assert "existingdrop1keythread" in body["content"]
 
 
 async def test_key_open_recovers_from_a_stale_thread_reference():
