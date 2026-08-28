@@ -30,6 +30,19 @@ def test_normalize_collection_key_is_case_and_separator_insensitive():
     assert main._normalize_collection_key("Pudgy_Penguins") == main._normalize_collection_key("pudgy penguins")
 
 
+def test_extract_opensea_slug_from_real_url_shapes():
+    # The exact real-world case reported live: a pasted OpenSea collection
+    # URL in the collection field, with or without scheme/query string.
+    assert main._extract_opensea_slug("https://opensea.io/collection/naives-by-mannay") == "naives-by-mannay"
+    assert main._extract_opensea_slug("opensea.io/collection/naives-by-mannay") == "naives-by-mannay"
+    assert main._extract_opensea_slug("https://opensea.io/collection/naives-by-mannay?tab=items") == "naives-by-mannay"
+
+
+def test_extract_opensea_slug_returns_none_for_non_url_input():
+    assert main._extract_opensea_slug("Naives by Mannay") is None
+    assert main._extract_opensea_slug("0x263f61210bf2a0e0dc56fbd35813ccf04050ebfb") is None
+
+
 def _collection(slug, name, floor=0.1):
     return {
         "slug": slug, "name": name, "image": None, "floor": floor,
@@ -110,6 +123,56 @@ async def test_pnl_falls_back_to_top_result_when_nothing_matches_exactly():
 
     assert captured["project"] == "Naïve by Olga Fradina"
     assert matched_exactly is False
+
+
+async def test_pnl_recognizes_opensea_url_pasted_into_collection_field():
+    # Real bug reproduction: a pasted OpenSea URL in the free-text
+    # `collection` field (not `contract_address`) used to fall through to
+    # fuzzy search on the whole URL string, which never exact-matches
+    # anything - triggering the "no exact match" warning even though the
+    # URL unambiguously names one real collection. Must resolve directly,
+    # with matched_exactly=True, no warning.
+    intended = _collection("naives-by-mannay----", "Naives by Mannay")
+    captured = {}
+
+    async def exploding_search(q):
+        raise AssertionError("a recognized OpenSea URL should never fall through to text search")
+
+    async def fake_collection_core(slug):
+        assert slug == "naives-by-mannay"
+        return intended
+
+    with patch.object(main, "_nft_search_core", new=exploding_search), \
+         patch.object(main, "_nft_collection_core", new=fake_collection_core), \
+         patch.object(main.pnl_card, "render_pnl_card", new=_patched_render(captured)):
+        png, matched_exactly = await main._pnl_render_core(
+            "https://opensea.io/collection/naives-by-mannay", "0.03", 1, "citizen",
+        )
+
+    assert captured["project"] == "Naives by Mannay"
+    assert matched_exactly is True
+
+
+async def test_pnl_recognizes_opensea_url_pasted_into_contract_address_field():
+    # Same recognition, but for someone who (reasonably) pastes the URL
+    # into contract_address instead, since "contract address" reads to a
+    # real user as "the thing that identifies it precisely".
+    intended = _collection("naives-by-mannay----", "Naives by Mannay")
+    captured = {}
+
+    async def fake_collection_core(slug):
+        assert slug == "naives-by-mannay"
+        return intended
+
+    with patch.object(main, "_nft_collection_core", new=fake_collection_core), \
+         patch.object(main.pnl_card, "render_pnl_card", new=_patched_render(captured)):
+        png, matched_exactly = await main._pnl_render_core(
+            "Naives by Mannay", "0.03", 1, "citizen",
+            contract_address="https://opensea.io/collection/naives-by-mannay",
+        )
+
+    assert captured["project"] == "Naives by Mannay"
+    assert matched_exactly is True
 
 
 GOOD_ADDR = "0x263f61210bf2a0e0dc56fbd35813ccf04050ebfb"

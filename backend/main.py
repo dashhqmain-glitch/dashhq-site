@@ -8386,6 +8386,18 @@ def _normalize_collection_key(s: str) -> str:
     return s.strip("-")
 
 
+_OPENSEA_COLLECTION_URL_RE = re.compile(r"opensea\.io/(?:[a-z0-9_-]+/)?collection/([a-z0-9-]+)", re.IGNORECASE)
+
+
+def _extract_opensea_slug(s: str) -> str | None:
+    # Recognizes a pasted OpenSea collection URL (any chain-prefixed form,
+    # e.g. /collection/x or /assets/base/collection/x) and pulls the slug
+    # straight out of it - a URL names exactly one collection, so this is
+    # just as authoritative as a raw contract address, not a text search.
+    m = _OPENSEA_COLLECTION_URL_RE.search(s.strip())
+    return m.group(1) if m else None
+
+
 async def _pnl_render_core(
     collection_query: str, mint_price_raw, amount_minted: int, x_username: str,
     exit_price_raw=None, contract_address: str | None = None,
@@ -8399,14 +8411,24 @@ async def _pnl_render_core(
     only OpenSea's own possibly-ambiguous search). The caller surfaces this
     so a wrong guess is visible immediately instead of silently trusted."""
     matched_exactly = True
-    if contract_address:
+    # An OpenSea collection URL is authoritative regardless of which field
+    # it landed in - "collection name or contract address" reasonably
+    # reads as "anything that identifies it" to a real user, confirmed
+    # live: a pasted opensea.io/collection/<slug> URL in the collection
+    # field fell through to fuzzy text search on the whole URL string,
+    # which doesn't exact-match anything, instead of being recognized.
+    url_slug = _extract_opensea_slug(contract_address or "") or _extract_opensea_slug(collection_query or "")
+    if url_slug:
+        c = await _nft_collection_core(url_slug)
+        slug = c["slug"]
+    elif contract_address:
         # Authoritative path: a contract address names exactly one
         # collection on exactly one chain, with zero ambiguity - skips text
         # search entirely instead of merely narrowing it. This is the
         # strongest guarantee available, since even an exact NAME match can
         # still theoretically collide if two collections share a name.
         if not _EVM_ADDRESS_RE.match(contract_address.strip()):
-            raise HTTPException(status_code=400, detail=f'"{contract_address}" is not a valid contract address.')
+            raise HTTPException(status_code=400, detail=f'"{contract_address}" is not a valid contract address or OpenSea collection URL.')
         async with httpx.AsyncClient(timeout=10) as lookup_client:
             c = await _nft_resolve_by_contract(lookup_client, contract_address.strip())
         if not c:
