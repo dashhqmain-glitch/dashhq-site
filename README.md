@@ -152,3 +152,50 @@ No new env vars, no new infrastructure - this rides the same 5-minute
 `/cron/nft-poll` cycle and the same bot token (DMs use
 `POST /users/@me/channels` + `POST /channels/{id}/messages`, still no
 Discord gateway connection anywhere in this backend).
+
+### `/smart-wallets` — curated wallet tags feeding NFT Scope (2026-09)
+Replaces the old NFT Intel feature (wallet-following mint alerts, removed):
+that posted an alert the instant any wallet on an auto-growing, unlabeled
+tracked-wallet list minted anything at all, with no cross-referencing and
+no explanation of why the wallet mattered. This is the opposite shape - a
+staff-imported, externally-curated leaderboard (rank/PnL/credential per
+wallet, e.g. "Top 6 REALCOIN," "Rank 1 RH MACHINES," scraped from sources
+like GMGN or a chain's own OpenSea/explorer leaderboard) that only ever
+feeds in as one more bonus signal inside NFT Scope's existing scoring - it
+can raise a score, it can never post an alert on its own.
+
+**`/smart-wallets import`** (team only) - upload a text file built from
+either real source shape this was designed against: a GMGN-style
+tab-separated export, or a Notion wallet-page export (one file per wallet
+with `Rank:`/`Tag:` fields - concatenate the exported `.md` files into one
+upload first, e.g. `Get-Content *.md > combined.txt`). The parser
+auto-detects the shape line-by-line/block-by-block, so a single file can
+even mix them. Runs through the same deferred-worker pattern `/history`
+established (`/discord/smart-wallets-worker`) since fetching the
+attachment + parsing + bulk upsert can exceed Discord's 3-second window.
+
+**`/smart-wallets list`** / **`/smart-wallets clear [tag]`** (team only) -
+see what's tracked, or wipe one tag's wallets (or everything).
+
+**`/xray` enrichment** - any address with tracked-wallet rows shows a
+"🏷️ Tracked As" field with its credentials.
+
+**NFT Scope integration** - `_nft_scope_tracked_wallet_hits` cross-
+references the same verified buyer addresses every other wallet signal
+already fetched against `smart_wallet_tags`, and `_nft_scope_tracked_wallet_points`
+scores the overlap (with a convergence bonus when several distinct tracked
+wallets show up on the same candidate at once). No new cron, no new
+channel, no new external API key - it rides the same 5-minute
+`/cron/nft-poll` cycle NFT Scope already runs.
+
+**New Supabase table**: `smart_wallet_tags` (`backend/schema.sql`) - one
+row per (wallet, tag), since a single wallet routinely carries several
+credentials at once.
+
+`_NFT_SCOPE_CHAINS` also gained `ink` and `hyperevm` alongside the
+existing 7 chains, so NFT Scope's discovery passes (and this
+cross-reference) cover both. `hyperevm`'s OpenSea coverage wasn't
+independently verified before adding it - same fail-open pattern as every
+other chain here, so an unsupported slug just silently contributes zero
+candidates rather than erroring, but confirm live after deploy that it's
+actually returning results.

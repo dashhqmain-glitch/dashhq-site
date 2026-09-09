@@ -687,7 +687,7 @@ async def cron_aco_expire_drops(request: Request):
     # Vercel's Hobby-tier cron only runs daily at coarsest, far too slow
     # for a Status badge staff expects to flip promptly once a countdown
     # ends - this is meant to be hit by a tight self-looping GitHub
-    # Actions workflow instead (same pattern as nft-intel-poll.yml), not
+    # Actions workflow instead (same pattern as nft-poll.yml), not
     # Vercel's own cron schedule. Guarded by its own scoped secret, not
     # the shared cron_secret - see aco_cron_secret in config.py.
     expected = f"Bearer {settings.aco_cron_secret}"
@@ -1303,8 +1303,8 @@ async def _dispatch_interaction(payload: dict, itype) -> dict:
             return await _handle_my_aco_command(payload)
         if cmd_name == "aco-info":
             return await _handle_aco_info_command(payload)
-        if cmd_name == "nft-intel-wallets":
-            return await _handle_nft_intel_wallets_command(payload)
+        if cmd_name == "smart-wallets":
+            return await _handle_smart_wallets_command(payload)
         return await _handle_toolkit_command(payload)
 
     if itype == 4:  # APPLICATION_COMMAND_AUTOCOMPLETE
@@ -3118,6 +3118,301 @@ async def discord_history_worker(request: Request):
     return {"ok": True}
 
 
+# ── Smart Wallet Tags — staff-imported, credentialed wallet leaderboards ──
+# Replaces NFT Intel (deleted): that fed an alert off ANY wallet on an
+# auto-growing, unlabeled tracked-wallet list minting anything at all, with
+# no cross-referencing and no explanation of why the wallet mattered - pure
+# volume. This is the opposite shape: staff imports a MANUALLY-CURATED,
+# externally-scraped leaderboard (rank/PnL/credential per wallet, e.g. "Top
+# 6 REALCOIN", "Rank 1 RH MACHINES") via /smart-wallets import, and it only
+# ever feeds in as ONE MORE bonus signal inside NFT Scope's existing
+# scoring (_nft_scope_tracked_wallet_hits, wired into _nft_scope_score) -
+# it can raise a score, never post on its own. No new cron, no new
+# channel, no new external API key: it rides the same 5-minute
+# /cron/nft-poll cycle NFT Scope already runs, reusing the buyer addresses
+# NFT Scope's own rapid-activity check already fetches.
+_SWT_ADDR_RE = re.compile(r"0x[a-fA-F0-9]{40}")
+_SWT_NOTION_HEADER_RE = re.compile(r"^#\s*(0x[a-fA-F0-9]{40})", re.IGNORECASE)
+_SWT_NOTION_RANK_RE = re.compile(r"^Rank:\s*(-?\d+)", re.IGNORECASE | re.MULTILINE)
+_SWT_NOTION_TAG_RE = re.compile(r"^Tag:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
+_SWT_LABEL_SEGMENT_RE = re.compile(r"\s*[•|]\s*")
+# Order matters - first match wins. Covers every credential shape actually
+# seen in real scraped trackers: "Top N TAG", "Early TAG @$Xk", "Sniper
+# TAG", "N.Nx TAG +$X". Anything that matches none of these falls back to
+# using the whole segment verbatim as the tag - never silently dropped.
+_SWT_LABEL_PATTERNS = [
+    re.compile(r"^Top\s+(\d+)\s+(.+)$", re.IGNORECASE),
+    re.compile(r"^Early\s+(.+?)\s+@", re.IGNORECASE),
+    re.compile(r"^Sniper\s+(.+)$", re.IGNORECASE),
+    re.compile(r"^[\d.]+x\s+(.+?)(?:\s+\+.*)?$", re.IGNORECASE),
+]
+
+
+def _swt_extract_tags_from_label(label: str) -> list[tuple[str, int | None]]:
+    out: list[tuple[str, int | None]] = []
+    for segment in _SWT_LABEL_SEGMENT_RE.split(label):
+        segment = segment.strip()
+        if not segment:
+            continue
+        matched = False
+        for pattern in _SWT_LABEL_PATTERNS:
+            m = pattern.match(segment)
+            if not m:
+                continue
+            groups = m.groups()
+            if len(groups) == 2:  # "Top N TAG"
+                out.append((groups[1].strip(), int(groups[0])))
+            else:
+                out.append((groups[0].strip(), None))
+            matched = True
+            break
+        if not matched:
+            out.append((segment, None))
+    return out
+
+
+def _parse_smart_wallet_import(text: str) -> tuple[list[dict], int]:
+    # Auto-detects whichever of the two real source shapes staff throws at
+    # this: a Notion wallet-page export (one "# 0x..." block per wallet
+    # with Rank:/Tag: lines - staff concatenates the exported .md files
+    # into one upload, e.g. `Get-Content *.md > combined.txt`), or a
+    # tab-separated leaderboard row in either of its two real flavors
+    # (an explicit comma-separated tag list, or a composite credential
+    # label plus a trailing profile URL). Returns (rows, skipped_count) -
+    # every address lowercased, never raises on a malformed line.
+    rows: list[dict] = []
+    skipped = 0
+
+    if _SWT_NOTION_HEADER_RE.search(text):
+        blocks = re.split(r"(?=^#\s*0x[a-fA-F0-9]{40})", text, flags=re.IGNORECASE | re.MULTILINE)
+        for block in blocks:
+            header = _SWT_NOTION_HEADER_RE.match(block.strip())
+            if not header:
+                continue
+            address = header.group(1).lower()
+            tag_match = _SWT_NOTION_TAG_RE.search(block)
+            if not tag_match:
+                skipped += 1
+                continue
+            rank_match = _SWT_NOTION_RANK_RE.search(block)
+            rank = int(rank_match.group(1)) if rank_match else None
+            for tag in _SWT_LABEL_SEGMENT_RE.split(tag_match.group(1).strip()):
+                tag = tag.strip()
+                if tag:
+                    rows.append({"address": address, "tag": tag, "rank": rank, "pnl": None})
+        return rows, skipped
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        fields = re.split(r"\t+", line)
+        if len(fields) < 4:
+            fields = re.split(r"\s{2,}", line)
+        if len(fields) < 4:
+            skipped += 1
+            continue
+        fields = [f.strip() for f in fields]
+
+        # A 5th real-world shape: "rank, address, explorer_url, opensea_url,
+        # project_name" (rank leads, tag trails, two URL columns in the
+        # middle carry no signal this bot needs). Detected by rank being
+        # numeric and the SECOND field being the address, rather than the
+        # first - every other shape above puts the address first.
+        if len(fields) >= 5 and fields[0].lstrip("-").isdigit() and _SWT_ADDR_RE.fullmatch(fields[1]):
+            address = fields[1].lower()
+            tag = fields[-1]
+            if tag:
+                rows.append({"address": address, "tag": tag, "rank": int(fields[0]), "pnl": None})
+            else:
+                skipped += 1
+            continue
+
+        address_raw, label, pnl_raw, last = fields[0], fields[1], fields[2], fields[3]
+        if not _SWT_ADDR_RE.fullmatch(address_raw):
+            skipped += 1
+            continue
+        address = address_raw.lower()
+        try:
+            pnl = float(pnl_raw.replace(",", ""))
+        except ValueError:
+            pnl = None
+
+        if last.lower().startswith("http"):
+            for tag, rank in _swt_extract_tags_from_label(label):
+                rows.append({"address": address, "tag": tag, "rank": rank, "pnl": pnl})
+        else:
+            for tag in last.split(","):
+                tag = tag.strip()
+                if tag:
+                    rows.append({"address": address, "tag": tag, "rank": None, "pnl": pnl})
+    return rows, skipped
+
+
+async def _smart_wallet_tags_for_address(address: str) -> list[dict]:
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            res = await client.get(
+                f"{settings.supabase_url}/rest/v1/smart_wallet_tags",
+                headers=_supabase_headers(),
+                params={"address": f"eq.{address.lower()}", "select": "tag,rank,pnl", "order": "rank.asc.nullslast"},
+            )
+            res.raise_for_status()
+            return res.json()
+    except httpx.HTTPError:
+        return []
+
+
+async def _dispatch_smart_wallets_worker(**kwargs) -> None:
+    # Same reasoning as _dispatch_history_worker above - Mangum blocks on
+    # the entire ASGI cycle regardless of FastAPI BackgroundTasks, so a
+    # fetch-attachment + parse + bulk-upsert sequence needs to run in a
+    # genuinely separate invocation, not "deferred" work tied to this one.
+    try:
+        async with httpx.AsyncClient(timeout=2.5) as client:
+            await client.post(
+                f"{settings.frontend_url}/discord/smart-wallets-worker",
+                json=kwargs,
+                headers={"X-Internal-Secret": settings.cron_secret},
+            )
+    except (httpx.TimeoutException, httpx.HTTPError):
+        pass
+
+
+def _smart_wallets_sub_options(payload: dict) -> dict:
+    sub_options = (payload.get("data") or {}).get("options") or []
+    if not sub_options:
+        return {}
+    return {o["name"]: o.get("value") for o in (sub_options[0].get("options") or [])}
+
+
+async def _handle_smart_wallets_import_command(payload: dict) -> dict:
+    if not _is_team_member(payload):
+        return {"type": 4, "data": {"content": "This command is for team members only.", "flags": 64}}
+    opts = _smart_wallets_sub_options(payload)
+    attachment_id = opts.get("file")
+    attachments = ((payload.get("data") or {}).get("resolved") or {}).get("attachments") or {}
+    attachment = attachments.get(attachment_id) if attachment_id else None
+    if not attachment or not attachment.get("url"):
+        return {"type": 4, "data": {"content": "No file attached.", "flags": 64}}
+
+    interaction_id = payload.get("id")
+    token = payload.get("token")
+    await _discord_deferred_ack(interaction_id, token, ephemeral=True)
+    await _dispatch_smart_wallets_worker(token=token, file_url=attachment["url"])
+    return {"type": 5}
+
+
+async def _handle_smart_wallets_list_command(payload: dict) -> dict:
+    if not _is_team_member(payload):
+        return {"type": 4, "data": {"content": "This command is for team members only.", "flags": 64}}
+    async with httpx.AsyncClient(timeout=15) as client:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/smart_wallet_tags",
+            headers=_supabase_headers(),
+            params={"select": "address,tag,imported_at", "order": "imported_at.desc"},
+        )
+        res.raise_for_status()
+        rows = res.json()
+    if not rows:
+        embed = {"title": "🏷️ Smart Wallet Tags", "description": "Nothing imported yet. Use `/smart-wallets import`.", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
+        return {"embeds": [_clean_embed(embed)], "flags": 64}
+    tag_counts: dict[str, int] = {}
+    addresses = set()
+    for r in rows:
+        tag_counts[r["tag"]] = tag_counts.get(r["tag"], 0) + 1
+        addresses.add(r["address"])
+    lines = [f"• **{tag}** — {count} wallet(s)" for tag, count in sorted(tag_counts.items(), key=lambda kv: -kv[1])]
+    embed = {
+        "title": "🏷️ Smart Wallet Tags",
+        "description": "\n".join(lines),
+        "color": EMBED_COLOR,
+        "footer": {"text": f"{len(addresses)} distinct wallet(s) across {len(tag_counts)} tag(s) · Last import {rows[0]['imported_at'][:10]}"},
+    }
+    return {"embeds": [_clean_embed(embed)], "flags": 64}
+
+
+async def _handle_smart_wallets_clear_command(payload: dict) -> dict:
+    if not _is_team_member(payload):
+        return {"type": 4, "data": {"content": "This command is for team members only.", "flags": 64}}
+    tag = (_smart_wallets_sub_options(payload).get("tag") or "").strip()
+    filter_params = {"tag": f"eq.{tag}"} if tag else {"address": "not.is.null"}
+    async with httpx.AsyncClient(timeout=15) as client:
+        count_res = await client.get(
+            f"{settings.supabase_url}/rest/v1/smart_wallet_tags",
+            headers=_supabase_headers(),
+            params={**filter_params, "select": "address"},
+        )
+        count_res.raise_for_status()
+        count = len(count_res.json())
+        if count == 0:
+            embed = {"title": "Nothing to clear", "description": f'No rows match "{tag}".' if tag else "The table is already empty.", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
+            return {"embeds": [_clean_embed(embed)], "flags": 64}
+        del_res = await client.delete(
+            f"{settings.supabase_url}/rest/v1/smart_wallet_tags",
+            headers=_supabase_headers(prefer="return=minimal"),
+            params=filter_params,
+        )
+        del_res.raise_for_status()
+    embed = {
+        "title": "🗑️ Cleared",
+        "description": f"Removed {count} row(s)" + (f" tagged **{tag}**." if tag else " (everything)."),
+        "color": EMBED_COLOR_GOOD, "footer": TOOLKIT_FOOTER,
+    }
+    return {"embeds": [_clean_embed(embed)], "flags": 64}
+
+
+async def _handle_smart_wallets_command(payload: dict) -> dict:
+    sub_options = (payload.get("data") or {}).get("options") or []
+    sub_name = sub_options[0].get("name") if sub_options else None
+    if sub_name == "import":
+        return await _handle_smart_wallets_import_command(payload)
+    if sub_name == "list":
+        return await _handle_smart_wallets_list_command(payload)
+    if sub_name == "clear":
+        return await _handle_smart_wallets_clear_command(payload)
+    return {"type": 4, "data": {"content": "Unknown subcommand.", "flags": 64}}
+
+
+@app.post("/discord/smart-wallets-worker")
+async def discord_smart_wallets_worker(request: Request):
+    # Not reachable from Discord directly - same internal-secret gate as
+    # /discord/history-worker, and exists for the same reason: this does
+    # real network + parsing work an interaction's 3-second window can't
+    # reliably absorb.
+    if request.headers.get("X-Internal-Secret") != settings.cron_secret:
+        raise HTTPException(status_code=401, detail="unauthorized")
+    body = await request.json()
+    token = body.get("token")
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            file_res = await client.get(body["file_url"])
+            file_res.raise_for_status()
+            rows, skipped = _parse_smart_wallet_import(file_res.text)
+            if not rows:
+                await _discord_followup_patch(token, {"content": f"Nothing parsable in that file ({skipped} line(s) skipped)."})
+                return {"ok": True}
+            distinct_addresses = {r["address"] for r in rows}
+            distinct_tags = {r["tag"] for r in rows}
+            for i in range(0, len(rows), 500):  # Supabase/PostgREST-friendly batch size
+                chunk = [{**r, "source": "discord-import"} for r in rows[i:i + 500]]
+                res = await client.post(
+                    f"{settings.supabase_url}/rest/v1/smart_wallet_tags",
+                    headers=_supabase_headers(prefer="resolution=merge-duplicates,return=minimal"),
+                    json=chunk,
+                )
+                res.raise_for_status()
+            summary = f"✅ Imported {len(rows)} row(s) across {len(distinct_tags)} tag(s) for {len(distinct_addresses)} distinct wallet(s)."
+            if skipped:
+                summary += f" ⚠️ {skipped} line(s) couldn't be parsed and were skipped."
+            await _discord_followup_patch(token, {"content": summary})
+    except Exception:
+        logger.exception("smart-wallets import worker failed")
+        if token:
+            await _discord_followup_patch(token, {"content": "Something went wrong importing that file."})
+    return {"ok": True}
+
+
 # Most public RPC endpoints don't send CORS headers (they're built for
 # server/wallet use, not raw browser fetch), so gas price has to be proxied
 # server-side rather than called directly from the client like the other tools.
@@ -4091,7 +4386,16 @@ _NFT_FLOOR_CHANGE_THRESHOLD_PCT = 8.0  # minimum floor move (either direction) w
 # slugs elsewhere in this codebase (_NFT_CONTRACT_LOOKUP_CHAINS) - adding
 # them here covers three more entire, independent NFT ecosystems this
 # scan previously never touched at all.
-_NFT_SCOPE_CHAINS = ["ethereum", "base", "polygon", "robinhood", "arbitrum", "optimism", "avalanche"]
+#
+# ink/hyperevm added on top of that - same fail-open pattern as every
+# other chain here (_opensea_get returns nothing on an unsupported/hiccup
+# response, never an error), so an unsupported slug just silently
+# contributes zero candidates rather than breaking the scan. ink is a
+# known, live OpenSea chain slug; hyperevm's OpenSea coverage was not
+# independently verified before adding it here - confirm live after
+# deploy that it's actually returning collections, not silently
+# no-op'ing forever.
+_NFT_SCOPE_CHAINS = ["ethereum", "base", "polygon", "robinhood", "arbitrum", "optimism", "avalanche", "ink", "hyperevm"]
 
 
 async def _nft_store_snapshot(client: httpx.AsyncClient, c: dict) -> None:
@@ -5800,6 +6104,7 @@ def _nft_scope_score(
     c: dict, top_offer_amount: float | None, history: list[dict] | None = None,
     rapid_activity: dict | None = None, first_snapshot: dict | None = None, wash_analysis: dict | None = None,
     smart_wallet_hits: list[dict] | None = None, activity_spike_hits: list[dict] | None = None,
+    tracked_wallet_hits: list[dict] | None = None,
 ) -> dict:
     supply = c.get("totalSupply")
     owners = c.get("owners")
@@ -5904,6 +6209,14 @@ def _nft_scope_score(
     spike_points, spike_reasons = _nft_scope_activity_spike_points(activity_spike_hits)
     points += spike_points
     reasons.extend(spike_reasons)
+
+    # Tracked wallets (0-33) - a staff-curated, EXTERNALLY-scraped
+    # leaderboard (smart_wallet_tags), not this bot's own self-computed
+    # win rate above. Same "only ever adds on top of everything else"
+    # shape as every other wallet signal here.
+    tracked_points, tracked_reasons = _nft_scope_tracked_wallet_points(tracked_wallet_hits)
+    points += tracked_points
+    reasons.extend(tracked_reasons)
 
     # Rapid activity (0-20) - an early, fast-reacting supplement to the
     # snapshot-based momentum above, not a replacement or a shortcut
@@ -6677,16 +6990,62 @@ async def _nft_scope_spiking_wallets(client: httpx.AsyncClient, limit: int) -> l
         return []
 
 
-async def _nft_scope_wallet_signals(client: httpx.AsyncClient, rapid_activity: dict | None) -> tuple[list[dict], list[dict]]:
+_NFT_SCOPE_TRACKED_WALLET_BONUS_POINTS = 15
+_NFT_SCOPE_TRACKED_CONVERGENCE_POINTS_PER_WALLET = 6
+_NFT_SCOPE_TRACKED_CONVERGENCE_POINTS_CAP = 18
+
+
+async def _nft_scope_tracked_wallet_hits(client: httpx.AsyncClient, rapid_activity: dict | None) -> list[dict]:
+    # Cross-references the same verified buyer addresses every other
+    # wallet signal here already fetched against smart_wallet_tags - the
+    # staff-curated, externally-scraped leaderboard (see the "Smart Wallet
+    # Tags" section above), not this bot's own self-computed win rates.
+    buyer_addresses = (rapid_activity or {}).get("buyer_addresses") or []
+    if not buyer_addresses:
+        return []
+    lowered = [a.lower() for a in buyer_addresses]
+    try:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/smart_wallet_tags",
+            headers=_supabase_headers(),
+            params={"address": f"in.({','.join(lowered)})", "select": "address,tag,rank,pnl"},
+        )
+        res.raise_for_status()
+        return res.json()
+    except httpx.HTTPError:
+        return []
+
+
+def _nft_scope_tracked_wallet_points(tracked_hits: list[dict] | None) -> tuple[int, list[str]]:
+    # Unlike the self-computed smart-wallet signal, a tag here is a
+    # community/collection credential ("RH MACHINES"), not a raw wallet
+    # address - naming it isn't a doxx, so this signal is allowed to be
+    # more transparent about what actually matched.
+    if not tracked_hits:
+        return 0, []
+    distinct_addresses = {h["address"] for h in tracked_hits}
+    tags = sorted({h["tag"] for h in tracked_hits})
+    points = _NFT_SCOPE_TRACKED_WALLET_BONUS_POINTS
+    shown = ", ".join(tags[:5]) + (f" (+{len(tags) - 5} more)" if len(tags) > 5 else "")
+    reasons = [f"🏷️ Includes wallet(s) tracked as: {shown}"]
+    if len(distinct_addresses) >= 2:
+        bonus = min(len(distinct_addresses) * _NFT_SCOPE_TRACKED_CONVERGENCE_POINTS_PER_WALLET, _NFT_SCOPE_TRACKED_CONVERGENCE_POINTS_CAP)
+        points += bonus
+        reasons.append(f"👥 {len(distinct_addresses)} separately tracked wallets converging on this at once")
+    return points, reasons
+
+
+async def _nft_scope_wallet_signals(client: httpx.AsyncClient, rapid_activity: dict | None) -> tuple[list[dict], list[dict], list[dict]]:
     # Single entry point every pass calls instead of fetching each wallet
-    # signal separately - both run concurrently, so a candidate with a
-    # verified burst pays for the slower of the two lookups, not both
+    # signal separately - all three run concurrently, so a candidate with a
+    # verified burst pays for the slowest of the three lookups, not all
     # stacked back to back.
     if not (rapid_activity or {}).get("buyer_addresses"):
-        return [], []
+        return [], [], []
     return await asyncio.gather(
         _nft_scope_smart_wallet_hits(client, rapid_activity),
         _nft_scope_wallet_activity_spike_hits(client, rapid_activity),
+        _nft_scope_tracked_wallet_hits(client, rapid_activity),
     )
 
 
@@ -6892,8 +7251,8 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
                 rapid_activity = await _detect_rapid_activity(client, slug)
                 history, first_snapshot = await _nft_scope_snapshot_signals(client, slug)
                 wash_analysis = await _nft_scope_wash_analysis(client, slug) if _nft_scope_turnover_elevated(c) else None
-                smart_wallet_hits, activity_spike_hits = await _nft_scope_wallet_signals(client, rapid_activity)
-                score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis, smart_wallet_hits=smart_wallet_hits, activity_spike_hits=activity_spike_hits)
+                smart_wallet_hits, activity_spike_hits, tracked_wallet_hits = await _nft_scope_wallet_signals(client, rapid_activity)
+                score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis, smart_wallet_hits=smart_wallet_hits, activity_spike_hits=activity_spike_hits, tracked_wallet_hits=tracked_wallet_hits)
                 if score.get("floor_multiple") and score["floor_multiple"] >= _NFT_SCOPE_PROVED_MULTIPLE_THRESHOLD:
                     await _nft_scope_mark_slug_proved(client, slug, score["floor_multiple"])
                 if (
@@ -7063,8 +7422,8 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
             # (velocity / floor-multiple-since-first-seen) score below.
             history, first_snapshot = await _nft_scope_snapshot_signals(client, slug)
             wash_analysis = await _nft_scope_wash_analysis(client, slug) if _nft_scope_turnover_elevated(c) else None
-            smart_wallet_hits, activity_spike_hits = await _nft_scope_wallet_signals(client, rapid_activity)
-            score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis, smart_wallet_hits=smart_wallet_hits, activity_spike_hits=activity_spike_hits)
+            smart_wallet_hits, activity_spike_hits, tracked_wallet_hits = await _nft_scope_wallet_signals(client, rapid_activity)
+            score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis, smart_wallet_hits=smart_wallet_hits, activity_spike_hits=activity_spike_hits, tracked_wallet_hits=tracked_wallet_hits)
             if score.get("floor_multiple") and score["floor_multiple"] >= _NFT_SCOPE_PROVED_MULTIPLE_THRESHOLD:
                 await _nft_scope_mark_slug_proved(client, slug, score["floor_multiple"])
             if _nft_scope_worth_posting(score) and await _nft_scope_clears_wash_check(client, slug):
@@ -7141,8 +7500,8 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
             except httpx.HTTPError:
                 pass
             wash_analysis = await _nft_scope_wash_analysis(client, slug) if _nft_scope_turnover_elevated(c) else None
-            smart_wallet_hits, activity_spike_hits = await _nft_scope_wallet_signals(client, rapid_activity)
-            score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis, smart_wallet_hits=smart_wallet_hits, activity_spike_hits=activity_spike_hits)
+            smart_wallet_hits, activity_spike_hits, tracked_wallet_hits = await _nft_scope_wallet_signals(client, rapid_activity)
+            score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis, smart_wallet_hits=smart_wallet_hits, activity_spike_hits=activity_spike_hits, tracked_wallet_hits=tracked_wallet_hits)
             if score.get("floor_multiple") and score["floor_multiple"] >= _NFT_SCOPE_PROVED_MULTIPLE_THRESHOLD:
                 await _nft_scope_mark_slug_proved(client, slug, score["floor_multiple"])
             if _nft_scope_worth_posting(score) and await _nft_scope_clears_wash_check(client, slug):
@@ -7210,8 +7569,8 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
                 rapid_activity = await _detect_rapid_activity(client, slug)
                 history, first_snapshot = await _nft_scope_snapshot_signals(client, slug)
                 wash_analysis = await _nft_scope_wash_analysis(client, slug) if _nft_scope_turnover_elevated(c) else None
-                smart_wallet_hits, activity_spike_hits = await _nft_scope_wallet_signals(client, rapid_activity)
-                score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis, smart_wallet_hits=smart_wallet_hits, activity_spike_hits=activity_spike_hits)
+                smart_wallet_hits, activity_spike_hits, tracked_wallet_hits = await _nft_scope_wallet_signals(client, rapid_activity)
+                score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis, smart_wallet_hits=smart_wallet_hits, activity_spike_hits=activity_spike_hits, tracked_wallet_hits=tracked_wallet_hits)
                 if score.get("floor_multiple") and score["floor_multiple"] >= _NFT_SCOPE_PROVED_MULTIPLE_THRESHOLD:
                     await _nft_scope_mark_slug_proved(client, slug, score["floor_multiple"])
                 has_recent_movement = bool(score.get("floor_multiple")) or rapid_activity is not None or any(
@@ -7523,512 +7882,6 @@ async def nft_poll(request: Request):
         "pruned_old_snapshots": pruned, "pruned_old_sale_events": pruned_sale_events,
         "pruned_old_call_buyers": pruned_call_buyers, "errors": errors,
     }
-
-
-# ── NFT Intel: wallet-following mint alerts ───────────────────────────────
-# Deliberately a different product from NFT Scope. NFT Scope scores and
-# discovers COLLECTIONS worth watching from public trading signals - it has
-# no idea who's buying. NFT Intel tracks a curated list of WALLETS (seeded
-# manually, then grown by watching who else mints alongside them - see
-# _nft_intel_discover_co_minters) and alerts the instant one of them mints
-# anything, on any chain, regardless of whether that project would ever
-# clear NFT Scope's bar. A "what is this wallet doing right now" feed, not
-# a "here's a promising project" feed - the two channels never compete for
-# the same attention.
-_NFT_INTEL_COLOR = 0x8B5CF6  # violet - visually distinct from ACO blue, NFT Scope's traffic-light tiers
-_NFT_INTEL_NULL_ADDRESS = "0x0000000000000000000000000000000000000000"
-_NFT_INTEL_WALLET_BATCH_SIZE = 12  # wallets checked per tick - bounds each tick's Alchemy call volume
-_NFT_INTEL_EVENTS_PER_WALLET = 15  # recent mint transfers fetched per wallet, per chain, per tick
-_NFT_INTEL_CO_MINTER_LOOKBACK = 30  # recent contract-wide mint transfers scanned when discovering co-minters off a fresh hit
-_NFT_INTEL_MAX_TRACKED_WALLETS = 300  # co-minter discovery ceiling - unbounded auto-growth would eventually turn every tick into a huge fan-out
-# "Not yet in nft_intel_seen_mints" alone isn't "just happened" - a newly
-# added wallet (fresh seed, or a co-minter just discovered) can have a
-# long real mint history that's simply never been polled before, and
-# every one of those old mints would otherwise look brand new the first
-# time that wallet gets checked (confirmed live: a burst of alerts across
-# many unrelated collections the moment co-minter discovery added new
-# wallets). 30 min, generous relative to the ~45s poll cadence, just
-# forgiving enough to not drop a mint that landed between two ticks.
-_NFT_INTEL_MAX_MINT_AGE_SECONDS = 1800
-_NFT_INTEL_EXPLORER_BASE = {
-    "ethereum": "etherscan.io",
-    "base": "basescan.org",
-    "polygon": "polygonscan.com",
-    "matic": "polygonscan.com",
-    "arbitrum": "arbiscan.io",
-    "optimism": "optimistic.etherscan.io",
-    "avalanche": "snowtrace.io",
-    "zora": "explorer.zora.energy",
-    "blast": "blastscan.io",
-}
-# Reads mint detection straight from the chain via Alchemy, deliberately
-# NOT through OpenSea's own API - OpenSea only surfaces what its own
-# indexer has caught up to, which can meaningfully lag a fresh contract's
-# actual on-chain mints. Alchemy's subdomain naming per chain; a chain
-# missing here, or not enabled on the given API key, is skipped gracefully
-# (see _alchemy_rpc) rather than failing the whole tick. Candidate list,
-# not a guarantee every one is enabled - /nft-intel-wallets and the cron's
-# own logs are how to tell which chains are actually live for a given key.
-_NFT_INTEL_ALCHEMY_CHAINS = {
-    "ethereum": "eth-mainnet",
-    "base": "base-mainnet",
-    "polygon": "polygon-mainnet",
-    "optimism": "opt-mainnet",
-    "arbitrum": "arb-mainnet",
-    "robinhood": "robinhood-mainnet",
-    "ink": "ink-mainnet",
-}
-
-
-def _nft_intel_explorer_url(chain: str | None, contract: str) -> str | None:
-    base = _NFT_INTEL_EXPLORER_BASE.get((chain or "").lower())
-    return f"https://{base}/token/{contract}" if base else None
-
-
-async def _alchemy_rpc(client: httpx.AsyncClient, chain: str, method: str, params: dict) -> dict | None:
-    subdomain = _NFT_INTEL_ALCHEMY_CHAINS.get(chain)
-    if not settings.alchemy_api_key or not subdomain:
-        return None
-    try:
-        res = await client.post(
-            f"https://{subdomain}.g.alchemy.com/v2/{settings.alchemy_api_key}",
-            json={"jsonrpc": "2.0", "id": 1, "method": method, "params": [params]},
-        )
-    except httpx.HTTPError:
-        logger.exception("nft-intel: Alchemy request failed (%s, %s)", chain, method)
-        return None
-    if res.status_code == 429:
-        # Ground-truth rate-limit signal, same shared-state pattern
-        # _opensea_get already uses for OpenSea - lets a future tick back
-        # off automatically instead of hammering into an active limit.
-        try:
-            await _nft_alert_state_set(client, "__alchemy__", "rate_limited", 0)
-        except httpx.HTTPError:
-            pass
-        return None
-    if res.status_code != 200:
-        # A chain simply not enabled on this API key (e.g. a 403) is not
-        # an error worth logging on every tick - just means this chain
-        # is unreachable for now, skip it and keep going.
-        return None
-    data = res.json()
-    if "error" in data:
-        return None
-    return data.get("result")
-
-
-async def _alchemy_healthy(client: httpx.AsyncClient) -> bool:
-    try:
-        state = await _nft_alert_state_get(client, "__alchemy__", "rate_limited")
-    except httpx.HTTPError:
-        return True
-    return _nft_alert_cooled_down(state, cooldown_seconds=_NFT_SCOPE_RATE_LIMIT_BACKOFF_SECONDS)
-
-
-async def _alchemy_get_nft_metadata(client: httpx.AsyncClient, chain: str, contract: str, token_id: str) -> dict | None:
-    # Separate from alchemy_getAssetTransfers on purpose - the transfer
-    # feed alone carries no name/image/collection info, only the raw
-    # transfer. Only called for a genuinely NEW mint (see cron_nft_intel),
-    # never on every poll tick, so this extra call is cheap in practice.
-    subdomain = _NFT_INTEL_ALCHEMY_CHAINS.get(chain)
-    if not settings.alchemy_api_key or not subdomain:
-        return None
-    try:
-        res = await client.get(
-            f"https://{subdomain}.g.alchemy.com/nft/v3/{settings.alchemy_api_key}/getNFTMetadata",
-            params={"contractAddress": contract, "tokenId": token_id, "refreshCache": "false"},
-        )
-    except httpx.HTTPError:
-        logger.exception("nft-intel: Alchemy metadata lookup failed (%s, %s, %s)", chain, contract, token_id)
-        return None
-    if res.status_code != 200:
-        return None
-    return res.json()
-
-
-async def _nft_intel_seen(client: httpx.AsyncClient, chain: str, contract: str, token_id: str) -> bool:
-    res = await client.get(
-        f"{settings.supabase_url}/rest/v1/nft_intel_seen_mints",
-        headers=_supabase_headers(),
-        params={"chain": f"eq.{chain}", "contract_address": f"eq.{contract}", "token_id": f"eq.{token_id}", "select": "chain", "limit": "1"},
-    )
-    res.raise_for_status()
-    return bool(res.json())
-
-
-async def _nft_intel_mark_seen(client: httpx.AsyncClient, chain: str, contract: str, token_id: str, wallet: str, slug: str | None) -> None:
-    await client.post(
-        f"{settings.supabase_url}/rest/v1/nft_intel_seen_mints",
-        headers=_supabase_headers(prefer="resolution=ignore-duplicates,return=minimal"),
-        json=[{"chain": chain, "contract_address": contract, "token_id": token_id, "wallet_address": wallet, "collection_slug": slug}],
-    )
-
-
-_NFT_INTEL_MAX_ALERTS_PER_COLLECTION = 2  # caps a hot collection's noise - see cron_nft_intel; every mint is still recorded via _nft_intel_mark_seen regardless, this only gates the alert itself
-
-
-async def _nft_intel_collection_alert_count(client: httpx.AsyncClient, chain: str, contract: str) -> int:
-    res = await client.get(
-        f"{settings.supabase_url}/rest/v1/nft_intel_collection_alert_counts",
-        headers=_supabase_headers(),
-        params={"chain": f"eq.{chain}", "contract_address": f"eq.{contract}", "select": "alert_count", "limit": "1"},
-    )
-    res.raise_for_status()
-    rows = res.json()
-    return rows[0]["alert_count"] if rows else 0
-
-
-async def _nft_intel_bump_collection_alert_count(client: httpx.AsyncClient, chain: str, contract: str, new_count: int) -> None:
-    await client.post(
-        f"{settings.supabase_url}/rest/v1/nft_intel_collection_alert_counts",
-        headers=_supabase_headers(prefer="resolution=merge-duplicates,return=minimal"),
-        json=[{"chain": chain, "contract_address": contract, "alert_count": new_count, "last_alerted_at": datetime.now(timezone.utc).isoformat()}],
-    )
-
-
-def _alchemy_transfer_to_event(transfer: dict, chain: str) -> dict | None:
-    # Normalizes an Alchemy alchemy_getAssetTransfers row into the same
-    # shape the rest of NFT Intel already works with (originally shaped
-    # around OpenSea's event schema) - keeps _nft_intel_is_mint and
-    # _nft_intel_embed entirely unaware of which data source is behind
-    # them. name/image/collection are left unset here on purpose - the
-    # transfer feed alone doesn't carry them; see _alchemy_get_nft_metadata
-    # for the enrichment step, only ever called for a genuinely new mint.
-    contract = (transfer.get("rawContract") or {}).get("address")
-    raw_token_id = transfer.get("tokenId")
-    if not contract or raw_token_id is None:
-        return None
-    try:
-        token_id = str(int(raw_token_id, 16)) if isinstance(raw_token_id, str) and raw_token_id.startswith("0x") else str(raw_token_id)
-    except ValueError:
-        return None
-    return {
-        "event_type": "transfer",
-        "chain": chain,
-        "from_address": transfer.get("from"),
-        "to_address": transfer.get("to"),
-        "block_time": (transfer.get("metadata") or {}).get("blockTimestamp"),
-        "nft": {"chain": chain, "contract": contract, "identifier": token_id, "collection": None, "name": None, "image_url": None},
-    }
-
-
-async def _nft_intel_wallet_transfer_events(client: httpx.AsyncClient, address: str) -> list[dict]:
-    # Fans out across every chain this key has enabled (see
-    # _NFT_INTEL_ALCHEMY_CHAINS) - a chain that isn't enabled or hiccups
-    # just returns nothing from _alchemy_rpc rather than failing the
-    # others, so "post alerts as mints happen on different chains" degrades
-    # gracefully instead of breaking outright if one chain is unavailable.
-    events = []
-    for chain in _NFT_INTEL_ALCHEMY_CHAINS:
-        result = await _alchemy_rpc(client, chain, "alchemy_getAssetTransfers", {
-            "fromAddress": _NFT_INTEL_NULL_ADDRESS,
-            "toAddress": address,
-            "category": ["erc721", "erc1155"],
-            "maxCount": hex(_NFT_INTEL_EVENTS_PER_WALLET),
-            "order": "desc",
-            "withMetadata": True,
-        })
-        if not result:
-            continue
-        for transfer in result.get("transfers", []):
-            event = _alchemy_transfer_to_event(transfer, chain)
-            if event:
-                events.append(event)
-    return events
-
-
-def _nft_intel_is_mint(event: dict, wallet: str) -> bool:
-    # A mint is a transfer from the null address - the standard on-chain
-    # signature of a token's first-ever transfer, regardless of chain.
-    # Alchemy's query already filters to exactly this (fromAddress=null),
-    # so this is a defense-in-depth check, not the primary filter.
-    return (
-        event.get("event_type") == "transfer"
-        and (event.get("from_address") or "").lower() == _NFT_INTEL_NULL_ADDRESS
-        and (event.get("to_address") or "").lower() == wallet.lower()
-    )
-
-
-def _nft_intel_is_fresh(event: dict, max_age_seconds: int = _NFT_INTEL_MAX_MINT_AGE_SECONDS) -> bool:
-    # "Never seen before" alone isn't "just happened" - see
-    # _NFT_INTEL_MAX_MINT_AGE_SECONDS for why this exists. Fails CLOSED
-    # (not fresh) on a missing/unparseable timestamp - the whole point is
-    # blocking a flood of old mints, so a data gap should never fall back
-    # to "alert anyway."
-    block_time = event.get("block_time")
-    if not block_time:
-        return False
-    try:
-        when = datetime.fromisoformat(block_time.replace("Z", "+00:00"))
-    except (ValueError, TypeError):
-        return False
-    if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)
-    age = (datetime.now(timezone.utc) - when).total_seconds()
-    return age <= max_age_seconds  # a slightly-future timestamp (clock skew) still counts as fresh
-
-
-async def _nft_intel_discover_co_minters(client: httpx.AsyncClient, chain: str, contract: str | None, exclude: set[str]) -> list[str]:
-    # "Similar wallets" per the agreed definition: anyone else who minted
-    # the SAME contract recently - a real "these wallets move together"
-    # behavioral signal, not a vague lookalike heuristic. Contract-scoped
-    # (not an OpenSea collection slug) since that's what Alchemy's chain-
-    # native data actually knows about.
-    if not contract:
-        return []
-    result = await _alchemy_rpc(client, chain, "alchemy_getAssetTransfers", {
-        "fromAddress": _NFT_INTEL_NULL_ADDRESS,
-        "contractAddresses": [contract],
-        "category": ["erc721", "erc1155"],
-        "maxCount": hex(_NFT_INTEL_CO_MINTER_LOOKBACK),
-        "order": "desc",
-    })
-    if not result:
-        return []
-    found = set()
-    for transfer in result.get("transfers", []):
-        to = (transfer.get("to") or "").lower()
-        if to and to not in exclude:
-            found.add(to)
-    return list(found)
-
-
-async def _nft_intel_add_co_minters(client: httpx.AsyncClient, addresses: list[str], slug: str) -> int:
-    if not addresses:
-        return 0
-    res = await client.post(
-        f"{settings.supabase_url}/rest/v1/nft_intel_tracked_wallets",
-        # ignore-duplicates: a co-minter already tracked (as a seed wallet
-        # or a prior co-minter discovery) is a safe no-op, not an error -
-        # this is what lets the caller skip pre-filtering the address list
-        # against everything already tracked.
-        headers=_supabase_headers(prefer="resolution=ignore-duplicates,return=representation"),
-        json=[{"address": a, "source": "co_minter", "discovered_via": slug} for a in addresses],
-    )
-    if res.status_code >= 300:
-        logger.error("Failed to add NFT Intel co-minters: %s %s", res.status_code, res.text[:300])
-        return 0
-    return len(res.json())
-
-
-async def _nft_intel_poll_batch(client: httpx.AsyncClient) -> list[dict]:
-    # Oldest-polled-first, same "least recently served" rotation pattern
-    # aco_education_posts already uses - every tracked wallet gets roughly
-    # even coverage as the list grows via co-minter discovery.
-    res = await client.get(
-        f"{settings.supabase_url}/rest/v1/nft_intel_tracked_wallets",
-        headers=_supabase_headers(),
-        params={"select": "address,source,discovered_via", "order": "last_polled_at.asc.nullsfirst", "limit": str(_NFT_INTEL_WALLET_BATCH_SIZE)},
-    )
-    res.raise_for_status()
-    return res.json()
-
-
-async def _nft_intel_mark_polled(client: httpx.AsyncClient, address: str) -> None:
-    await client.patch(
-        f"{settings.supabase_url}/rest/v1/nft_intel_tracked_wallets",
-        headers=_supabase_headers(prefer="return=minimal"),
-        params={"address": f"eq.{address}"},
-        json={"last_polled_at": datetime.now(timezone.utc).isoformat()},
-    )
-
-
-async def _nft_intel_tracked_count(client: httpx.AsyncClient) -> int:
-    res = await client.get(
-        f"{settings.supabase_url}/rest/v1/nft_intel_tracked_wallets",
-        headers=_supabase_headers(),
-        params={"select": "address", "limit": str(_NFT_INTEL_MAX_TRACKED_WALLETS)},
-    )
-    res.raise_for_status()
-    return len(res.json())
-
-
-def _nft_intel_embed(event: dict, wallet_row: dict, alert_number: int | None = None) -> dict:
-    nft = event.get("nft") or {}
-    chain = event.get("chain") or nft.get("chain") or "-"
-    contract = nft.get("contract") or "-"
-    token_id = str(nft.get("identifier") if nft.get("identifier") is not None else "-")
-    name = nft.get("name") or (f"#{token_id}" if token_id != "-" else "New Mint")
-    collection = nft.get("collection") or "-"
-    image = nft.get("image_url")
-    opensea_url = f"https://opensea.io/assets/{chain}/{contract}/{token_id}" if contract != "-" and token_id != "-" else None
-    explorer_url = _nft_intel_explorer_url(chain, contract) if contract != "-" else None
-
-    if wallet_row.get("source") == "co_minter":
-        reason = f"Auto-tracked · co-minted **{wallet_row.get('discovered_via') or 'a tracked collection'}** alongside a seed wallet"
-    else:
-        reason = "Seed tracked wallet"
-
-    links = ", ".join(f"[{label}]({url})" for label, url in (
-        ("OpenSea", opensea_url),
-        ("Explorer", explorer_url),
-    ) if url)
-
-    fields = [
-        {"name": "Chain", "value": (chain or "-").capitalize(), "inline": True},
-        {"name": "Collection", "value": collection, "inline": True},
-        {"name": "Token ID", "value": token_id, "inline": True},
-        {"name": "Wallet", "value": f"`{wallet_row['address']}`", "inline": False},
-        {"name": "Why tracked", "value": reason, "inline": False},
-    ]
-    if links:
-        fields.append({"name": "Links", "value": links, "inline": False})
-    fields.append({"name": "Contract", "value": f"`{contract}`", "inline": False})
-    if alert_number is not None:
-        fields.append({
-            "name": "Collection Alert Cap",
-            "value": f"{alert_number}/{_NFT_INTEL_MAX_ALERTS_PER_COLLECTION} for **{collection}** - further mints from this collection go quiet to avoid flooding the channel.",
-            "inline": False,
-        })
-
-    return {
-        "title": f"🕵️ NFT Intel · Tracked Wallet Just Minted — {name}",
-        "url": opensea_url,
-        "description": f"A wallet on our tracked list just minted from **{collection}**.",
-        "color": _NFT_INTEL_COLOR,
-        "fields": fields,
-        "thumbnail": {"url": image} if image else None,
-        "footer": {"text": f"{TOOLKIT_FOOTER['text']} · NFT Intel"},
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-    }
-
-
-async def _handle_nft_intel_wallets_command(payload: dict) -> dict:
-    # Visibility into what the co-minter auto-discovery has actually done,
-    # since the tracked list is no longer just the fixed 42 seed wallets
-    # from a fixed point in time - without this there'd be no way to see
-    # what's grown, or confirm it's working at all.
-    if not _is_team_member(payload):
-        return {"type": 4, "data": {"content": "Team members only.", "flags": 64}}
-    async with httpx.AsyncClient(timeout=15) as client:
-        res = await client.get(
-            f"{settings.supabase_url}/rest/v1/nft_intel_tracked_wallets",
-            headers=_supabase_headers(),
-            params={"select": "address,source,discovered_via,added_at", "order": "added_at.desc"},
-        )
-        res.raise_for_status()
-        rows = res.json()
-    seed = [r for r in rows if r["source"] == "seed"]
-    co_minters = [r for r in rows if r["source"] == "co_minter"]
-    lines = [f"**{len(rows)}** total tracked ({len(seed)} seed, {len(co_minters)} auto-discovered co-minters)."]
-    if co_minters:
-        lines.append("")
-        lines.append("**Most recently discovered:**")
-        for r in co_minters[:10]:
-            lines.append(f"• `{r['address']}` — via **{r.get('discovered_via') or '?'}**")
-    embed = {
-        "title": "🕵️ NFT Intel · Tracked Wallets",
-        "description": "\n".join(lines),
-        "color": _NFT_INTEL_COLOR,
-        "footer": {"text": f"{TOOLKIT_FOOTER['text']} · NFT Intel"},
-    }
-    return {"type": 4, "data": {"embeds": [embed], "flags": 64}}
-
-
-@app.get("/cron/nft-intel")
-async def cron_nft_intel(request: Request):
-    expected = f"Bearer {settings.nft_cron_secret}"
-    if not settings.nft_cron_secret or request.headers.get("authorization") != expected:
-        raise HTTPException(status_code=401, detail="Unauthorized")
-    if not settings.discord_nft_intel_channel_id:
-        return {"polled": 0, "alerted": 0, "reason": "NFT Intel channel not configured"}
-
-    if not settings.alchemy_api_key:
-        return {"polled": 0, "alerted": 0, "reason": "Alchemy API key not configured"}
-
-    async with httpx.AsyncClient(timeout=20) as client:
-        # Alchemy's rate-limit state, tracked separately from OpenSea's own
-        # (_opensea_healthy) since they're independent budgets - skipping
-        # this tick outright when Alchemy was recently 429'd is what keeps
-        # a tight polling cadence (see .github/workflows/nft-intel-poll.yml)
-        # from hammering further into an already rate-limited window.
-        if not await _alchemy_healthy(client):
-            return {"polled": 0, "alerted": 0, "reason": "Alchemy rate-limited, skipping this tick"}
-
-        batch = await _nft_intel_poll_batch(client)
-        if not batch:
-            return {"polled": 0, "alerted": 0, "reason": "no tracked wallets"}
-
-        alerted = []
-        for wallet_row in batch:
-            address = wallet_row["address"]
-            try:
-                events = await _nft_intel_wallet_transfer_events(client, address)
-            except (httpx.HTTPError, KeyError):
-                logger.exception("nft-intel: event fetch failed for %s", address)
-                events = []
-
-            for event in events:
-                if not _nft_intel_is_mint(event, address):
-                    continue
-                nft = event.get("nft") or {}
-                chain = event.get("chain") or nft.get("chain")
-                contract = nft.get("contract")
-                token_id = nft.get("identifier")
-                if not (chain and contract and token_id is not None):
-                    continue  # not enough to dedup or link reliably - skip rather than risk a duplicate/broken alert
-                token_id = str(token_id)
-                if await _nft_intel_seen(client, chain, contract, token_id):
-                    continue
-
-                # Freshness gate: "never alerted before" isn't "just
-                # happened" - a wallet with real mint history that's simply
-                # never been polled before (a fresh seed, or a co-minter
-                # just discovered) would otherwise dump its entire history
-                # as a flood of alerts the moment it's first checked. Still
-                # marked seen either way, so a genuinely old mint is never
-                # re-evaluated on a later tick either.
-                if not _nft_intel_is_fresh(event):
-                    await _nft_intel_mark_seen(client, chain, contract, token_id, address, None)
-                    continue
-
-                # Grouped-by-collection noise cap: once a collection has
-                # hit its alert quota, every further mint from it (any
-                # wallet, tracked or co-minter) still gets recorded as
-                # seen - so it's never re-evaluated on a later tick - but
-                # stops short of enrichment, posting, or co-minter
-                # discovery, none of which serve any purpose once nothing
-                # further will actually alert.
-                alert_count = await _nft_intel_collection_alert_count(client, chain, contract)
-                if alert_count >= _NFT_INTEL_MAX_ALERTS_PER_COLLECTION:
-                    await _nft_intel_mark_seen(client, chain, contract, token_id, address, None)
-                    continue
-
-                # Enrichment only for a genuinely NEW, under-cap mint, never
-                # on every poll tick - the transfer feed alone carries no
-                # name/image/collection info (see _alchemy_transfer_to_event).
-                meta = await _alchemy_get_nft_metadata(client, chain, contract, token_id)
-                collection_name = None
-                if meta:
-                    nft["name"] = meta.get("name")
-                    nft["image_url"] = (meta.get("image") or {}).get("cachedUrl")
-                    opensea_meta = ((meta.get("contract") or {}).get("openSeaMetadata")) or {}
-                    collection_name = opensea_meta.get("collectionName") or (meta.get("contract") or {}).get("name")
-                    nft["collection"] = collection_name
-
-                embed = _nft_intel_embed(event, wallet_row, alert_number=alert_count + 1)
-                delivered = await _post_channel_message(client, settings.discord_nft_intel_channel_id, embed)
-                if not delivered:
-                    continue
-                await _nft_intel_mark_seen(client, chain, contract, token_id, address, collection_name)
-                await _nft_intel_bump_collection_alert_count(client, chain, contract, alert_count + 1)
-                alerted.append({"wallet": address, "collection": collection_name, "contract": contract, "token_id": token_id})
-
-                # Co-minter discovery only fans out off a SEED wallet's own
-                # mint, never a co-minter's - otherwise a chain of
-                # co-minters-of-co-minters could grow the tracked list
-                # unboundedly fast off nothing but the graph's own
-                # momentum, with no real new signal each extra hop adds.
-                if wallet_row.get("source") == "seed":
-                    total_tracked = await _nft_intel_tracked_count(client)
-                    if total_tracked < _NFT_INTEL_MAX_TRACKED_WALLETS:
-                        co_minters = await _nft_intel_discover_co_minters(client, chain, contract, {address})
-                        room = _NFT_INTEL_MAX_TRACKED_WALLETS - total_tracked
-                        await _nft_intel_add_co_minters(client, co_minters[:room], collection_name or contract)
-
-            await _nft_intel_mark_polled(client, address)
-
-    return {"polled": len(batch), "alerted": len(alerted)}
 
 
 @app.get("/toolkit/nft-discover")
@@ -8415,6 +8268,10 @@ async def _cmd_xray(address: str) -> dict:
         fields.append({"name": "Note", "value": f"{n} {noun} a real balance but have no market price available, so {pron} included in Net Worth.", "inline": False})
     if crypto.get("tokenDataOk") is False:
         fields.append({"name": "Note", "value": "Token holdings could not be fully loaded this scan. Net Worth and Distinct Tokens may be incomplete. Try again.", "inline": False})
+    tracked = await _smart_wallet_tags_for_address(data["address"])
+    if tracked:
+        tag_text = ", ".join(f"{t['tag']}" + (f" (Rank {t['rank']})" if t.get("rank") else "") for t in tracked[:6])
+        fields.append({"name": "🏷️ Tracked As", "value": tag_text, "inline": False})
     return {
         "title": f"{tier['emoji']} {tier['name']} · {data.get('ensName') or address}",
         "description": tier["flavor"],

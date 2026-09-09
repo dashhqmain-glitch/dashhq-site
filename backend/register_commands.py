@@ -171,9 +171,20 @@ COMMANDS = [
         "description": "Browse DASH ACO's rules and educational guides",
     },
     {
-        "name": "nft-intel-wallets",
-        "description": "Team only: see the wallets NFT Intel is tracking for mint alerts",
+        "name": "smart-wallets",
+        "description": "Team only: manage the curated smart-wallet tracker list",
         "default_member_permissions": "32",
+        "options": [
+            {
+                "name": "import", "description": "Import a wallet tracker file (GMGN-style export or Notion export, combined into one file)", "type": 1,
+                "options": [{"name": "file", "description": "The tracker file to import", "type": 11, "required": True}],
+            },
+            {"name": "list", "description": "Show what's currently tracked", "type": 1},
+            {
+                "name": "clear", "description": "Remove one tag's wallets, or everything if left blank", "type": 1,
+                "options": [{"name": "tag", "description": "Tag to remove (omit to clear everything)", "type": 3, "required": False}],
+            },
+        ],
     },
     {
         "name": "history",

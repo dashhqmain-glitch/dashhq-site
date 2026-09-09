@@ -478,9 +478,9 @@ def test_activity_spike_points_calls_out_zero_baseline_distinctly():
 
 async def test_wallet_signals_empty_with_no_rapid_activity():
     result = await main._nft_scope_wallet_signals(main.httpx.AsyncClient(), None)
-    assert result == ([], [])
+    assert result == ([], [], [])
     result = await main._nft_scope_wallet_signals(main.httpx.AsyncClient(), {"buyer_addresses": []})
-    assert result == ([], [])
+    assert result == ([], [], [])
 
 
 async def test_wallet_signals_fetches_both_and_returns_them_combined():
@@ -492,11 +492,14 @@ async def test_wallet_signals_fetches_both_and_returns_them_combined():
                 return FakeRes(200, [])
             if url.endswith("/nft_wallet_recent_activity"):
                 return FakeRes(200, [{"address": "0xb", "recent_buys": 6, "recent_unique_sellers": 6, "baseline_buys": 0, "recent_volume": 1, "baseline_volume": 0}])
+            if url.endswith("/smart_wallet_tags"):
+                return FakeRes(200, [])
             raise AssertionError(f"unexpected {url}")
 
-    smart_hits, spike_hits = await main._nft_scope_wallet_signals(FakeClient(), {"buyer_addresses": ["0xa", "0xb"]})
+    smart_hits, spike_hits, tracked_hits = await main._nft_scope_wallet_signals(FakeClient(), {"buyer_addresses": ["0xa", "0xb"]})
     assert len(smart_hits) == 1 and smart_hits[0]["address"] == "0xa"
     assert len(spike_hits) == 1 and spike_hits[0]["address"] == "0xb"
+    assert tracked_hits == []
 
 
 # ── _nft_scope_score integration ──────────────────────────────────────────
