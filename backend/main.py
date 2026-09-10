@@ -748,6 +748,66 @@ async def test_smart_wallet_convergence(request: Request):
     return {"channel_id": settings.discord_smart_wallet_channel_id, "posted": posted}
 
 
+@app.get("/cron/post-latest-tracked-mint")
+async def post_latest_tracked_mint(request: Request):
+    # The REAL-data companion to /cron/test-smart-wallet-convergence above
+    # (that one always uses hand-picked sample data, on purpose - this one
+    # doesn't). Finds whichever collection a currently-tracked
+    # (smart_wallet_tags) wallet was most recently logged buying into
+    # (nft_sale_events_log - every verified sale event NFT Scope has ever
+    # observed, not just fresh mints, since a tracked wallet's genuinely
+    # latest activity might not have been from a Pass 1 fresh-mint scan),
+    # and posts the actual Alert Tracker embed for it. Entirely read-only
+    # apart from the one Discord post - never touches
+    # nft_scope_recently_posted/mark_posted, so it can't interfere with
+    # the live scan's own cooldown/dedup state, and can post even with
+    # just 1 tracked wallet in the mint (the live 2+-wallet convergence
+    # minimum is a POSTING gate for the automatic pipeline, not a rule
+    # about what this manual preview is allowed to show).
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        tags_res = await client.get(
+            f"{settings.supabase_url}/rest/v1/smart_wallet_tags",
+            headers=_supabase_headers(), params={"select": "address"},
+        )
+        tags_res.raise_for_status()
+        tracked_addresses = sorted({row["address"] for row in tags_res.json()})
+        if not tracked_addresses:
+            return {"posted": False, "detail": "No tracked wallets in smart_wallet_tags yet."}
+
+        recent_res = await client.get(
+            f"{settings.supabase_url}/rest/v1/nft_sale_events_log",
+            headers=_supabase_headers(),
+            params={"buyer": f"in.({','.join(tracked_addresses)})", "select": "slug,buyer,event_at", "order": "event_at.desc", "limit": "1"},
+        )
+        recent_res.raise_for_status()
+        recent = recent_res.json()
+        if not recent:
+            return {"posted": False, "detail": "No logged sale events yet for any currently-tracked wallet."}
+        slug = recent[0]["slug"]
+
+        buyers_res = await client.get(
+            f"{settings.supabase_url}/rest/v1/nft_sale_events_log",
+            headers=_supabase_headers(),
+            params={"slug": f"eq.{slug}", "select": "buyer"},
+        )
+        buyers_res.raise_for_status()
+        all_buyers = sorted({row["buyer"] for row in buyers_res.json()})
+
+        hits = await _nft_scope_tracked_wallet_hits(client, {"buyer_addresses": all_buyers})
+        c = await _nft_collection_core(slug)
+        embed = _nft_scope_tracked_convergence_embed(c, hits)
+        embed["footer"] = {"text": f"{embed['footer']['text']} · Manually triggered preview with REAL data, not a live alert"}
+        posted = await _post_channel_message(
+            client, settings.discord_smart_wallet_channel_id, embed,
+            components=_nft_scope_tracked_convergence_components(c),
+        )
+    return {"posted": posted, "slug": slug, "tracked_wallets_in_this_mint": len(hits), "channel_id": settings.discord_smart_wallet_channel_id}
+
+
 # ── Pidgin AutoMod setup (one-time / re-run-on-change) ──────────────────────
 # English-only enforcement in #general via Discord's native AutoMod - free,
 # no persistent bot connection needed. Everything else in this backend is
