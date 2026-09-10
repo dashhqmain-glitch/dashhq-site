@@ -493,6 +493,26 @@ def test_convergence_components_empty_without_an_opensea_url():
     assert main._nft_scope_tracked_convergence_components({"openseaUrl": None}) == []
 
 
+def test_convergence_components_include_mint_site_when_the_project_has_one():
+    c = _fake_collection(website="https://mint.example.xyz")
+    components = main._nft_scope_tracked_convergence_components(c)
+    labels = [b["label"] for b in components[0]["components"]]
+    assert labels == ["Mint Site", "OpenSea"]
+
+
+def test_convergence_embed_links_the_mint_site_when_available():
+    hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": "Whale"}]
+    embed = main._nft_scope_tracked_convergence_embed(_fake_collection(website="https://mint.example.xyz"), hits)
+    assert "[Mint Site](https://mint.example.xyz)" in embed["description"]
+
+
+def test_convergence_embed_row_names_the_project_being_minted():
+    hits = [{"address": "0x1111111111111111111111111111111111111a", "tag": "T1", "rank": None, "pnl": None, "category": "Whale"}]
+    embed = main._nft_scope_tracked_convergence_embed(_fake_collection(), hits)
+    # [category]-[wallet]-[project] pattern, one self-contained line
+    assert "`Whale` - [0x1111…111a](https://opensea.io/0x1111111111111111111111111111111111111a) - **Test Collection**" in embed["description"]
+
+
 async def test_maybe_post_convergence_skips_below_minimum_wallets():
     async def fail_if_called(*a, **k):
         raise AssertionError("should never post below the minimum")
@@ -606,7 +626,7 @@ async def test_maybe_post_convergence_pings_the_minting_now_role_when_configured
     finally:
         settings.discord_minting_now_role_id = ""
 
-    assert calls["content"] == "<@&role999> 🌱 **Minting now**"
+    assert calls["content"] == "<@&role999>"
 
 
 # ── Co-minter auto-discovery ──────────────────────────────────────────────
@@ -823,6 +843,115 @@ def _modal_payload(address="0xc0d1ff953a6147556dc0c309509a2b15ea13a68a", tag="Ca
             {"type": 1, "components": [{"custom_id": "category", "value": category}]},
         ]},
     }
+
+
+# ── Wallet assessment (win streak + rule-based verdict) ───────────────────
+
+async def test_win_streak_counts_consecutive_wins_from_most_recent():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [
+                {"pnl_pct": 0.5, "sold_at": "2026-03-03T00:00:00Z"},
+                {"pnl_pct": 0.2, "sold_at": "2026-03-02T00:00:00Z"},
+                {"pnl_pct": -0.1, "sold_at": "2026-03-01T00:00:00Z"},  # streak breaks here
+                {"pnl_pct": 0.9, "sold_at": "2026-02-28T00:00:00Z"},
+            ])
+
+    assert await main._wallet_win_streak(FakeClient(), "0xa") == 2
+
+
+async def test_win_streak_zero_when_the_most_recent_trade_lost():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [{"pnl_pct": -0.3, "sold_at": "2026-03-03T00:00:00Z"}])
+
+    assert await main._wallet_win_streak(FakeClient(), "0xa") == 0
+
+
+async def test_assessment_with_no_track_record_says_too_new():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [])
+
+    result = await main._wallet_assessment(FakeClient(), "0xa")
+    assert "too new to judge" in result
+
+
+async def test_assessment_recommends_a_strong_win_rate():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "nft_wallet_realized_trades" in url:
+                return FakeRes(200, [{"pnl_pct": 0.4, "sold_at": "2026-03-03T00:00:00Z"} for _ in range(3)])
+            if "nft_smart_wallets" in url:
+                return FakeRes(200, [{"total_calls": 10, "win_rate": 0.8}])
+            return FakeRes(200, [])
+
+    result = await main._wallet_assessment(FakeClient(), "0xa")
+    assert "✅ **Assessment:** Recommended" in result
+    assert "80%" in result
+    assert "3-win streak" in result
+
+
+async def test_assessment_flags_a_weak_win_rate():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "nft_wallet_realized_trades" in url:
+                return FakeRes(200, [])
+            if "nft_smart_wallets" in url:
+                return FakeRes(200, [{"total_calls": 10, "win_rate": 0.1}])
+            return FakeRes(200, [])
+
+    result = await main._wallet_assessment(FakeClient(), "0xa")
+    assert "❌ **Assessment:** Not recommended" in result
+
+
+# ── /smart-wallets leaderboard ────────────────────────────────────────────
+
+async def test_leaderboard_ranks_submitters_by_approved_count_and_excludes_system():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [
+                {"submitted_by": "u1"}, {"submitted_by": "u1"}, {"submitted_by": "u1"},
+                {"submitted_by": "u2"}, {"submitted_by": "u2"},
+                {"submitted_by": "system"},
+            ])
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        response = await main._smart_wallets_leaderboard_response()
+
+    desc = response["embeds"][0]["description"]
+    assert desc.index("<@u1>") < desc.index("<@u2>")  # u1 (3) ranked above u2 (2)
+    assert "<@system>" not in desc
+    assert "3 wallet(s)" in desc
+
+
+async def test_leaderboard_empty_state():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [])
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        response = await main._smart_wallets_leaderboard_response()
+
+    assert "No approved member submissions yet" in response["embeds"][0]["description"]
+
+
+async def test_leaderboard_command_is_public_not_ephemeral():
+    acked = {}
+
+    async def fake_ack(interaction_id, token, ephemeral=False):
+        acked["ephemeral"] = ephemeral
+
+    async def fake_dispatch(**kwargs):
+        pass
+
+    with patch.object(main, "_discord_deferred_ack", new=fake_ack), \
+         patch.object(main, "_dispatch_smart_wallets_worker", new=fake_dispatch):
+        await main._handle_smart_wallets_leaderboard_command(_payload(permissions="0", options=[{"name": "leaderboard"}]))
+
+    assert acked["ephemeral"] is False
 
 
 async def test_submit_modal_rejects_a_bad_address():

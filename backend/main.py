@@ -816,7 +816,7 @@ async def post_latest_tracked_mint(request: Request, ping: bool = False):
         # into the same role-mention content the live pipeline sends, to
         # actually verify the ping itself works without waiting for a
         # genuine scan-detected convergence.
-        role_content = f"<@&{settings.discord_minting_now_role_id}> 🌱 **Minting now**" if (ping and settings.discord_minting_now_role_id) else None
+        role_content = f"<@&{settings.discord_minting_now_role_id}>" if (ping and settings.discord_minting_now_role_id) else None
         posted = await _post_channel_message(
             client, settings.discord_smart_wallet_channel_id, embed,
             content=role_content,
@@ -3603,6 +3603,43 @@ async def _smart_wallets_set_category_run(address: str, category: str) -> dict:
     return {"embeds": [_clean_embed(embed)]}
 
 
+async def _smart_wallets_leaderboard_response() -> dict:
+    async with httpx.AsyncClient(timeout=15) as client:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/smart_wallet_submissions",
+            headers=_supabase_headers(),
+            params={"status": "eq.approved", "select": "submitted_by", "limit": "5000"},
+        )
+        res.raise_for_status()
+        rows = res.json()
+    counts: dict[str, int] = {}
+    for r in rows:
+        who = r["submitted_by"]
+        if who == "system":
+            continue  # co-minter auto-discovery isn't a member's own submission
+        counts[who] = counts.get(who, 0) + 1
+    if not counts:
+        embed = {
+            "title": "🏆 Top Wallet Submitters",
+            "description": "No approved member submissions yet - be the first with `/smart-wallets import` (leave the file blank).",
+            "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER,
+        }
+        return {"embeds": [_clean_embed(embed)]}
+    ranked = sorted(counts.items(), key=lambda kv: -kv[1])[:10]
+    medals = ["🥇", "🥈", "🥉"]
+    lines = [
+        f"{medals[i] if i < len(medals) else f'{i + 1}.'} <@{who}> — {count} wallet(s) approved"
+        for i, (who, count) in enumerate(ranked)
+    ]
+    embed = {
+        "title": "🏆 Top Wallet Submitters",
+        "description": "\n".join(lines),
+        "color": EMBED_COLOR,
+        "footer": {"text": "Ranked by approved /smart-wallets submissions"},
+    }
+    return {"embeds": [_clean_embed(embed)]}
+
+
 async def _handle_smart_wallets_list_command(payload: dict) -> dict:
     if not _is_team_member(payload):
         return {"type": 4, "data": {"content": "This command is for team members only.", "flags": 64}}
@@ -3640,6 +3677,15 @@ async def _handle_smart_wallets_set_category_command(payload: dict) -> dict:
     return {"type": 5}
 
 
+async def _handle_smart_wallets_leaderboard_command(payload: dict) -> dict:
+    # Public and not ephemeral, unlike every other /smart-wallets
+    # subcommand - the whole point is celebrating supportive members in
+    # front of everyone else, not a private staff readout.
+    await _discord_deferred_ack(payload.get("id"), payload.get("token"), ephemeral=False)
+    await _dispatch_smart_wallets_worker(action="leaderboard", token=payload.get("token"))
+    return {"type": 5}
+
+
 async def _handle_smart_wallets_command(payload: dict) -> dict:
     sub_options = (payload.get("data") or {}).get("options") or []
     sub_name = sub_options[0].get("name") if sub_options else None
@@ -3651,6 +3697,8 @@ async def _handle_smart_wallets_command(payload: dict) -> dict:
         return await _handle_smart_wallets_clear_command(payload)
     if sub_name == "set-category":
         return await _handle_smart_wallets_set_category_command(payload)
+    if sub_name == "leaderboard":
+        return await _handle_smart_wallets_leaderboard_command(payload)
     return {"type": 4, "data": {"content": "Unknown subcommand.", "flags": 64}}
 
 
@@ -3700,6 +3748,8 @@ async def discord_smart_wallets_worker(request: Request):
             await _discord_followup_patch(token, await _smart_wallets_clear_run(body.get("tag") or ""))
         elif action == "set_category":
             await _discord_followup_patch(token, await _smart_wallets_set_category_run(body["address"], body["category"]))
+        elif action == "leaderboard":
+            await _discord_followup_patch(token, await _smart_wallets_leaderboard_response())
         else:
             await _discord_followup_patch(token, {"content": "Unrecognized request."})
     except Exception:
@@ -3721,7 +3771,42 @@ async def discord_smart_wallets_worker(request: Request):
 _WALLET_SUBMIT_CATEGORIES = ["KOL", "Degen", "Whale", "Sniper"]
 
 
-async def _wallet_submission_track_record(client: httpx.AsyncClient, address: str) -> str:
+_WALLET_ASSESSMENT_MIN_SAMPLE = 3  # below this, there's not enough sample size for a confident verdict either way
+_WALLET_ASSESSMENT_GOOD_WIN_RATE = 0.6
+_WALLET_ASSESSMENT_BAD_WIN_RATE = 0.35
+_WALLET_ASSESSMENT_STREAK_SAMPLE = 50  # most-recent realized trades scanned for the win-streak read
+
+
+async def _wallet_win_streak(client: httpx.AsyncClient, address: str) -> int:
+    # Consecutive PROFITABLE realized trades, most recent first, broken by
+    # the first non-winning one - a "how hot is this wallet RIGHT NOW"
+    # read, distinct from win_rate (an all-time average that a long cold
+    # stretch can hide behind an otherwise decent lifetime number).
+    try:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/nft_wallet_realized_trades",
+            headers=_supabase_headers(),
+            params={"wallet": f"eq.{address}", "select": "pnl_pct,sold_at", "order": "sold_at.desc", "limit": str(_WALLET_ASSESSMENT_STREAK_SAMPLE)},
+        )
+        res.raise_for_status()
+        trades = res.json()
+    except httpx.HTTPError:
+        return 0
+    streak = 0
+    for t in trades:
+        if (t.get("pnl_pct") or 0) > 0:
+            streak += 1
+        else:
+            break
+    return streak
+
+
+async def _wallet_assessment(client: httpx.AsyncClient, address: str) -> str:
+    # A rough, rule-based read on whether this wallet is worth trusting -
+    # never a human-written opinion, always traceable back to this bot's
+    # own observed data (same "no black box" spirit as NFT Scope's
+    # scoring reasons). Staff still makes the real call; this just saves
+    # reconstructing win rate + streak by hand on every single submission.
     best: dict | None = None
     for table, sample_col in (("nft_smart_wallets", "total_calls"), ("nft_wallet_pnl_stats", "total_trades")):
         try:
@@ -3738,12 +3823,30 @@ async def _wallet_submission_track_record(client: httpx.AsyncClient, address: st
             row = rows[0]
             if not best or (row.get("win_rate") or 0) > (best.get("win_rate") or 0):
                 best = {"sample": row[sample_col], "win_rate": row.get("win_rate") or 0}
+
     if not best:
-        return "No self-computed track record yet."
-    return f"🧠 {best['sample']} tracked call(s) in our own data, {best['win_rate']:.0%} win rate"
+        return "🤔 **Assessment:** No self-computed track record yet — too new to judge from our own data. Check the explorer links manually."
+
+    sample, win_rate = best["sample"], best["win_rate"]
+    streak = await _wallet_win_streak(client, address)
+    streak_note = f" · currently on a {streak}-win streak" if streak >= 2 else ""
+
+    if sample < _WALLET_ASSESSMENT_MIN_SAMPLE:
+        verdict = "🤔 **Assessment:** Mixed"
+        detail = f"only {sample} tracked call(s) so far — not enough sample size for a confident read yet"
+    elif win_rate >= _WALLET_ASSESSMENT_GOOD_WIN_RATE:
+        verdict = "✅ **Assessment:** Recommended"
+        detail = f"{sample} tracked call(s), {win_rate:.0%} win rate"
+    elif win_rate < _WALLET_ASSESSMENT_BAD_WIN_RATE:
+        verdict = "❌ **Assessment:** Not recommended"
+        detail = f"{sample} tracked call(s), only {win_rate:.0%} win rate"
+    else:
+        verdict = "🤔 **Assessment:** Mixed"
+        detail = f"{sample} tracked call(s), {win_rate:.0%} win rate"
+    return f"{verdict} — {detail}{streak_note}"
 
 
-def _wallet_submission_review_embed(submission: dict, track_record: str) -> dict:
+def _wallet_submission_review_embed(submission: dict, assessment: str) -> dict:
     address = submission["address"]
     short = f"{address[:6]}…{address[-4:]}"
     submitted_by = submission["submitted_by"]
@@ -3755,7 +3858,7 @@ def _wallet_submission_review_embed(submission: dict, track_record: str) -> dict
             f"**Tag:** {submission['tag']}\n"
             f"**Category:** `{submission['category']}`\n"
             f"**Submitted by:** {submitter}\n"
-            f"{track_record}\n\n"
+            f"{assessment}\n\n"
             f"**Links**\n{_wallet_explorer_links(address)}"
         ),
         "color": EMBED_COLOR_WARN,
@@ -3829,10 +3932,10 @@ async def _handle_smart_wallet_submit_modal(payload: dict) -> dict:
         res.raise_for_status()
         submission = res.json()[0]
 
-        track_record = await _wallet_submission_track_record(client, address)
+        assessment = await _wallet_assessment(client, address)
         message_id = await _post_channel_message_get_id(
             client, settings.discord_wallet_review_channel_id,
-            _wallet_submission_review_embed(submission, track_record),
+            _wallet_submission_review_embed(submission, assessment),
             components=_wallet_submission_review_components(submission["id"]),
         )
         if message_id:
@@ -7583,7 +7686,7 @@ def _nft_scope_tracked_wallet_points(tracked_hits: list[dict] | None) -> tuple[i
 # and a normal tiered post for the same slug in the same cycle can never
 # both fire.
 _NFT_SCOPE_TRACKED_CONVERGENCE_ALERT_MIN_WALLETS = 2
-_NFT_SCOPE_TRACKED_ALERT_COLOR = 0x8B5CF6  # violet - the color NFT Intel used, now free, same "distinct from every other tier" reasoning
+_NFT_SCOPE_TRACKED_ALERT_COLOR = 0x1B42FF  # Dash HQ blue (matches EMBED_COLOR) - was violet (NFT Intel's old color), changed to carry the brand instead
 
 
 _SWT_CONVERGENCE_MAX_WALLET_ROWS = 10  # keeps the post scannable - a real convergence rarely needs more to make the point
@@ -7710,17 +7813,29 @@ def _nft_scope_tracked_convergence_embed(c: dict, tracked_hits: list[dict], esti
         # (prefixed "~" so it never reads as confirmed), then the
         # generic fallback when there's simply not enough signal either way.
         if info["category"]:
-            badge = f"`{info['category']}` "
+            badge = f"`{info['category']}`"
         elif estimated.get(addr):
-            badge = f"`~{estimated[addr]}` "
+            badge = f"`~{estimated[addr]}`"
         else:
-            badge = "`Tracked` "
-        lines.append(f"{badge}[{short}](https://opensea.io/{addr})")
+            badge = "`Tracked`"
+        # [category]-[wallet]-[project being minted] - self-contained per
+        # row, so a single line still makes sense on its own (screenshot,
+        # copy-paste) without needing the embed's title for context.
+        lines.append(f"{badge} - [{short}](https://opensea.io/{addr}) - **{c['name']}**")
     if len(by_address) > _SWT_CONVERGENCE_MAX_WALLET_ROWS:
         lines.append(f"+{len(by_address) - _SWT_CONVERGENCE_MAX_WALLET_ROWS} more")
     opensea_url = c.get("openseaUrl")
+    # The project's own site (OpenSea's project_url metadata, already
+    # fetched for every collection - see _nft_collection_shape) is what
+    # actually IS the mint page for most collections; OpenSea's own
+    # listing usually isn't. Surfaced separately, not as a replacement -
+    # a lot of collections never set this field, and OpenSea's page is
+    # still useful (floor, activity) even when it exists.
+    mint_site = c.get("website")
+    if mint_site:
+        lines.append(f"\n🌐 [Mint Site]({mint_site})")
     if opensea_url:
-        lines.append(f"\n🔗 [View Collection]({opensea_url})")
+        lines.append(f"🔗 [View Collection]({opensea_url})")
     return {
         "author": {"name": "🔔 Alert Tracker"},
         "title": f"🌱 {len(by_address)} Wallet Minting {c['name']}",
@@ -7734,10 +7849,14 @@ def _nft_scope_tracked_convergence_embed(c: dict, tracked_hits: list[dict], esti
 
 
 def _nft_scope_tracked_convergence_components(c: dict) -> list:
-    url = c.get("openseaUrl")
-    if not url:
+    buttons = []
+    if c.get("website"):
+        buttons.append({"type": 2, "style": 5, "label": "Mint Site", "url": c["website"]})
+    if c.get("openseaUrl"):
+        buttons.append({"type": 2, "style": 5, "label": "OpenSea", "url": c["openseaUrl"]})
+    if not buttons:
         return []
-    return [{"type": 1, "components": [{"type": 2, "style": 5, "label": "OpenSea", "url": url}]}]
+    return [{"type": 1, "components": buttons}]
 
 
 async def _nft_scope_maybe_post_tracked_convergence(client: httpx.AsyncClient, slug: str, c: dict, tracked_wallet_hits: list[dict] | None) -> bool:
@@ -7748,7 +7867,7 @@ async def _nft_scope_maybe_post_tracked_convergence(client: httpx.AsyncClient, s
         return False
     if not await _nft_scope_clears_wash_check(client, slug):
         return False
-    ping = f"<@&{settings.discord_minting_now_role_id}> 🌱 **Minting now**" if settings.discord_minting_now_role_id else None
+    ping = f"<@&{settings.discord_minting_now_role_id}>" if settings.discord_minting_now_role_id else None
     uncategorized = [h["address"] for h in tracked_wallet_hits if not h.get("category")]
     estimated = await _estimate_wallet_categories(client, uncategorized)
     delivered = await _post_channel_message(
@@ -7821,10 +7940,10 @@ async def _nft_scope_auto_discover_co_minters(client: httpx.AsyncClient, slug: s
         except httpx.HTTPError:
             continue
 
-        track_record = await _wallet_submission_track_record(client, address)
+        assessment = await _wallet_assessment(client, address)
         message_id = await _post_channel_message_get_id(
             client, settings.discord_wallet_review_channel_id,
-            _wallet_submission_review_embed(submission, track_record),
+            _wallet_submission_review_embed(submission, assessment),
             components=_wallet_submission_review_components(submission["id"]),
         )
         if message_id:
@@ -9577,8 +9696,8 @@ TOOLKIT_TOOLS = {
     },
     "smart-wallets": {
         "emoji": "🕵️", "label": "Submit A Smart Wallet",
-        "short": "Propose a wallet for the tracked smart-wallet list - opens a short form, staff reviews it before it counts toward any alert",
-        "usage": "/smart-wallets import (leave the file blank to get the submission form)",
+        "short": "Propose a wallet for the tracked smart-wallet list - opens a short form, staff reviews it before it counts toward any alert. Also see /smart-wallets leaderboard for the top submitters",
+        "usage": "/smart-wallets import (leave the file blank to get the submission form) · /smart-wallets leaderboard",
         "example": "/smart-wallets import",
     },
 }
