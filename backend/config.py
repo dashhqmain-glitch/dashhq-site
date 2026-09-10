@@ -141,6 +141,14 @@ class Settings(BaseSettings):
     # feature down at once. Leave blank to keep using the anonymous flow.
     opensea_api_key: str = ""
 
+    # Reads a tracked wallet's own mints straight from the chain (not
+    # through OpenSea's indexer, which can lag a fresh contract's actual
+    # on-chain activity) - see _tracked_wallet_watch_sweep. The env var is
+    # already configured on Vercel from the old, since-removed NFT Intel
+    # feature; this just reconnects it. Empty means that sweep is a safe
+    # no-op, same as every other optional-feature key here.
+    alchemy_api_key: str = ""
+
     model_config = {"env_file": ".env"}
 
 

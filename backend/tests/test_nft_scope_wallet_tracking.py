@@ -7,6 +7,7 @@ multi-wallet convergence bonus, and the holdings-scan discovery pass."""
 from unittest.mock import patch
 
 import main
+from config import settings
 
 
 class FakeRes:
@@ -513,3 +514,173 @@ def test_score_includes_activity_spike_points():
     assert with_spike["score"] > without_spike["score"]
     assert any("accelerating" in r.lower() for r in with_spike["reasons"])
     assert not any("0x" in r for r in with_spike["reasons"])
+
+
+# ── Direct tracked-wallet mint watch (Alchemy) ─────────────────────────────
+# Covers the fix for a real bug: a tracked wallet minted on Robinhood Chain
+# and nft_sale_events_log never logged it, because every OTHER detection
+# path only finds a tracked wallet's mint as a side effect of scanning
+# collections, not by watching the wallet itself.
+
+def test_wallet_poll_bucket_is_deterministic_and_in_range():
+    a1 = main._wallet_poll_bucket("0xabc", 5)
+    a2 = main._wallet_poll_bucket("0xabc", 5)
+    assert a1 == a2
+    assert 0 <= a1 < 5
+
+
+def test_wallet_poll_bucket_spreads_different_addresses():
+    buckets = {main._wallet_poll_bucket(f"0x{i:040x}", 5) for i in range(20)}
+    assert len(buckets) > 1  # not every address collapsing into the same bucket
+
+
+async def test_alchemy_rpc_returns_none_without_an_api_key():
+    settings.alchemy_api_key = ""
+
+    class FailIfCalled:
+        async def post(self, *a, **k):
+            raise AssertionError("should never call out with no API key configured")
+
+    assert await main._alchemy_rpc(FailIfCalled(), "ethereum", "alchemy_getAssetTransfers", {}) is None
+
+
+async def test_alchemy_rpc_returns_none_for_an_unmapped_chain():
+    settings.alchemy_api_key = "key123"
+    try:
+        class FailIfCalled:
+            async def post(self, *a, **k):
+                raise AssertionError("should never call out for a chain with no subdomain mapping")
+
+        assert await main._alchemy_rpc(FailIfCalled(), "solana", "alchemy_getAssetTransfers", {}) is None
+    finally:
+        settings.alchemy_api_key = ""
+
+
+async def test_alchemy_rpc_returns_the_result_on_success():
+    settings.alchemy_api_key = "key123"
+    try:
+        class FakeClient:
+            async def post(self, url, json=None):
+                assert "eth-mainnet" in url
+                return FakeRes(200, {"jsonrpc": "2.0", "id": 1, "result": {"transfers": ["x"]}})
+
+        result = await main._alchemy_rpc(FakeClient(), "ethereum", "alchemy_getAssetTransfers", {})
+        assert result == {"transfers": ["x"]}
+    finally:
+        settings.alchemy_api_key = ""
+
+
+async def test_alchemy_rpc_marks_rate_limited_state_on_429():
+    settings.alchemy_api_key = "key123"
+    marked = {}
+
+    class FakeClient:
+        async def post(self, url, json=None):
+            return FakeRes(429, {})
+
+    async def fake_state_set(client, slug, alert_type, value):
+        marked["args"] = (slug, alert_type, value)
+
+    try:
+        with patch.object(main, "_nft_alert_state_set", new=fake_state_set):
+            result = await main._alchemy_rpc(FakeClient(), "ethereum", "alchemy_getAssetTransfers", {})
+        assert result is None
+        assert marked["args"] == ("__alchemy__", "rate_limited", 0)
+    finally:
+        settings.alchemy_api_key = ""
+
+
+async def test_alchemy_wallet_recent_mints_parses_hex_token_id_and_skips_malformed():
+    async def fake_rpc(client, chain, method, params):
+        if chain != "ethereum":
+            return None
+        return {"transfers": [
+            {"rawContract": {"address": "0xCONTRACT"}, "tokenId": "0x2a", "metadata": {"blockTimestamp": "2026-01-01T00:00:00Z"}},
+            {"rawContract": {"address": "0xdef"}, "tokenId": "7", "metadata": {}},
+            {"rawContract": None, "tokenId": "1"},  # missing contract - skipped
+        ]}
+
+    with patch.object(main, "_alchemy_rpc", new=fake_rpc):
+        mints = await main._alchemy_wallet_recent_mints(main.httpx.AsyncClient(), "0xwallet")
+
+    assert {"chain": "ethereum", "contract": "0xcontract", "token_id": "42", "event_at": "2026-01-01T00:00:00Z"} in mints
+    assert any(m["contract"] == "0xdef" and m["token_id"] == "7" for m in mints)
+    assert len(mints) == 2  # the malformed (no contract) transfer never made it in
+
+
+async def test_tracked_wallet_watch_sweep_skips_when_alchemy_not_configured():
+    settings.alchemy_api_key = ""
+    result = await main._tracked_wallet_watch_sweep(main.httpx.AsyncClient(), deadline=main.time.time() + 30)
+    assert result["checked"] == 0
+    assert "skipped" in result
+
+
+async def test_tracked_wallet_watch_sweep_logs_a_resolved_mint_and_triggers_convergence_check():
+    settings.alchemy_api_key = "key123"
+    logged_events = []
+    convergence_calls = []
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "nft_alert_state" in url:
+                return FakeRes(200, [])
+            if "smart_wallet_tags" in url:
+                return FakeRes(200, [{"address": "0xwallet1"}])
+            return FakeRes(200, [])
+
+        async def post(self, url, headers=None, json=None):
+            if "nft_sale_events_log" in url:
+                logged_events.append(json)
+                return FakeRes(200, {})
+            return FakeRes(200, {})
+
+    async def fake_recent_mints(client, address):
+        return [{"chain": "robinhood", "contract": "0xcontract", "token_id": "1", "event_at": "2026-01-01T00:00:00Z"}] if address == "0xwallet1" else []
+
+    async def fake_resolve(client, contract):
+        return {"slug": "some-collection", "name": "Some Collection", "symbol": "ETH"}
+
+    async def fake_maybe_post_direct(client, slug):
+        convergence_calls.append(slug)
+        return True
+
+    # Same rotation formula the sweep itself uses for `bucket`, evaluated
+    # live rather than pinned to a fixed number - guarantees every address
+    # matches THIS run's current-time bucket regardless of wall-clock time,
+    # instead of a 1-in-5 chance of the test being flaky.
+    def matching_bucket(address, num_buckets):
+        return int(main.time.time() // 300) % num_buckets
+
+    try:
+        with patch.object(main, "_alchemy_healthy", return_value=True), \
+             patch.object(main, "_wallet_poll_bucket", side_effect=matching_bucket), \
+             patch.object(main, "_alchemy_wallet_recent_mints", new=fake_recent_mints), \
+             patch.object(main, "_nft_resolve_by_contract", new=fake_resolve), \
+             patch.object(main, "_nft_scope_maybe_post_from_slug_direct", new=fake_maybe_post_direct):
+            result = await main._tracked_wallet_watch_sweep(FakeClient(), deadline=main.time.time() + 30)
+    finally:
+        settings.alchemy_api_key = ""
+
+    assert result["mints_found"] == 1
+    assert result["posted"] == 1
+    assert logged_events[0]["slug"] == "some-collection"
+    assert logged_events[0]["seller"] == main._TRACKED_WALLET_NULL_ADDRESS
+    assert convergence_calls == ["some-collection"]
+
+
+async def test_maybe_post_from_slug_direct_requires_the_convergence_minimum():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "nft_sale_events_log" in url:
+                return FakeRes(200, [{"buyer": "0xonly"}])
+            if "smart_wallet_tags" in url:
+                return FakeRes(200, [{"address": "0xonly", "tag": "T", "rank": None, "pnl": None, "category": None}])
+            return FakeRes(200, [])
+
+    async def fail_if_called(*a, **k):
+        raise AssertionError("should never build/post an embed below the convergence minimum")
+
+    with patch.object(main, "_nft_collection_core", new=fail_if_called):
+        result = await main._nft_scope_maybe_post_from_slug_direct(FakeClient(), "some-slug")
+
+    assert result is False

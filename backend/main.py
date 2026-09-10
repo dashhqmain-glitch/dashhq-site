@@ -1041,6 +1041,20 @@ async def inspect_wallet(request: Request, address: str):
     }
 
 
+@app.get("/cron/trigger-wallet-watch")
+async def trigger_wallet_watch(request: Request):
+    # Manually fires _tracked_wallet_watch_sweep right now instead of
+    # waiting for the next scheduled /cron/nft-poll tick - for verifying
+    # the Alchemy-based direct wallet watch actually works (and that
+    # robinhood/ink's subdomain naming is correct) without a real wait.
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    async with httpx.AsyncClient(timeout=55) as client:
+        result = await _tracked_wallet_watch_sweep(client, deadline=time.time() + 50)
+    return result
+
+
 # ── Pidgin AutoMod setup (one-time / re-run-on-change) ──────────────────────
 # English-only enforcement in #general via Discord's native AutoMod - free,
 # no persistent bot connection needed. Everything else in this backend is
@@ -8316,6 +8330,196 @@ async def _nft_scope_auto_discover_co_minters(client: httpx.AsyncClient, slug: s
         await _submit_wallet_for_review(client, address, f"Co-minted {c['name']} with a tracked wallet", "Degen", "system")
 
 
+# ── Direct tracked-wallet mint watch (Alchemy) ───────────────────────────
+# Every detection path above only ever finds a tracked wallet's mint as a
+# SIDE EFFECT of scanning collections (Pass 1's "30 newest per chain,
+# with enough aggregate activity to look real"). Confirmed live: a real
+# tracked wallet minted on Robinhood Chain and nft_sale_events_log never
+# logged a single row for it - the collection simply never surfaced
+# through that indirect sweep. This watches tracked wallets' own on-chain
+# activity directly instead, straight from the chain via Alchemy rather
+# than through OpenSea's indexer - the exact same lesson the original,
+# since-deleted NFT Intel feature already learned the hard way (git
+# history: it started on OpenSea account-events polling, then switched to
+# Alchemy after finding OpenSea's indexer lagged real on-chain mints).
+# Every genuinely new mint found still gets logged into the SAME
+# nft_sale_events_log every other path writes to, and still has to clear
+# the SAME convergence + quality-score gates before anything posts -
+# this only fixes detection, not the posting bar.
+_TRACKED_WALLET_ALCHEMY_CHAINS = {
+    "ethereum": "eth-mainnet",
+    "base": "base-mainnet",
+    "polygon": "polygon-mainnet",
+    "optimism": "opt-mainnet",
+    "arbitrum": "arb-mainnet",
+    "robinhood": "robinhood-mainnet",  # confirmed live 2026 per Alchemy's own docs, but not independently verified against this account's actual key - watch the first few sweeps' "checked"/"mints_found" counts
+    "ink": "ink-mainnet",  # same caveat as robinhood above
+}
+_TRACKED_WALLET_NULL_ADDRESS = "0x0000000000000000000000000000000000000000"
+_TRACKED_WALLET_EVENTS_PER_WALLET = 10
+_TRACKED_WALLET_POLL_BUCKETS = 5  # spreads full coverage of the tracked list across ~5 cron cycles instead of polling every wallet every tick
+_TRACKED_WALLET_POLL_TIME_BUDGET_SECONDS = 50  # skip this phase outright once a cycle has already burned this much of Vercel's 60s cap
+
+
+async def _alchemy_rpc(client: httpx.AsyncClient, chain: str, method: str, params: dict) -> dict | None:
+    subdomain = _TRACKED_WALLET_ALCHEMY_CHAINS.get(chain)
+    if not settings.alchemy_api_key or not subdomain:
+        return None
+    try:
+        res = await client.post(
+            f"https://{subdomain}.g.alchemy.com/v2/{settings.alchemy_api_key}",
+            json={"jsonrpc": "2.0", "id": 1, "method": method, "params": [params]},
+        )
+    except httpx.HTTPError:
+        logger.exception("tracked-wallet watch: Alchemy request failed (%s, %s)", chain, method)
+        return None
+    if res.status_code == 429:
+        # Ground-truth rate-limit signal, same shared-state pattern OpenSea
+        # already uses elsewhere - lets a future cycle back off automatically.
+        try:
+            await _nft_alert_state_set(client, "__alchemy__", "rate_limited", 0)
+        except httpx.HTTPError:
+            pass
+        return None
+    if res.status_code != 200:
+        return None  # chain not enabled on this key, or a transient hiccup - skip quietly, not an error worth failing the cycle over
+    data = res.json()
+    if "error" in data:
+        return None
+    return data.get("result")
+
+
+async def _alchemy_healthy(client: httpx.AsyncClient) -> bool:
+    try:
+        state = await _nft_alert_state_get(client, "__alchemy__", "rate_limited")
+    except httpx.HTTPError:
+        return True
+    return _nft_alert_cooled_down(state, cooldown_seconds=_NFT_SCOPE_RATE_LIMIT_BACKOFF_SECONDS)
+
+
+def _wallet_poll_bucket(address: str, num_buckets: int) -> int:
+    return int(hashlib.sha256(address.encode()).hexdigest(), 16) % num_buckets
+
+
+async def _alchemy_wallet_recent_mints(client: httpx.AsyncClient, address: str) -> list[dict]:
+    async def fetch(chain: str):
+        return chain, await _alchemy_rpc(client, chain, "alchemy_getAssetTransfers", {
+            "fromAddress": _TRACKED_WALLET_NULL_ADDRESS,
+            "toAddress": address,
+            "category": ["erc721", "erc1155"],
+            "maxCount": hex(_TRACKED_WALLET_EVENTS_PER_WALLET),
+            "order": "desc",
+            "withMetadata": True,
+        })
+
+    results = await asyncio.gather(*[fetch(chain) for chain in _TRACKED_WALLET_ALCHEMY_CHAINS])
+    mints = []
+    for chain, result in results:
+        if not result:
+            continue
+        for transfer in result.get("transfers", []):
+            contract = (transfer.get("rawContract") or {}).get("address")
+            raw_token_id = transfer.get("tokenId")
+            if not contract or raw_token_id is None:
+                continue
+            try:
+                token_id = str(int(raw_token_id, 16)) if isinstance(raw_token_id, str) and raw_token_id.startswith("0x") else str(raw_token_id)
+            except ValueError:
+                continue
+            event_at = (transfer.get("metadata") or {}).get("blockTimestamp") or datetime.now(timezone.utc).isoformat()
+            mints.append({"chain": chain, "contract": contract.lower(), "token_id": token_id, "event_at": event_at})
+    return mints
+
+
+async def _nft_scope_maybe_post_from_slug_direct(client: httpx.AsyncClient, slug: str) -> bool:
+    # Same convergence + quality-gate pipeline every other detection path
+    # already goes through - only exists to trigger it for a slug this
+    # sweep just logged activity for, since it may never appear in Pass
+    # 1's "30 newest per chain" scan window at all.
+    buyers_res = await client.get(
+        f"{settings.supabase_url}/rest/v1/nft_sale_events_log",
+        headers=_supabase_headers(), params={"slug": f"eq.{slug}", "select": "buyer"},
+    )
+    buyers_res.raise_for_status()
+    rapid_activity = {"buyer_addresses": sorted({row["buyer"] for row in buyers_res.json()})}
+    tracked_wallet_hits = await _nft_scope_tracked_wallet_hits(client, rapid_activity)
+    if len({h["address"] for h in tracked_wallet_hits}) < _NFT_SCOPE_TRACKED_CONVERGENCE_ALERT_MIN_WALLETS:
+        return False
+
+    c = await _nft_collection_core(slug)
+    top_offer_amount = await _nft_scope_top_offer_amount(client, slug, c)
+    history, first_snapshot = await _nft_scope_snapshot_signals(client, slug)
+    wash_analysis = await _nft_scope_wash_analysis(client, slug) if _nft_scope_turnover_elevated(c) else None
+    smart_wallet_hits, activity_spike_hits, _ = await _nft_scope_wallet_signals(client, rapid_activity)
+    score = _nft_scope_score(
+        c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot,
+        wash_analysis=wash_analysis, smart_wallet_hits=smart_wallet_hits, activity_spike_hits=activity_spike_hits,
+        tracked_wallet_hits=tracked_wallet_hits,
+    )
+    if await _nft_scope_maybe_post_tracked_convergence(client, slug, c, tracked_wallet_hits, score):
+        await _nft_scope_auto_discover_co_minters(client, slug, c, tracked_wallet_hits, rapid_activity)
+        return True
+    return False
+
+
+async def _tracked_wallet_watch_sweep(client: httpx.AsyncClient, deadline: float) -> dict:
+    if not settings.alchemy_api_key or not await _alchemy_healthy(client):
+        return {"checked": 0, "mints_found": 0, "posted": 0, "skipped": "alchemy_not_configured_or_rate_limited"}
+
+    tags_res = await client.get(
+        f"{settings.supabase_url}/rest/v1/smart_wallet_tags",
+        headers=_supabase_headers(), params={"select": "address"},
+    )
+    tags_res.raise_for_status()
+    all_addresses = sorted({row["address"] for row in tags_res.json()})
+    if not all_addresses:
+        return {"checked": 0, "mints_found": 0, "posted": 0}
+
+    # Stateless rotation, no new column/table needed - buckets every
+    # tracked address by a stable hash, polls only this cycle's bucket, so
+    # a large tracked list gets covered evenly over _TRACKED_WALLET_POLL_BUCKETS
+    # cycles instead of every wallet being polled (and burning rate limit)
+    # every single tick.
+    bucket = int(time.time() // 300) % _TRACKED_WALLET_POLL_BUCKETS
+    batch = [a for a in all_addresses if _wallet_poll_bucket(a, _TRACKED_WALLET_POLL_BUCKETS) == bucket]
+
+    checked = mints_found = posted = 0
+    affected_slugs: set[str] = set()
+    for address in batch:
+        if time.time() >= deadline:
+            break
+        checked += 1
+        for mint in await _alchemy_wallet_recent_mints(client, address):
+            c = await _nft_resolve_by_contract(client, mint["contract"])
+            if not c or not c.get("slug"):
+                continue
+            mints_found += 1
+            try:
+                await client.post(
+                    f"{settings.supabase_url}/rest/v1/nft_sale_events_log",
+                    headers=_supabase_headers(prefer="resolution=merge-duplicates,return=minimal"),
+                    json={
+                        "slug": c["slug"], "token_id": mint["token_id"], "buyer": address,
+                        "seller": _TRACKED_WALLET_NULL_ADDRESS, "price": None, "symbol": c.get("symbol"),
+                        "event_at": mint["event_at"],
+                    },
+                )
+            except httpx.HTTPError:
+                continue
+            affected_slugs.add(c["slug"])
+
+    for slug in affected_slugs:
+        if time.time() >= deadline:
+            break
+        try:
+            if await _nft_scope_maybe_post_from_slug_direct(client, slug):
+                posted += 1
+        except httpx.HTTPError:
+            continue
+
+    return {"checked": checked, "mints_found": mints_found, "posted": posted, "slugs_touched": sorted(affected_slugs)}
+
+
 async def _nft_scope_wallet_signals(client: httpx.AsyncClient, rapid_activity: dict | None) -> tuple[list[dict], list[dict], list[dict]]:
     # Single entry point every pass calls instead of fetching each wallet
     # signal separately - all three run concurrently, so a candidate with a
@@ -9167,12 +9371,22 @@ async def nft_poll(request: Request):
                     followups, errors = [], errors + [f"nft_scope_followups: {e}"]
             else:
                 errors.append("nft_scope_followups: skipped - cycle already past its time budget")
+        wallet_watch = {"checked": 0, "mints_found": 0, "posted": 0}
+        if time.time() - start < _TRACKED_WALLET_POLL_TIME_BUDGET_SECONDS:
+            try:
+                wallet_watch = await _tracked_wallet_watch_sweep(client, deadline=start + _TRACKED_WALLET_POLL_TIME_BUDGET_SECONDS)
+            except (httpx.HTTPError, KeyError) as e:
+                logger.exception("nft-poll: tracked-wallet watch phase failed")
+                errors.append(f"tracked_wallet_watch: {e}")
+        else:
+            errors.append("tracked_wallet_watch: skipped - cycle already past its time budget")
         pruned = await _prune_old_snapshots(client)
         pruned_sale_events = await _prune_old_sale_events(client)
         pruned_call_buyers = await _prune_old_call_buyers(client)
 
     return {
         "watchlist_alerts": alerted, "nft_scope_posts": scoped, "nft_scope_followups": followups,
+        "tracked_wallet_watch": wallet_watch,
         "pruned_old_snapshots": pruned, "pruned_old_sale_events": pruned_sale_events,
         "pruned_old_call_buyers": pruned_call_buyers, "errors": errors,
     }
