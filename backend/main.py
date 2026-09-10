@@ -3281,7 +3281,30 @@ def _parse_smart_wallet_import(text: str) -> tuple[list[dict], int]:
     tsv_rows, tsv_skipped = _parse_smart_wallet_tsv_lines(leftover)
     rows.extend(tsv_rows)
     skipped += tsv_skipped
-    return rows, skipped
+    return _dedupe_smart_wallet_rows(rows), skipped
+
+
+def _dedupe_smart_wallet_rows(rows: list[dict]) -> list[dict]:
+    # Real bug, confirmed live: a single wallet's composite label can
+    # carry two different credential phrases that both reduce to the
+    # SAME tag (e.g. "Top 4 Architects | Early Architects @$12k" ->
+    # "Architects" twice) - Postgres's upsert can't apply an ON CONFLICT
+    # update to the same (address, tag) key twice within one batch, which
+    # failed the entire chunk that duplicate landed in, not just those
+    # two rows. Collapses to one row per (address, tag), preferring
+    # whichever duplicate actually carries a rank/pnl value.
+    merged: dict[tuple[str, str], dict] = {}
+    for row in rows:
+        key = (row["address"], row["tag"])
+        existing = merged.get(key)
+        if not existing:
+            merged[key] = row
+            continue
+        if existing.get("rank") is None and row.get("rank") is not None:
+            existing["rank"] = row["rank"]
+        if existing.get("pnl") is None and row.get("pnl") is not None:
+            existing["pnl"] = row["pnl"]
+    return list(merged.values())
 
 
 async def _smart_wallet_tags_for_address(address: str) -> list[dict]:

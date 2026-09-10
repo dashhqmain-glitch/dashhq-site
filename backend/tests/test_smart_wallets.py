@@ -106,6 +106,33 @@ def test_mixed_notion_blocks_and_tsv_rows_in_one_file_both_parse():
     assert len(rows) == 3
 
 
+def test_a_wallet_with_two_credential_phrases_for_the_same_tag_collapses_to_one_row():
+    # Real bug, confirmed live: "Top 4 Architects | Early Architects @$12k"
+    # extracts to the tag "Architects" from BOTH segments, producing two
+    # rows with an identical (address, tag) key - Postgres's upsert
+    # rejects an ON CONFLICT update applied twice to the same key within
+    # one batch, which failed an entire real import (853 rows) over just
+    # two duplicated wallets. Must collapse to exactly one row, keeping
+    # whichever duplicate actually carries a rank.
+    line = "0xefdc7784e1e8d070399bde563521e5953d8de2fe\tTop 4 Architects | Early Architects @$12k\t5440\thttps://gmgn.ai/arc/address/0xefdc..."
+    rows, skipped = main._parse_smart_wallet_import(line)
+    assert skipped == 0
+    assert len(rows) == 1
+    assert rows[0]["address"] == "0xefdc7784e1e8d070399bde563521e5953d8de2fe"
+    assert rows[0]["tag"] == "Architects"
+    assert rows[0]["rank"] == 4  # kept from the "Top 4" segment, not overwritten by the rank-less "Early" one
+
+
+def test_dedupe_prefers_a_rank_or_pnl_value_over_a_missing_one():
+    rows = main._dedupe_smart_wallet_rows([
+        {"address": "0xa", "tag": "T", "rank": None, "pnl": None},
+        {"address": "0xa", "tag": "T", "rank": 3, "pnl": 12.5},
+    ])
+    assert len(rows) == 1
+    assert rows[0]["rank"] == 3
+    assert rows[0]["pnl"] == 12.5
+
+
 # ── _parse_smart_wallet_import: TSV with explicit comma tag list ────────
 
 def test_parses_tsv_with_explicit_tag_list():
@@ -148,10 +175,12 @@ def test_tsv_url_shape_derives_tag_from_early_at_price_pattern():
 def test_tsv_url_shape_derives_tag_from_multiplier_pattern():
     line = "0x9dafaa41c493fda22195c86fb77d75eb62a901bc\tTop 4 FEFER • 3.1x FEFER +$28.3K\t28279\thttps://x.example/a"
     rows, _ = main._parse_smart_wallet_import(line)
-    tags = [r["tag"] for r in rows]
-    assert tags == ["FEFER", "FEFER"]  # "Top 4 FEFER" and "3.1x FEFER +$28.3K" both resolve to FEFER
+    # "Top 4 FEFER" and "3.1x FEFER +$28.3K" both resolve to the same tag
+    # "FEFER" - deduped to one row (see _dedupe_smart_wallet_rows), keeping
+    # the rank the "Top 4" segment carried.
+    assert len(rows) == 1
+    assert rows[0]["tag"] == "FEFER"
     assert rows[0]["rank"] == 4
-    assert rows[1]["rank"] is None
 
 
 def test_tsv_url_shape_handles_pipe_separated_multi_tag_label():
