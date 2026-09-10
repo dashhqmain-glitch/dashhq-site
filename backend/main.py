@@ -1055,6 +1055,43 @@ async def trigger_wallet_watch(request: Request):
     return result
 
 
+@app.get("/cron/test-alchemy")
+async def test_alchemy(request: Request, address: str, chain: str = "ethereum"):
+    # Raw, unswallowed diagnostic - _alchemy_rpc deliberately returns None
+    # on ANY non-200 (a chain simply not enabled reads the same as a real
+    # auth failure or a typo'd subdomain), which is the right call for the
+    # sweep itself but makes a genuine integration problem indistinguishable
+    # from "this wallet just has no recent mints." This calls Alchemy
+    # directly and reports the real status code + body either way.
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not settings.alchemy_api_key:
+        return {"configured": False}
+    subdomain = _TRACKED_WALLET_ALCHEMY_CHAINS.get(chain)
+    if not subdomain:
+        return {"configured": True, "chain": chain, "error": f"no subdomain mapping for chain '{chain}'"}
+
+    address = address.lower().strip()
+    async with httpx.AsyncClient(timeout=15) as client:
+        res = await client.post(
+            f"https://{subdomain}.g.alchemy.com/v2/{settings.alchemy_api_key}",
+            json={"jsonrpc": "2.0", "id": 1, "method": "alchemy_getAssetTransfers", "params": [{
+                "fromAddress": _TRACKED_WALLET_NULL_ADDRESS,
+                "toAddress": address,
+                "category": ["erc721", "erc1155"],
+                "maxCount": hex(_TRACKED_WALLET_EVENTS_PER_WALLET),
+                "order": "desc",
+                "withMetadata": True,
+            }]},
+        )
+    try:
+        body = res.json()
+    except ValueError:
+        body = res.text[:500]
+    return {"chain": chain, "subdomain": subdomain, "address": address, "http_status": res.status_code, "response": body}
+
+
 # ── Pidgin AutoMod setup (one-time / re-run-on-change) ──────────────────────
 # English-only enforcement in #general via Discord's native AutoMod - free,
 # no persistent bot connection needed. Everything else in this backend is
