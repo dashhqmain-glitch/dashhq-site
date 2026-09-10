@@ -809,7 +809,8 @@ async def post_latest_tracked_mint(request: Request, ping: bool = False):
         hits = await _nft_scope_tracked_wallet_hits(client, {"buyer_addresses": all_buyers})
         estimated = await _estimate_wallet_categories(client, [h["address"] for h in hits if not h.get("category")])
         c = await _nft_collection_core(slug)
-        embed = _nft_scope_tracked_convergence_embed(c, hits, estimated)
+        scam_warning = await _mint_link_scam_warning(client, c.get("website") or c.get("openseaUrl"))
+        embed = _nft_scope_tracked_convergence_embed(c, hits, estimated, scam_warning)
         embed["footer"] = {"text": f"{embed['footer']['text']} · Manually triggered preview with REAL data, not a live alert"}
         # Silent by default - a manual preview call shouldn't ping anyone
         # every time someone wants to eyeball the embed. ?ping=true opts
@@ -3678,10 +3679,23 @@ async def _handle_smart_wallets_set_category_command(payload: dict) -> dict:
 
 
 async def _handle_smart_wallets_leaderboard_command(payload: dict) -> dict:
-    # Public and not ephemeral, unlike every other /smart-wallets
-    # subcommand - the whole point is celebrating supportive members in
-    # front of everyone else, not a private staff readout.
-    await _discord_deferred_ack(payload.get("id"), payload.get("token"), ephemeral=False)
+    # Team only, like every other /smart-wallets subcommand except
+    # import's no-file path - this is for staff to see who's a genuinely
+    # supportive submitter, not a public scoreboard.
+    if not _is_team_member(payload):
+        return {"type": 4, "data": {"content": "This command is for team members only.", "flags": 64}}
+    # Also tied to the mod/review channel specifically, not just gated by
+    # permission - same "where, not who" reasoning as the applications
+    # channel check above. Keeps it next to the submissions it's ranking.
+    if (
+        settings.discord_wallet_review_channel_id
+        and payload.get("channel_id") != settings.discord_wallet_review_channel_id
+    ):
+        return {
+            "type": 4,
+            "data": {"content": f"Use this in <#{settings.discord_wallet_review_channel_id}> instead.", "flags": 64},
+        }
+    await _discord_deferred_ack(payload.get("id"), payload.get("token"), ephemeral=True)
     await _dispatch_smart_wallets_worker(action="leaderboard", token=payload.get("token"))
     return {"type": 5}
 
@@ -7689,6 +7703,55 @@ _NFT_SCOPE_TRACKED_CONVERGENCE_ALERT_MIN_WALLETS = 2
 _NFT_SCOPE_TRACKED_ALERT_COLOR = 0x1B42FF  # Dash HQ blue (matches EMBED_COLOR) - was violet (NFT Intel's old color), changed to carry the brand instead
 
 
+# ── Mint-link phishing screen ────────────────────────────────────────────
+# Screens whatever URL is about to be posted as the "Mint Link" against
+# ScamSniffer's open-source phishing-domain blacklist
+# (github.com/scamsniffer/scam-database) - a real, actively-maintained
+# threat-intel source, not a heuristic guess. Their free tier is a static
+# JSON file with a 7-day-delayed snapshot of their real-time data (their
+# words) - enough to catch established phishing domains, not a guarantee
+# against a brand-new one from the last week. Deliberately doesn't try to
+# GO FIND a mint link this bot doesn't already have (e.g. searching X) -
+# the project's own OpenSea project_url metadata (or, failing that, the
+# OpenSea listing itself) is the only link ever posted, both real sourced
+# data, never a guess that could itself be wrong.
+_SCAM_DOMAIN_LIST_URL = "https://raw.githubusercontent.com/scamsniffer/scam-database/main/blacklist/domains.json"
+_SCAM_DOMAIN_CACHE: dict[str, tuple[float, set]] = {}
+_SCAM_DOMAIN_TTL = 6 * 3600  # the source list itself only refreshes daily - no need to refetch more often than this
+
+
+async def _known_scam_domains(client: httpx.AsyncClient) -> set:
+    cached = _SCAM_DOMAIN_CACHE.get("domains")
+    if cached and time.time() - cached[0] < _SCAM_DOMAIN_TTL:
+        return cached[1]
+    try:
+        res = await client.get(_SCAM_DOMAIN_LIST_URL, timeout=10)
+        res.raise_for_status()
+        domains = {d.lower() for d in res.json()}
+    except (httpx.HTTPError, ValueError):
+        # Fail open to whatever was last known-good, not an empty set -
+        # a transient GitHub hiccup shouldn't silently stop warning about
+        # domains this bot already confirmed were bad moments ago.
+        return cached[1] if cached else set()
+    _SCAM_DOMAIN_CACHE["domains"] = (time.time(), domains)
+    return domains
+
+
+async def _mint_link_scam_warning(client: httpx.AsyncClient, url: str | None) -> str | None:
+    if not url:
+        return None
+    try:
+        host = (httpx.URL(url).host or "").lower().removeprefix("www.")
+    except Exception:
+        return None
+    if not host:
+        return None
+    domains = await _known_scam_domains(client)
+    if host in domains:
+        return f"⚠️ **{host}** is on ScamSniffer's known-phishing list — do NOT connect a wallet or mint here. Verify the real link through the project's official channels first."
+    return None
+
+
 _SWT_CONVERGENCE_MAX_WALLET_ROWS = 10  # keeps the post scannable - a real convergence rarely needs more to make the point
 
 
@@ -7794,7 +7857,7 @@ async def _estimate_wallet_categories(client: httpx.AsyncClient, addresses: list
     return estimates
 
 
-def _nft_scope_tracked_convergence_embed(c: dict, tracked_hits: list[dict], estimated: dict[str, str] | None = None) -> dict:
+def _nft_scope_tracked_convergence_embed(c: dict, tracked_hits: list[dict], estimated: dict[str, str] | None = None, scam_warning: str | None = None) -> dict:
     # A category badge and a shortened linked address, one line per
     # wallet - this list is externally curated, not proprietary internal
     # scoring, so naming which wallet matched (and letting staff click
@@ -7837,6 +7900,12 @@ def _nft_scope_tracked_convergence_embed(c: dict, tracked_hits: list[dict], esti
         lines.append(f"\n🎟️ [Mint Link]({mint_link})")
     if opensea_url:
         lines.append(f"🔗 [View Collection]({opensea_url})")
+    # Flagged separately from the link itself (not just omitted) - a
+    # member seeing NO link might go looking for one themselves and land
+    # on the exact phishing site this was trying to warn them off of.
+    if scam_warning:
+        lines.append(f"\n{scam_warning}")
+    chain_display = _CHAIN_DISPLAY_NAMES.get(c.get("chain") or "", (c.get("chain") or "Unknown").title())
     return {
         "author": {"name": "🔔 Alert Tracker"},
         "title": f"🌱 {len(by_address)} Wallet Minting {c['name']}",
@@ -7844,6 +7913,10 @@ def _nft_scope_tracked_convergence_embed(c: dict, tracked_hits: list[dict], esti
         "description": "\n".join(lines),
         "color": _NFT_SCOPE_TRACKED_ALERT_COLOR,
         "thumbnail": {"url": c["image"]} if c.get("image") else None,
+        # Highlighted as its own field (not buried in text) - this bot
+        # covers several chains at once (see _NFT_SCOPE_CHAINS), and which
+        # one a mint is actually on is easy to miss otherwise.
+        "fields": [{"name": "⛓️ Chain", "value": chain_display, "inline": True}],
         "footer": {"text": "Smart Wallet Convergence · NFA"},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
@@ -7865,7 +7938,7 @@ def _nft_scope_tracked_convergence_components(c: dict) -> list:
     return [{"type": 1, "components": buttons}]
 
 
-async def _nft_scope_maybe_post_tracked_convergence(client: httpx.AsyncClient, slug: str, c: dict, tracked_wallet_hits: list[dict] | None) -> bool:
+async def _nft_scope_maybe_post_tracked_convergence(client: httpx.AsyncClient, slug: str, c: dict, tracked_wallet_hits: list[dict] | None, score: dict) -> bool:
     distinct_addresses = {h["address"] for h in (tracked_wallet_hits or [])}
     if len(distinct_addresses) < _NFT_SCOPE_TRACKED_CONVERGENCE_ALERT_MIN_WALLETS:
         return False
@@ -7873,12 +7946,23 @@ async def _nft_scope_maybe_post_tracked_convergence(client: httpx.AsyncClient, s
         return False
     if not await _nft_scope_clears_wash_check(client, slug):
         return False
+    # The project itself also has to clear NFT Scope's own bar - the SAME
+    # one every other pass already requires (_nft_scope_worth_posting: at
+    # least the "red" tier, not manipulation-flagged, has real activity
+    # and a timeliness signal). Deliberately the LOW end of that bar, not
+    # yellow/green - trusted wallets converging is already a strong,
+    # independent signal on its own, so this only exists to filter out
+    # genuinely bad projects (dead, manipulated, no real activity), not to
+    # require the same evidence a from-nothing discovery post needs.
+    if not _nft_scope_worth_posting(score):
+        return False
     ping = f"<@&{settings.discord_minting_now_role_id}>" if settings.discord_minting_now_role_id else None
     uncategorized = [h["address"] for h in tracked_wallet_hits if not h.get("category")]
     estimated = await _estimate_wallet_categories(client, uncategorized)
+    scam_warning = await _mint_link_scam_warning(client, c.get("website") or c.get("openseaUrl"))
     delivered = await _post_channel_message(
         client, settings.discord_smart_wallet_channel_id,
-        _nft_scope_tracked_convergence_embed(c, tracked_wallet_hits, estimated),
+        _nft_scope_tracked_convergence_embed(c, tracked_wallet_hits, estimated, scam_warning),
         content=ping,
         components=_nft_scope_tracked_convergence_components(c),
     )
@@ -8178,9 +8262,13 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
                 history, first_snapshot = await _nft_scope_snapshot_signals(client, slug)
                 wash_analysis = await _nft_scope_wash_analysis(client, slug) if _nft_scope_turnover_elevated(c) else None
                 smart_wallet_hits, activity_spike_hits, tracked_wallet_hits = await _nft_scope_wallet_signals(client, rapid_activity)
-                if await _nft_scope_maybe_post_tracked_convergence(client, slug, c, tracked_wallet_hits):
-                    await _nft_scope_auto_discover_co_minters(client, slug, c, tracked_wallet_hits, rapid_activity)
+                # Computed before the convergence check (not after, like
+                # every other pass) specifically so the Alert Tracker can
+                # gate on it too - reused as-is below for the normal
+                # tiered flow, so this reorder costs nothing extra.
                 score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis, smart_wallet_hits=smart_wallet_hits, activity_spike_hits=activity_spike_hits, tracked_wallet_hits=tracked_wallet_hits)
+                if await _nft_scope_maybe_post_tracked_convergence(client, slug, c, tracked_wallet_hits, score):
+                    await _nft_scope_auto_discover_co_minters(client, slug, c, tracked_wallet_hits, rapid_activity)
                 if score.get("floor_multiple") and score["floor_multiple"] >= _NFT_SCOPE_PROVED_MULTIPLE_THRESHOLD:
                     await _nft_scope_mark_slug_proved(client, slug, score["floor_multiple"])
                 if (
@@ -9702,8 +9790,8 @@ TOOLKIT_TOOLS = {
     },
     "smart-wallets": {
         "emoji": "🕵️", "label": "Submit A Smart Wallet",
-        "short": "Propose a wallet for the tracked smart-wallet list - opens a short form, staff reviews it before it counts toward any alert. Also see /smart-wallets leaderboard for the top submitters",
-        "usage": "/smart-wallets import (leave the file blank to get the submission form) · /smart-wallets leaderboard",
+        "short": "Propose a wallet for the tracked smart-wallet list - opens a short form, staff reviews it before it counts toward any alert",
+        "usage": "/smart-wallets import (leave the file blank to get the submission form)",
         "example": "/smart-wallets import",
     },
 }

@@ -196,7 +196,7 @@ COMMANDS = [
                     {"name": "category", "description": "e.g. KOL, Degen, Sniper, Whale", "type": 3, "required": True},
                 ],
             },
-            {"name": "leaderboard", "description": "See who's submitted the most approved wallets", "type": 1},
+            {"name": "leaderboard", "description": "Team only: see who's submitted the most approved wallets", "type": 1},
         ],
     },
     {

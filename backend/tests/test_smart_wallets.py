@@ -3,6 +3,7 @@ leaderboard that replaced NFT Intel. Covers the multi-shape import parser,
 the NFT Scope cross-reference signal (hits/points/wallet_signals/score
 integration), the /xray enrichment, and the command handlers' team-only
 gates."""
+import time
 from unittest.mock import patch
 
 import main
@@ -23,9 +24,9 @@ class FakeRes:
             raise main.httpx.HTTPStatusError("boom", request=None, response=self)
 
 
-def _payload(permissions="0", options=None, resolved=None):
+def _payload(permissions="0", options=None, resolved=None, channel_id=None):
     return {
-        "id": "int1", "token": "tok1",
+        "id": "int1", "token": "tok1", "channel_id": channel_id,
         "member": {"permissions": permissions, "user": {"id": "u1", "username": "someone"}},
         "data": {"name": "smart-wallets", "options": options or [], "resolved": resolved or {}},
     }
@@ -526,6 +527,81 @@ def test_convergence_embed_row_names_the_project_being_minted():
     assert "`Whale` - [0x1111…111a](https://opensea.io/0x1111111111111111111111111111111111111a) - **Test Collection**" in embed["description"]
 
 
+def test_convergence_embed_highlights_the_chain():
+    hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": "Whale"}]
+    embed = main._nft_scope_tracked_convergence_embed(_fake_collection(chain="robinhood"), hits)
+    assert embed["fields"] == [{"name": "⛓️ Chain", "value": "Robinhood Chain", "inline": True}]
+
+
+def test_convergence_embed_chain_falls_back_to_a_titlecased_unknown_slug():
+    hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": "Whale"}]
+    embed = main._nft_scope_tracked_convergence_embed(_fake_collection(chain="somenewchain"), hits)
+    assert embed["fields"][0]["value"] == "Somenewchain"
+
+
+def test_convergence_embed_includes_a_scam_warning_when_given_one():
+    hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": "Whale"}]
+    embed = main._nft_scope_tracked_convergence_embed(_fake_collection(), hits, scam_warning="⚠️ **evil.xyz** is on ScamSniffer's known-phishing list")
+    assert "⚠️ **evil.xyz** is on ScamSniffer's known-phishing list" in embed["description"]
+
+
+# ── Mint-link phishing screen ─────────────────────────────────────────────
+
+async def test_known_scam_domains_caches_the_fetched_list():
+    calls = {"n": 0}
+
+    class FakeClient:
+        async def get(self, url, timeout=None):
+            calls["n"] += 1
+            return FakeRes(200, ["evil.xyz"])
+
+    main._SCAM_DOMAIN_CACHE.clear()
+    client = FakeClient()
+    first = await main._known_scam_domains(client)
+    second = await main._known_scam_domains(client)
+    assert first == second == {"evil.xyz"}
+    assert calls["n"] == 1  # second call served from cache, not refetched
+
+
+async def test_known_scam_domains_fails_open_to_last_known_good_on_error():
+    main._SCAM_DOMAIN_CACHE.clear()
+    main._SCAM_DOMAIN_CACHE["domains"] = (time.time() - main._SCAM_DOMAIN_TTL - 1, {"stale-but-known.xyz"})  # expired
+
+    class FailingClient:
+        async def get(self, url, timeout=None):
+            raise main.httpx.HTTPError("boom")
+
+    result = await main._known_scam_domains(FailingClient())
+    assert result == {"stale-but-known.xyz"}
+    main._SCAM_DOMAIN_CACHE.clear()
+
+
+async def test_mint_link_scam_warning_flags_a_known_domain():
+    main._SCAM_DOMAIN_CACHE["domains"] = (time.time(), {"evil.xyz"})
+    warning = await main._mint_link_scam_warning(main.httpx.AsyncClient(), "https://evil.xyz/mint")
+    assert warning is not None
+    assert "evil.xyz" in warning
+    assert "ScamSniffer" in warning
+    main._SCAM_DOMAIN_CACHE.clear()
+
+
+async def test_mint_link_scam_warning_clean_for_an_unlisted_domain():
+    main._SCAM_DOMAIN_CACHE["domains"] = (time.time(), {"evil.xyz"})
+    warning = await main._mint_link_scam_warning(main.httpx.AsyncClient(), "https://opensea.io/collection/x")
+    assert warning is None
+    main._SCAM_DOMAIN_CACHE.clear()
+
+
+async def test_mint_link_scam_warning_none_for_no_url():
+    assert await main._mint_link_scam_warning(main.httpx.AsyncClient(), None) is None
+
+
+def _good_score(**overrides):
+    data = {"tier": "red", "blocked": False, "has_real_activity": True, "has_timeliness_signal": True}
+    data.update(overrides)
+    return data
+
+
 async def test_maybe_post_convergence_skips_below_minimum_wallets():
     async def fail_if_called(*a, **k):
         raise AssertionError("should never post below the minimum")
@@ -533,7 +609,7 @@ async def test_maybe_post_convergence_skips_below_minimum_wallets():
     with patch.object(main, "_post_channel_message", new=fail_if_called):
         result = await main._nft_scope_maybe_post_tracked_convergence(
             main.httpx.AsyncClient(), "slug", _fake_collection(),
-            [{"address": "0xa", "tag": "REALCOIN", "rank": None, "pnl": None}],
+            [{"address": "0xa", "tag": "REALCOIN", "rank": None, "pnl": None}], _good_score(),
         )
     assert result is False
 
@@ -549,7 +625,7 @@ async def test_maybe_post_convergence_skips_if_recently_posted():
 
     with patch.object(main, "_nft_scope_recently_posted", new=fake_recently_posted), \
          patch.object(main, "_post_channel_message", new=fail_if_called):
-        result = await main._nft_scope_maybe_post_tracked_convergence(main.httpx.AsyncClient(), "slug", _fake_collection(), hits)
+        result = await main._nft_scope_maybe_post_tracked_convergence(main.httpx.AsyncClient(), "slug", _fake_collection(), hits, _good_score())
     assert result is False
 
 
@@ -568,8 +644,29 @@ async def test_maybe_post_convergence_skips_if_wash_dirty():
     with patch.object(main, "_nft_scope_recently_posted", new=fake_recently_posted), \
          patch.object(main, "_nft_scope_clears_wash_check", new=fake_clears_wash), \
          patch.object(main, "_post_channel_message", new=fail_if_called):
-        result = await main._nft_scope_maybe_post_tracked_convergence(main.httpx.AsyncClient(), "slug", _fake_collection(), hits)
+        result = await main._nft_scope_maybe_post_tracked_convergence(main.httpx.AsyncClient(), "slug", _fake_collection(), hits, _good_score())
     assert result is False
+
+
+async def test_maybe_post_convergence_skips_if_score_too_low():
+    hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None}, {"address": "0xb", "tag": "T2", "rank": None, "pnl": None}]
+
+    async def fake_recently_posted(client, slug):
+        return False
+
+    async def fake_clears_wash(client, slug):
+        return True
+
+    async def fail_if_called(*a, **k):
+        raise AssertionError("should never post a project that fails NFT Scope's own bar")
+
+    with patch.object(main, "_nft_scope_recently_posted", new=fake_recently_posted), \
+         patch.object(main, "_nft_scope_clears_wash_check", new=fake_clears_wash), \
+         patch.object(main, "_post_channel_message", new=fail_if_called):
+        blocked = await main._nft_scope_maybe_post_tracked_convergence(main.httpx.AsyncClient(), "slug", _fake_collection(), hits, _good_score(blocked=True))
+        low_tier = await main._nft_scope_maybe_post_tracked_convergence(main.httpx.AsyncClient(), "slug", _fake_collection(), hits, _good_score(tier="none"))
+    assert blocked is False
+    assert low_tier is False
 
 
 async def test_maybe_post_convergence_posts_and_marks_shared_cooldown():
@@ -599,7 +696,7 @@ async def test_maybe_post_convergence_posts_and_marks_shared_cooldown():
          patch.object(main, "_post_channel_message", new=fake_post), \
          patch.object(main, "_nft_scope_mark_posted", new=fake_mark_posted), \
          patch.object(main, "_nft_scope_record_call_buyers", new=fake_record_buyers):
-        result = await main._nft_scope_maybe_post_tracked_convergence(main.httpx.AsyncClient(), "test-slug", _fake_collection(), hits)
+        result = await main._nft_scope_maybe_post_tracked_convergence(main.httpx.AsyncClient(), "test-slug", _fake_collection(), hits, _good_score())
 
     assert result is True
     assert calls["channel_id"] == main.settings.discord_smart_wallet_channel_id
@@ -635,7 +732,7 @@ async def test_maybe_post_convergence_pings_the_minting_now_role_when_configured
              patch.object(main, "_post_channel_message", new=fake_post), \
              patch.object(main, "_nft_scope_mark_posted", new=noop), \
              patch.object(main, "_nft_scope_record_call_buyers", new=noop):
-            await main._nft_scope_maybe_post_tracked_convergence(main.httpx.AsyncClient(), "test-slug", _fake_collection(), hits)
+            await main._nft_scope_maybe_post_tracked_convergence(main.httpx.AsyncClient(), "test-slug", _fake_collection(), hits, _good_score())
     finally:
         settings.discord_minting_now_role_id = ""
 
@@ -951,8 +1048,24 @@ async def test_leaderboard_empty_state():
     assert "No approved member submissions yet" in response["embeds"][0]["description"]
 
 
-async def test_leaderboard_command_is_public_not_ephemeral():
+async def test_leaderboard_command_rejects_non_team_members():
+    result = await main._handle_smart_wallets_leaderboard_command(_payload(permissions="0", options=[{"name": "leaderboard"}]))
+    assert "team members only" in result["data"]["content"]
+
+
+async def test_leaderboard_command_rejects_the_wrong_channel_even_for_staff():
+    settings.discord_wallet_review_channel_id = "modchan1"
+    try:
+        payload = _payload(permissions="32", options=[{"name": "leaderboard"}], channel_id="some-other-channel")
+        result = await main._handle_smart_wallets_leaderboard_command(payload)
+    finally:
+        settings.discord_wallet_review_channel_id = "1074665247266308097"
+    assert "Use this in <#modchan1>" in result["data"]["content"]
+
+
+async def test_leaderboard_command_is_ephemeral_for_team_members_in_the_mod_channel():
     acked = {}
+    settings.discord_wallet_review_channel_id = "modchan1"
 
     async def fake_ack(interaction_id, token, ephemeral=False):
         acked["ephemeral"] = ephemeral
@@ -960,11 +1073,15 @@ async def test_leaderboard_command_is_public_not_ephemeral():
     async def fake_dispatch(**kwargs):
         pass
 
-    with patch.object(main, "_discord_deferred_ack", new=fake_ack), \
-         patch.object(main, "_dispatch_smart_wallets_worker", new=fake_dispatch):
-        await main._handle_smart_wallets_leaderboard_command(_payload(permissions="0", options=[{"name": "leaderboard"}]))
+    try:
+        payload = _payload(permissions="32", options=[{"name": "leaderboard"}], channel_id="modchan1")
+        with patch.object(main, "_discord_deferred_ack", new=fake_ack), \
+             patch.object(main, "_dispatch_smart_wallets_worker", new=fake_dispatch):
+            await main._handle_smart_wallets_leaderboard_command(payload)
+    finally:
+        settings.discord_wallet_review_channel_id = "1074665247266308097"
 
-    assert acked["ephemeral"] is False
+    assert acked["ephemeral"] is True
 
 
 async def test_submit_modal_rejects_a_bad_address():
