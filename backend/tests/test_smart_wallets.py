@@ -493,17 +493,30 @@ def test_convergence_components_empty_without_an_opensea_url():
     assert main._nft_scope_tracked_convergence_components({"openseaUrl": None}) == []
 
 
-def test_convergence_components_include_mint_site_when_the_project_has_one():
+def test_convergence_components_include_a_distinct_mint_link_button_when_the_project_has_one():
     c = _fake_collection(website="https://mint.example.xyz")
     components = main._nft_scope_tracked_convergence_components(c)
     labels = [b["label"] for b in components[0]["components"]]
-    assert labels == ["Mint Site", "OpenSea"]
+    assert labels == ["Mint Link", "OpenSea"]
 
 
-def test_convergence_embed_links_the_mint_site_when_available():
+def test_convergence_components_skip_the_duplicate_mint_link_button_when_it_matches_opensea():
+    c = _fake_collection(website=_fake_collection()["openseaUrl"])
+    components = main._nft_scope_tracked_convergence_components(c)
+    labels = [b["label"] for b in components[0]["components"]]
+    assert labels == ["OpenSea"]  # no redundant second button pointing at the same URL
+
+
+def test_convergence_embed_links_the_mint_link_when_a_dedicated_site_exists():
     hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": "Whale"}]
     embed = main._nft_scope_tracked_convergence_embed(_fake_collection(website="https://mint.example.xyz"), hits)
-    assert "[Mint Site](https://mint.example.xyz)" in embed["description"]
+    assert "[Mint Link](https://mint.example.xyz)" in embed["description"]
+
+
+def test_convergence_embed_mint_link_falls_back_to_opensea_when_no_dedicated_site():
+    hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": "Whale"}]
+    embed = main._nft_scope_tracked_convergence_embed(_fake_collection(website=None), hits)
+    assert f"[Mint Link]({_fake_collection()['openseaUrl']})" in embed["description"]
 
 
 def test_convergence_embed_row_names_the_project_being_minted():

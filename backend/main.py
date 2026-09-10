@@ -7825,15 +7825,16 @@ def _nft_scope_tracked_convergence_embed(c: dict, tracked_hits: list[dict], esti
     if len(by_address) > _SWT_CONVERGENCE_MAX_WALLET_ROWS:
         lines.append(f"+{len(by_address) - _SWT_CONVERGENCE_MAX_WALLET_ROWS} more")
     opensea_url = c.get("openseaUrl")
-    # The project's own site (OpenSea's project_url metadata, already
-    # fetched for every collection - see _nft_collection_shape) is what
-    # actually IS the mint page for most collections; OpenSea's own
-    # listing usually isn't. Surfaced separately, not as a replacement -
-    # a lot of collections never set this field, and OpenSea's page is
-    # still useful (floor, activity) even when it exists.
-    mint_site = c.get("website")
-    if mint_site:
-        lines.append(f"\n🌐 [Mint Site]({mint_site})")
+    # Always show SOME mint link, never conditionally disappear - the
+    # project's own site (OpenSea's project_url metadata, already fetched
+    # for every collection) is the real mint page for most collections,
+    # but plenty never set that field, and a member with nothing to click
+    # defeats the entire point of a mint alert. Falls back to the OpenSea
+    # listing itself (still a real, clickable path to the collection)
+    # rather than going blank.
+    mint_link = c.get("website") or opensea_url
+    if mint_link:
+        lines.append(f"\n🎟️ [Mint Link]({mint_link})")
     if opensea_url:
         lines.append(f"🔗 [View Collection]({opensea_url})")
     return {
@@ -7850,10 +7851,15 @@ def _nft_scope_tracked_convergence_embed(c: dict, tracked_hits: list[dict], esti
 
 def _nft_scope_tracked_convergence_components(c: dict) -> list:
     buttons = []
-    if c.get("website"):
-        buttons.append({"type": 2, "style": 5, "label": "Mint Site", "url": c["website"]})
-    if c.get("openseaUrl"):
-        buttons.append({"type": 2, "style": 5, "label": "OpenSea", "url": c["openseaUrl"]})
+    website = c.get("website")
+    opensea_url = c.get("openseaUrl")
+    # Only a distinct "Mint Link" button when it's actually a different
+    # URL from OpenSea - otherwise it'd sit right next to an "OpenSea"
+    # button pointing at the exact same place, which just looks broken.
+    if website and website != opensea_url:
+        buttons.append({"type": 2, "style": 5, "label": "Mint Link", "url": website})
+    if opensea_url:
+        buttons.append({"type": 2, "style": 5, "label": "OpenSea", "url": opensea_url})
     if not buttons:
         return []
     return [{"type": 1, "components": buttons}]
