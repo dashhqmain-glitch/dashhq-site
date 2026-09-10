@@ -4022,27 +4022,43 @@ def _smart_wallet_submit_modal() -> dict:
     # command's staff subcommands (list/clear/set-category) cluttering
     # their autocomplete just because /smart-wallets has to be visible to
     # them for something. Staff bulk import stays on /smart-wallets import
-    # <file>, fully hidden from members again. Discord modals only support
-    # text-input components (no select/choice widgets), so category is
-    # free text here, validated server-side against _WALLET_SUBMIT_CATEGORIES.
+    # <file>, fully hidden from members again.
+    #
+    # Components V2 (Label-wrapping, type 18) throughout - Discord's own
+    # current guidance is to stop putting Text Inputs directly in Action
+    # Rows inside modals, and V2 is what finally makes a real dropdown
+    # possible for category (a plain Action Row can only ever hold text
+    # inputs - no select menus - so the old modal had category as free
+    # text, which broke on a real submission: "KOL".title() -> "Kol",
+    # silently failing to match the validator. A constrained dropdown
+    # can't have that class of bug at all.
     return {
         "type": 9,
         "data": {
             "custom_id": "smartwallets_submit",
             "title": "Submit Smart Wallet(s)",
             "components": [
-                {"type": 1, "components": [{
-                    "type": 4, "custom_id": "addresses", "style": 2, "label": "Wallet address(es)",
-                    "max_length": 1500, "required": True, "placeholder": "0xabc...\n0xdef... (one per line for several)",
-                }]},
-                {"type": 1, "components": [{
-                    "type": 4, "custom_id": "tag", "style": 1, "label": "Short rank/credential title",
-                    "max_length": 100, "required": True, "placeholder": "e.g. Called PVP early - applies to all if several",
-                }]},
-                {"type": 1, "components": [{
-                    "type": 4, "custom_id": "category", "style": 1, "label": "Category",
-                    "max_length": 20, "required": True, "placeholder": "KOL, Degen, Whale, or Sniper",
-                }]},
+                {
+                    "type": 18, "label": "Wallet address(es)", "description": "One per line for several",
+                    "component": {
+                        "type": 4, "custom_id": "addresses", "style": 2,
+                        "max_length": 1500, "required": True, "placeholder": "0xabc...\n0xdef...",
+                    },
+                },
+                {
+                    "type": 18, "label": "Short rank/credential title",
+                    "component": {
+                        "type": 4, "custom_id": "tag", "style": 1,
+                        "max_length": 100, "required": True, "placeholder": "e.g. Called PVP early - applies to all if several",
+                    },
+                },
+                {
+                    "type": 18, "label": "Category",
+                    "component": {
+                        "type": 3, "custom_id": "category", "required": True,
+                        "options": [{"label": cat, "value": cat} for cat in _WALLET_SUBMIT_CATEGORIES],
+                    },
+                },
             ],
         },
     }
@@ -4054,17 +4070,35 @@ async def _handle_wallet_submit_command(payload: dict) -> dict:
     return _smart_wallet_submit_modal()
 
 
-async def _handle_smart_wallet_submit_modal(payload: dict) -> dict:
+def _parse_modal_submit_fields(payload: dict) -> dict[str, str]:
+    # Handles both shapes defensively: current Components V2 (each
+    # top-level entry is a Label with a single nested "component" key) and
+    # the older Action-Row style (a "components" LIST, one item) that the
+    # rest of this codebase's modals (ACO, decline-reason) still use.
+    # A select's pick comes back as a "values" list; a text input's typed
+    # string comes back as "value".
     fields: dict[str, str] = {}
-    for row in payload.get("data", {}).get("components", []):
-        for comp in row.get("components", []):
-            fields[comp.get("custom_id")] = (comp.get("value") or "").strip()
+    for entry in payload.get("data", {}).get("components", []):
+        inner_components = [entry["component"]] if "component" in entry else entry.get("components", [])
+        for comp in inner_components:
+            custom_id = comp.get("custom_id")
+            if not custom_id:
+                continue
+            if "values" in comp:
+                fields[custom_id] = ((comp.get("values") or [""])[0] or "").strip()
+            else:
+                fields[custom_id] = (comp.get("value") or "").strip()
+    return fields
+
+
+async def _handle_smart_wallet_submit_modal(payload: dict) -> dict:
+    fields = _parse_modal_submit_fields(payload)
 
     valid, invalid = _parse_smart_wallet_addresses(fields.get("addresses", ""))
     overflow = max(0, len(valid) - _WALLET_SUBMIT_MAX_PER_BATCH)
     valid = valid[:_WALLET_SUBMIT_MAX_PER_BATCH]
     tag = fields.get("tag", "")[:100]
-    category = fields.get("category", "").strip().title()
+    category = fields.get("category", "").strip()
 
     if not valid:
         return {"type": 4, "data": {"content": "No valid wallet address found - each one should look like `0x` followed by 40 hex characters (one per line for several).", "flags": 64}}

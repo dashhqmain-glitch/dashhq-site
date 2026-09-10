@@ -954,13 +954,15 @@ async def test_handle_smart_wallets_command_routes_by_subcommand():
 # ── Member wallet submissions (the modal /smart-wallets import opens) ────
 
 def _modal_payload(address="0xc0d1ff953a6147556dc0c309509a2b15ea13a68a", tag="Called PVP early", category="Degen", user_id="u1"):
+    # Components V2 shape (Label wrapping a single "component") - what
+    # Discord actually sends now that the modal itself uses Label/Select.
     return {
         "id": "int1", "token": "tok1",
         "member": {"permissions": "0", "user": {"id": user_id, "username": "someone"}},
         "data": {"custom_id": "smartwallets_submit", "components": [
-            {"type": 1, "components": [{"custom_id": "addresses", "value": address}]},
-            {"type": 1, "components": [{"custom_id": "tag", "value": tag}]},
-            {"type": 1, "components": [{"custom_id": "category", "value": category}]},
+            {"type": 18, "component": {"custom_id": "addresses", "value": address}},
+            {"type": 18, "component": {"custom_id": "tag", "value": tag}},
+            {"type": 18, "component": {"custom_id": "category", "values": [category]}},
         ]},
     }
 
@@ -1146,6 +1148,53 @@ async def test_submit_modal_inserts_pending_row_and_posts_to_the_review_channel(
     # so the Approve/Reject buttons later know which message to edit.
     sub_patch = next(j for u, j in patches if "smart_wallet_submissions" in u)
     assert sub_patch["discord_message_id"] == "msg1"
+
+
+# ── Modal submit field parsing (Components V2 dropdown) ───────────────────
+
+def test_parse_modal_submit_fields_reads_the_components_v2_shape():
+    payload = {"data": {"components": [
+        {"type": 18, "component": {"custom_id": "tag", "value": "  Called PVP early  "}},
+        {"type": 18, "component": {"custom_id": "category", "values": ["KOL"]}},
+    ]}}
+    assert main._parse_modal_submit_fields(payload) == {"tag": "Called PVP early", "category": "KOL"}
+
+
+def test_parse_modal_submit_fields_still_reads_the_old_action_row_shape():
+    # ACO's own modals (and the decline-reason modal) still use the older
+    # Action-Row wrapping - shared parsing has to keep working for those too.
+    payload = {"data": {"components": [
+        {"type": 1, "components": [{"custom_id": "tag", "value": "Called PVP early"}]},
+    ]}}
+    assert main._parse_modal_submit_fields(payload) == {"tag": "Called PVP early"}
+
+
+async def test_submit_modal_accepts_kol_exactly_as_selected_no_title_casing_bug():
+    # Regression: the old free-text field did category.title() to
+    # normalize casing, which silently turned "KOL" into "Kol" and failed
+    # validation even though the user typed it exactly right. The
+    # dropdown's option values are the canonical strings themselves, so
+    # no case transformation should ever be applied.
+    class FakeClient:
+        async def post(self, url, headers=None, json=None):
+            if "smart_wallet_submissions" in url:
+                return FakeRes(200, [{**json, "id": "sub1"}])
+            if "/messages" in url:
+                return FakeRes(200, {"id": "msg1"})
+            return FakeRes(200, {})
+
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [])
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        result = await main._handle_smart_wallet_submit_modal(_modal_payload(category="KOL"))
+
+    assert result == {"type": 5}
+    assert result != {"type": 4, "data": {"content": "Category must be one of: KOL, Degen, Whale, Sniper.", "flags": 64}}
 
 
 # ── Multi-wallet paste in the same modal ──────────────────────────────────
