@@ -3964,24 +3964,81 @@ def _wallet_submission_review_components(submission_id: str) -> list:
     ]}]
 
 
+async def _submit_wallet_for_review(client: httpx.AsyncClient, address: str, tag: str, category: str, submitted_by: str) -> dict | None:
+    # Shared by every path that can propose a wallet for staff review - a
+    # member's own /smart-wallets import submission (one address or
+    # several at once) and the system's co-minter auto-discovery - so the
+    # insert/assess/post/link-back sequence only lives in one place.
+    try:
+        res = await client.post(
+            f"{settings.supabase_url}/rest/v1/smart_wallet_submissions",
+            headers=_supabase_headers(prefer="return=representation"),
+            json={"address": address, "tag": tag, "category": category, "submitted_by": submitted_by},
+        )
+        res.raise_for_status()
+        submission = res.json()[0]
+    except httpx.HTTPError:
+        return None
+
+    assessment = await _wallet_assessment(client, address)
+    message_id = await _post_channel_message_get_id(
+        client, settings.discord_wallet_review_channel_id,
+        _wallet_submission_review_embed(submission, assessment),
+        components=_wallet_submission_review_components(submission["id"]),
+    )
+    if message_id:
+        await client.patch(
+            f"{settings.supabase_url}/rest/v1/smart_wallet_submissions",
+            headers=_supabase_headers(prefer="return=minimal"),
+            params={"id": f"eq.{submission['id']}"},
+            json={"discord_channel_id": settings.discord_wallet_review_channel_id, "discord_message_id": message_id},
+        )
+    return submission
+
+
+_WALLET_SUBMIT_MAX_PER_BATCH = 10  # keeps one submission from flooding the mod channel with individual review posts - resubmit for more
+
+
+def _parse_smart_wallet_addresses(raw: str) -> tuple[list[str], list[str]]:
+    # Splits on newlines or commas so a member can paste several addresses
+    # in one go, not just one at a time - same shape as _parse_aco_wallets,
+    # kept separate since the two features' wallet lists mean different
+    # things and there's no real reason to couple them.
+    seen: set[str] = set()
+    valid: list[str] = []
+    invalid: list[str] = []
+    for token in re.split(r"[\n,]+", raw):
+        token = token.strip()
+        if not token:
+            continue
+        key = token.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        (valid if _SWT_ADDR_RE.fullmatch(token) else invalid).append(key)
+    return valid, invalid
+
+
 def _smart_wallet_submit_modal() -> dict:
-    # Discord modals only support text-input components (no select/choice
-    # widgets), so category is a free-text field here, validated server-side
-    # against _WALLET_SUBMIT_CATEGORIES on submit rather than constrained by
-    # the client UI the way a slash-command choice option would be.
+    # One unified modal for both a single wallet and a small batch - no
+    # separate "file import" path for members anymore (that's still
+    # available to staff via /smart-wallets import <file>, unchanged, for
+    # genuinely large exports). Discord modals only support text-input
+    # components (no select/choice widgets), so category is free text
+    # here, validated server-side against _WALLET_SUBMIT_CATEGORIES.
     return {
         "type": 9,
         "data": {
             "custom_id": "smartwallets_submit",
-            "title": "Submit A Smart Wallet",
+            "title": "Submit Smart Wallet(s)",
             "components": [
                 {"type": 1, "components": [{
-                    "type": 4, "custom_id": "address", "style": 1, "label": "Wallet address (0x...)",
-                    "min_length": 42, "max_length": 42, "required": True, "placeholder": "0xabc...",
+                    "type": 4, "custom_id": "addresses", "style": 2, "label": "Wallet address(es)",
+                    "max_length": 1500, "required": True, "placeholder": "0xabc...\n0xdef... (one per line for several)",
                 }]},
                 {"type": 1, "components": [{
                     "type": 4, "custom_id": "tag", "style": 1, "label": "Short rank/credential title",
-                    "max_length": 100, "required": True, "placeholder": "e.g. Called PVP early",
+                    "max_length": 100, "required": True, "placeholder": "e.g. Called PVP early - applies to all if several",
                 }]},
                 {"type": 1, "components": [{
                     "type": 4, "custom_id": "category", "style": 1, "label": "Category",
@@ -3998,11 +4055,14 @@ async def _handle_smart_wallet_submit_modal(payload: dict) -> dict:
         for comp in row.get("components", []):
             fields[comp.get("custom_id")] = (comp.get("value") or "").strip()
 
-    address = fields.get("address", "").lower()
+    valid, invalid = _parse_smart_wallet_addresses(fields.get("addresses", ""))
+    overflow = max(0, len(valid) - _WALLET_SUBMIT_MAX_PER_BATCH)
+    valid = valid[:_WALLET_SUBMIT_MAX_PER_BATCH]
     tag = fields.get("tag", "")[:100]
     category = fields.get("category", "").strip().title()
-    if not _SWT_ADDR_RE.fullmatch(address):
-        return {"type": 4, "data": {"content": "That doesn't look like a wallet address - it should be `0x` followed by 40 hex characters.", "flags": 64}}
+
+    if not valid:
+        return {"type": 4, "data": {"content": "No valid wallet address found - each one should look like `0x` followed by 40 hex characters (one per line for several).", "flags": 64}}
     if not tag:
         return {"type": 4, "data": {"content": "Give it a short rank/credential title, e.g. \"Called PVP early\".", "flags": 64}}
     if category not in _WALLET_SUBMIT_CATEGORIES:
@@ -4013,31 +4073,21 @@ async def _handle_smart_wallet_submit_modal(payload: dict) -> dict:
     await _discord_deferred_ack(interaction_id, token, ephemeral=True)
 
     discord_user_id = payload.get("member", {}).get("user", {}).get("id", "")
-    async with httpx.AsyncClient(timeout=20) as client:
-        res = await client.post(
-            f"{settings.supabase_url}/rest/v1/smart_wallet_submissions",
-            headers=_supabase_headers(prefer="return=representation"),
-            json={"address": address, "tag": tag, "category": category, "submitted_by": discord_user_id},
-        )
-        res.raise_for_status()
-        submission = res.json()[0]
+    posted = 0
+    async with httpx.AsyncClient(timeout=30) as client:
+        for address in valid:
+            if await _submit_wallet_for_review(client, address, tag, category, discord_user_id):
+                posted += 1
 
-        assessment = await _wallet_assessment(client, address)
-        message_id = await _post_channel_message_get_id(
-            client, settings.discord_wallet_review_channel_id,
-            _wallet_submission_review_embed(submission, assessment),
-            components=_wallet_submission_review_components(submission["id"]),
-        )
-        if message_id:
-            await client.patch(
-                f"{settings.supabase_url}/rest/v1/smart_wallet_submissions",
-                headers=_supabase_headers(prefer="return=minimal"),
-                params={"id": f"eq.{submission['id']}"},
-                json={"discord_channel_id": settings.discord_wallet_review_channel_id, "discord_message_id": message_id},
-            )
-
-    content = "✅ Submitted for staff review." if message_id else "✅ Saved, but couldn't notify the review channel - a staff member will need to check `smart_wallet_submissions` directly."
-    await _discord_edit_original_raw(token, {"content": content})
+    if len(valid) == 1:
+        summary = "✅ Submitted for staff review." if posted else "⚠️ Something went wrong submitting that wallet - please try again."
+    else:
+        summary = f"✅ {posted}/{len(valid)} wallet(s) submitted for staff review."
+    if invalid:
+        summary += f" ⚠️ {len(invalid)} line(s) didn't look like a valid address and were skipped."
+    if overflow:
+        summary += f" ℹ️ {overflow} more beyond the {_WALLET_SUBMIT_MAX_PER_BATCH}-per-submission cap were skipped - submit again for the rest."
+    await _discord_edit_original_raw(token, {"content": summary})
     return {"type": 5}
 
 
@@ -8106,30 +8156,7 @@ async def _nft_scope_auto_discover_co_minters(client: httpx.AsyncClient, slug: s
     candidates = (await _nft_scope_untracked_and_unsubmitted(client, candidates))[:_SWT_CO_MINTER_DISCOVERY_MAX_PER_EVENT]
 
     for address in candidates:
-        try:
-            res = await client.post(
-                f"{settings.supabase_url}/rest/v1/smart_wallet_submissions",
-                headers=_supabase_headers(prefer="return=representation"),
-                json={"address": address, "tag": f"Co-minted {c['name']} with a tracked wallet", "category": "Degen", "submitted_by": "system"},
-            )
-            res.raise_for_status()
-            submission = res.json()[0]
-        except httpx.HTTPError:
-            continue
-
-        assessment = await _wallet_assessment(client, address)
-        message_id = await _post_channel_message_get_id(
-            client, settings.discord_wallet_review_channel_id,
-            _wallet_submission_review_embed(submission, assessment),
-            components=_wallet_submission_review_components(submission["id"]),
-        )
-        if message_id:
-            await client.patch(
-                f"{settings.supabase_url}/rest/v1/smart_wallet_submissions",
-                headers=_supabase_headers(prefer="return=minimal"),
-                params={"id": f"eq.{submission['id']}"},
-                json={"discord_channel_id": settings.discord_wallet_review_channel_id, "discord_message_id": message_id},
-            )
+        await _submit_wallet_for_review(client, address, f"Co-minted {c['name']} with a tracked wallet", "Degen", "system")
 
 
 async def _nft_scope_wallet_signals(client: httpx.AsyncClient, rapid_activity: dict | None) -> tuple[list[dict], list[dict], list[dict]]:
@@ -9858,26 +9885,20 @@ TOOLKIT_TOOLS = {
         "example": "/pnl collection:Pudgy Penguins mint_price:0.03 amount_minted:2",
     },
     "my-aco": {
-        "emoji": "🎟️", "label": "DASH ACO: My Submissions",
-        "short": "See your own wallet submissions across every ACO drop",
-        "usage": "/my-aco",
+        # Covers both ACO member commands in one card, not two -
+        # /aco-drop is deliberately NOT listed here at all: it's
+        # default_member_permissions-gated to team only (same as /history,
+        # /pidgin-exempt), so a regular member can't even see it in
+        # Discord's own UI, let alone run it - listing it here would just
+        # be clutter for something most people browsing /dashboard can't use.
+        "emoji": "🎟️", "label": "DASH ACO",
+        "short": "See your own wallet submissions, or browse DASH ACO's rules and educational guides",
+        "usage": "/my-aco · /aco-info",
         "example": "/my-aco",
-    },
-    "aco-info": {
-        "emoji": "📚", "label": "DASH ACO: Guides & Rules",
-        "short": "Browse DASH ACO's rules and educational guides on demand",
-        "usage": "/aco-info",
-        "example": "/aco-info",
-    },
-    "aco-drop": {
-        "emoji": "🎫", "label": "DASH ACO: New Drop (Team Only)",
-        "short": "Team only: announce a new ACO drop and open wallet submissions",
-        "usage": "/aco-drop",
-        "example": "/aco-drop",
     },
     "smart-wallets": {
         "emoji": "🕵️", "label": "Submit A Smart Wallet",
-        "short": "Propose a wallet for the tracked smart-wallet list - opens a short form, staff reviews it before it counts toward any alert",
+        "short": "Propose one or several wallets for the tracked smart-wallet list - opens a short form, staff reviews each before it counts toward any alert",
         "usage": "/smart-wallets import (leave the file blank to get the submission form)",
         "example": "/smart-wallets import",
     },

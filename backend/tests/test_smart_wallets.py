@@ -960,7 +960,7 @@ def _modal_payload(address="0xc0d1ff953a6147556dc0c309509a2b15ea13a68a", tag="Ca
         "id": "int1", "token": "tok1",
         "member": {"permissions": "0", "user": {"id": user_id, "username": "someone"}},
         "data": {"custom_id": "smartwallets_submit", "components": [
-            {"type": 1, "components": [{"custom_id": "address", "value": address}]},
+            {"type": 1, "components": [{"custom_id": "addresses", "value": address}]},
             {"type": 1, "components": [{"custom_id": "tag", "value": tag}]},
             {"type": 1, "components": [{"custom_id": "category", "value": category}]},
         ]},
@@ -1098,7 +1098,7 @@ async def test_leaderboard_command_is_ephemeral_for_team_members_in_the_mod_chan
 
 async def test_submit_modal_rejects_a_bad_address():
     result = await main._handle_smart_wallet_submit_modal(_modal_payload(address="not-a-wallet"))
-    assert "doesn't look like a wallet address" in result["data"]["content"]
+    assert "No valid wallet address found" in result["data"]["content"]
 
 
 async def test_submit_modal_rejects_an_unrecognized_category():
@@ -1148,6 +1148,70 @@ async def test_submit_modal_inserts_pending_row_and_posts_to_the_review_channel(
     # so the Approve/Reject buttons later know which message to edit.
     sub_patch = next(j for u, j in patches if "smart_wallet_submissions" in u)
     assert sub_patch["discord_message_id"] == "msg1"
+
+
+# ── Multi-wallet paste in the same modal ──────────────────────────────────
+
+def test_parse_smart_wallet_addresses_splits_newlines_and_commas_and_dedupes():
+    raw = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB, 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nnot-a-wallet"
+    valid, invalid = main._parse_smart_wallet_addresses(raw)
+    assert valid == ["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]  # dup dropped, case-folded
+    assert invalid == ["not-a-wallet"]
+
+
+async def test_submit_modal_posts_a_separate_review_for_each_pasted_wallet():
+    posts = []
+
+    class FakeClient:
+        async def post(self, url, headers=None, json=None):
+            if "smart_wallet_submissions" in url:
+                return FakeRes(200, [{**json, "id": f"sub-{json['address'][-1]}"}])
+            if "/messages" in url:
+                posts.append(json)
+                return FakeRes(200, {"id": "msg1"})
+            return FakeRes(200, {})
+
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [])
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            return FakeRes(200, {})
+
+    raw = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        result = await main._handle_smart_wallet_submit_modal(_modal_payload(address=raw))
+
+    assert result == {"type": 5}
+    assert len(posts) == 2  # one review embed per wallet, not a single combined post
+    submitted_addresses = {p["embeds"][0]["title"] for p in posts}
+    assert submitted_addresses == {"0xaaaa…aaaa", "0xbbbb…bbbb"}
+
+
+async def test_submit_modal_caps_at_max_per_batch_and_reports_the_overflow():
+    posted_count = {"n": 0}
+
+    class FakeClient:
+        async def post(self, url, headers=None, json=None):
+            if "smart_wallet_submissions" in url:
+                posted_count["n"] += 1
+                return FakeRes(200, [{**json, "id": f"sub{posted_count['n']}"}])
+            if "/messages" in url:
+                return FakeRes(200, {"id": "msg1"})
+            return FakeRes(200, {})
+
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [])
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            return FakeRes(200, {})
+
+    raw = "\n".join(f"0x{i:040x}" for i in range(main._WALLET_SUBMIT_MAX_PER_BATCH + 3))
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        await main._handle_smart_wallet_submit_modal(_modal_payload(address=raw))
+
+    assert posted_count["n"] == main._WALLET_SUBMIT_MAX_PER_BATCH
 
 
 # ── Staff Approve/Reject on a submission ──────────────────────────────────

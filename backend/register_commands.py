@@ -180,7 +180,7 @@ COMMANDS = [
         "options": [
             {
                 "name": "import",
-                "description": "Team: import a tracker file. Everyone else: leave file blank to submit one wallet for review",
+                "description": "Team: import a tracker file. Everyone else: leave file blank to submit wallet(s) for review",
                 "type": 1,
                 "options": [{"name": "file", "description": "Team only - bulk tracker file (GMGN-style or Notion export). Leave blank to get the submission form instead", "type": 11, "required": False}],
             },
