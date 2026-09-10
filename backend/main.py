@@ -774,20 +774,29 @@ async def post_latest_tracked_mint(request: Request):
             headers=_supabase_headers(), params={"select": "address"},
         )
         tags_res.raise_for_status()
-        tracked_addresses = sorted({row["address"] for row in tags_res.json()})
-        if not tracked_addresses:
+        tracked_set = {row["address"] for row in tags_res.json()}
+        if not tracked_set:
             return {"posted": False, "detail": "No tracked wallets in smart_wallet_tags yet."}
 
+        # Scanning recent events and filtering in Python, not a
+        # buyer=in.(...) filter naming every tracked address - real
+        # production data has smart_wallet_tags in the hundreds of rows,
+        # and a comma-joined address list that long overflows PostgREST's
+        # URL/query limits (confirmed live: a 400 Bad Request, not a
+        # graceful empty result). _SCAN_WINDOW is generous enough that a
+        # currently-tracked wallet's real latest activity is essentially
+        # always inside it, given how frequently the live poller logs events.
+        _SCAN_WINDOW = 1000
         recent_res = await client.get(
             f"{settings.supabase_url}/rest/v1/nft_sale_events_log",
             headers=_supabase_headers(),
-            params={"buyer": f"in.({','.join(tracked_addresses)})", "select": "slug,buyer,event_at", "order": "event_at.desc", "limit": "1"},
+            params={"select": "slug,buyer,event_at", "order": "event_at.desc", "limit": str(_SCAN_WINDOW)},
         )
         recent_res.raise_for_status()
-        recent = recent_res.json()
-        if not recent:
-            return {"posted": False, "detail": "No logged sale events yet for any currently-tracked wallet."}
-        slug = recent[0]["slug"]
+        match = next((row for row in recent_res.json() if row["buyer"] in tracked_set), None)
+        if not match:
+            return {"posted": False, "detail": f"No tracked wallet found in the most recent {_SCAN_WINDOW} logged sale events."}
+        slug = match["slug"]
 
         buyers_res = await client.get(
             f"{settings.supabase_url}/rest/v1/nft_sale_events_log",
