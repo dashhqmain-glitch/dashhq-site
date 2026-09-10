@@ -375,10 +375,11 @@ def test_convergence_embed_is_terse_and_names_tags_and_wallet_count():
     assert "**REALCOIN**" in embed["description"]
     assert "**RH MACHINES**" in embed["description"]
     assert "`KOL`" in embed["description"]  # category badge shown when set
-    # Deliberately no per-wallet address/link in the row itself (no
-    # per-category channel to point it at) - just a bottom "View
-    # Collection" link into the collection as a whole.
-    assert "opensea.io/0x1111111111111111111111111111111111111a" not in embed["description"]
+    # A shortened, LINKED address is intentional here (unlike the self-
+    # computed smart-wallet signal) - this list is externally curated,
+    # not proprietary internal scoring, and showing which wallet matched
+    # is the whole point of the alert.
+    assert "opensea.io/0x1111111111111111111111111111111111111a" in embed["description"]
     assert "[View Collection]" in embed["description"]
     assert embed["color"] == main._NFT_SCOPE_TRACKED_ALERT_COLOR
     assert embed["url"] == _fake_collection()["openseaUrl"]

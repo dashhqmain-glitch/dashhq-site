@@ -7560,16 +7560,18 @@ def _nft_scope_tracked_convergence_wallet_rows(tracked_hits: list[dict]) -> dict
 
 
 def _nft_scope_tracked_convergence_embed(c: dict, tracked_hits: list[dict]) -> dict:
-    # Deliberately terse - a bold credential tag and a category badge, one
-    # line per wallet, no addresses or per-row links (no per-category
-    # channels to point them at here, unlike the reference tracker this was
-    # modeled on). The point should still read at a glance.
+    # A category badge, a shortened linked address, and the credential
+    # that earned it (bolded for scannability), one line per wallet - this
+    # list is externally curated, not proprietary internal scoring, so
+    # naming which wallet matched (and letting staff click straight to its
+    # OpenSea profile) is the whole point of the alert.
     by_address = _nft_scope_tracked_convergence_wallet_rows(tracked_hits)
     lines = []
     for addr, info in list(by_address.items())[:_SWT_CONVERGENCE_MAX_WALLET_ROWS]:
+        short = f"{addr[:6]}…{addr[-4:]}"
+        badge = f"`{info['category']}` " if info["category"] else ""
         tag = ", ".join(info["tags"][:2])
-        badge = f" `{info['category']}`" if info["category"] else ""
-        lines.append(f"**{tag}**{badge}")
+        lines.append(f"{badge}[{short}](https://opensea.io/{addr}) · **{tag}**")
     if len(by_address) > _SWT_CONVERGENCE_MAX_WALLET_ROWS:
         lines.append(f"+{len(by_address) - _SWT_CONVERGENCE_MAX_WALLET_ROWS} more")
     opensea_url = c.get("openseaUrl")
