@@ -858,6 +858,82 @@ async def create_minting_now_role(request: Request):
     return {"role_id": role["id"], "name": role["name"]}
 
 
+_PERM_ADMINISTRATOR = 0x8
+_PERM_MENTION_EVERYONE = 0x20000
+
+
+@app.get("/cron/check-role-ping-permissions")
+async def check_role_ping_permissions(request: Request):
+    # A role mention (<@&id>) in a message ALWAYS renders as a styled
+    # "@RoleName" tag regardless of permissions - Discord silently drops
+    # only the actual notification/ping if either the role itself isn't
+    # marked mentionable, or the bot lacks Mention-Everyone in that
+    # channel. Both failure modes look IDENTICAL in the channel (the tag
+    # still shows), so "does it look right" can't actually answer whether
+    # anyone got pinged - this computes Discord's real permission
+    # resolution (base role perms -> @everyone channel overwrite -> the
+    # bot's own role overwrites -> a bot-specific member overwrite) to
+    # give a real yes/no instead of a guess.
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not settings.discord_bot_token or not settings.discord_guild_id:
+        raise HTTPException(status_code=400, detail="discord_bot_token/discord_guild_id not configured")
+
+    headers = {"Authorization": f"Bot {settings.discord_bot_token}"}
+    async with httpx.AsyncClient(timeout=10) as client:
+        me_res = await client.get(f"{DISCORD_API}/users/@me", headers=headers)
+        me_res.raise_for_status()
+        bot_id = me_res.json()["id"]
+
+        member_res = await client.get(f"{DISCORD_API}/guilds/{settings.discord_guild_id}/members/{bot_id}", headers=headers)
+        member_res.raise_for_status()
+        bot_role_ids = set(member_res.json().get("roles") or []) | {settings.discord_guild_id}  # @everyone's role id == the guild id
+
+        roles_res = await client.get(f"{DISCORD_API}/guilds/{settings.discord_guild_id}/roles", headers=headers)
+        roles_res.raise_for_status()
+        all_roles = {r["id"]: r for r in roles_res.json()}
+        minting_role = all_roles.get(settings.discord_minting_now_role_id)
+
+        base_perms = 0
+        for rid in bot_role_ids:
+            role = all_roles.get(rid)
+            if role:
+                base_perms |= int(role["permissions"])
+
+        perms = base_perms
+        if not (perms & _PERM_ADMINISTRATOR):
+            overwrites = []
+            if settings.discord_smart_wallet_channel_id:
+                channel_res = await client.get(f"{DISCORD_API}/channels/{settings.discord_smart_wallet_channel_id}", headers=headers)
+                channel_res.raise_for_status()
+                overwrites = channel_res.json().get("permission_overwrites") or []
+            everyone_ow = next((o for o in overwrites if o["id"] == settings.discord_guild_id), None)
+            if everyone_ow:
+                perms &= ~int(everyone_ow["deny"])
+                perms |= int(everyone_ow["allow"])
+            allow = deny = 0
+            for o in overwrites:
+                if o["type"] == 0 and o["id"] in bot_role_ids and o["id"] != settings.discord_guild_id:
+                    allow |= int(o["allow"])
+                    deny |= int(o["deny"])
+            perms = (perms & ~deny) | allow
+            member_ow = next((o for o in overwrites if o["type"] == 1 and o["id"] == bot_id), None)
+            if member_ow:
+                perms &= ~int(member_ow["deny"])
+                perms |= int(member_ow["allow"])
+
+        can_ping = bool(perms & _PERM_ADMINISTRATOR) or bool(perms & _PERM_MENTION_EVERYONE)
+
+    return {
+        "bot_can_ping_roles_in_alert_channel": can_ping,
+        "minting_now_role_exists": minting_role is not None,
+        "minting_now_role_mentionable": bool(minting_role and minting_role.get("mentionable")),
+        "channel_checked": settings.discord_smart_wallet_channel_id,
+        "verdict": "PING WILL WORK" if (can_ping and minting_role and minting_role.get("mentionable")) else "PING WILL SILENTLY FAIL",
+    }
+
+
 # ── Pidgin AutoMod setup (one-time / re-run-on-change) ──────────────────────
 # English-only enforcement in #general via Discord's native AutoMod - free,
 # no persistent bot connection needed. Everything else in this backend is
@@ -7873,31 +7949,40 @@ def _nft_scope_tracked_convergence_embed(c: dict, tracked_hits: list[dict], esti
     for addr, info in list(by_address.items())[:_SWT_CONVERGENCE_MAX_WALLET_ROWS]:
         short = f"{addr[:6]}…{addr[-4:]}"
         # Priority: staff-confirmed category, then a heuristic estimate
-        # (prefixed "~" so it never reads as confirmed), then the
-        # generic fallback when there's simply not enough signal either way.
+        # (prefixed "~" so it never reads as confirmed), then Degen as the
+        # default catch-all when there's not even enough signal for
+        # _estimate_wallet_categories to guess - explicit instruction:
+        # never leave a wallet without SOME real category (no more generic
+        # "Tracked" placeholder pretending to be one), and Degen is the
+        # safest default of the four (KOL/Whale specifically claim
+        # something this bot can't back up; Degen just means "an active
+        # minter," true of anyone converging on a fresh mint at all).
         if info["category"]:
-            badge = f"`{info['category']}`"
-        elif estimated.get(addr):
-            badge = f"`~{estimated[addr]}`"
+            badge = f"`{info['category']}` - "
         else:
-            badge = "`Tracked`"
+            badge = f"`~{estimated.get(addr, 'Degen')}` - "
         # [category]-[wallet]-[project being minted] - self-contained per
         # row, so a single line still makes sense on its own (screenshot,
         # copy-paste) without needing the embed's title for context.
-        lines.append(f"{badge} - [{short}](https://opensea.io/{addr}) - **{c['name']}**")
+        lines.append(f"{badge}[{short}](https://opensea.io/{addr}) - **{c['name']}**")
     if len(by_address) > _SWT_CONVERGENCE_MAX_WALLET_ROWS:
         lines.append(f"+{len(by_address) - _SWT_CONVERGENCE_MAX_WALLET_ROWS} more")
     opensea_url = c.get("openseaUrl")
-    # Always show SOME mint link, never conditionally disappear - the
-    # project's own site (OpenSea's project_url metadata, already fetched
-    # for every collection) is the real mint page for most collections,
-    # but plenty never set that field, and a member with nothing to click
-    # defeats the entire point of a mint alert. Falls back to the OpenSea
-    # listing itself (still a real, clickable path to the collection)
-    # rather than going blank.
-    mint_link = c.get("website") or opensea_url
-    if mint_link:
-        lines.append(f"\n🎟️ [Mint Link]({mint_link})")
+    external_site = c.get("website")
+    # Check OpenSea first: its own listing is a link THIS bot built
+    # directly from the confirmed slug, so it's definitionally correct -
+    # no caveat needed. The project's self-reported project_url is a
+    # DIFFERENT kind of claim - real, but third-party data this bot can't
+    # independently confirm actually belongs to this mint (confirmed live:
+    # it pointed at an unrelated site for one real collection). No
+    # reliable third source exists to cross-check it against (no X/social
+    # API access here), so rather than silently trust it, or invent a
+    # web-search guess that could be just as wrong, it's shown but always
+    # marked unverified.
+    if external_site and external_site != opensea_url:
+        lines.append(f"\n🎟️ [Mint Link]({external_site}) ⚠️ *unverified - confirm via the project's official channels before minting*")
+    elif opensea_url:
+        lines.append(f"\n🎟️ [Mint Link]({opensea_url})")
     if opensea_url:
         lines.append(f"🔗 [View Collection]({opensea_url})")
     # Flagged separately from the link itself (not just omitted) - a
@@ -7929,8 +8014,10 @@ def _nft_scope_tracked_convergence_components(c: dict) -> list:
     # Only a distinct "Mint Link" button when it's actually a different
     # URL from OpenSea - otherwise it'd sit right next to an "OpenSea"
     # button pointing at the exact same place, which just looks broken.
+    # Labeled as unverified for the same reason the embed text caveats it -
+    # third-party, self-reported data this bot can't independently confirm.
     if website and website != opensea_url:
-        buttons.append({"type": 2, "style": 5, "label": "Mint Link", "url": website})
+        buttons.append({"type": 2, "style": 5, "label": "Mint Link (unverified)", "url": website})
     if opensea_url:
         buttons.append({"type": 2, "style": 5, "label": "OpenSea", "url": opensea_url})
     if not buttons:

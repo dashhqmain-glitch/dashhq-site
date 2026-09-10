@@ -374,7 +374,7 @@ def test_convergence_embed_is_terse_and_names_wallet_count():
     assert "2 Wallet Minting" in embed["title"]
     assert embed["author"]["name"] == "🔔 Alert Tracker"
     assert "`KOL`" in embed["description"]  # category badge shown when set
-    assert "`Tracked`" in embed["description"]  # falls back to a generic badge, never blank, when category is unset
+    assert "`~Degen`" in embed["description"]  # defaults to Degen (marked as an estimate), never a generic placeholder, when unset
     # Each wallet's historical credential tag ("REALCOIN", "RH MACHINES")
     # is deliberately NOT shown here - it's about whatever project it was
     # imported for, unrelated to the collection actually minting right
@@ -401,7 +401,13 @@ def test_convergence_embed_shows_an_estimated_category_prefixed_with_tilde():
     hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": None}]
     embed = main._nft_scope_tracked_convergence_embed(_fake_collection(), hits, estimated={"0xa": "Whale"})
     assert "`~Whale`" in embed["description"]
-    assert "`Tracked`" not in embed["description"]
+    assert "`~Degen`" not in embed["description"]
+
+
+def test_convergence_embed_defaults_to_degen_with_no_category_or_estimate():
+    hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": None}]
+    embed = main._nft_scope_tracked_convergence_embed(_fake_collection(), hits, estimated={})
+    assert "`~Degen`" in embed["description"]
 
 
 def test_convergence_embed_confirmed_category_wins_over_an_estimate():
@@ -498,7 +504,7 @@ def test_convergence_components_include_a_distinct_mint_link_button_when_the_pro
     c = _fake_collection(website="https://mint.example.xyz")
     components = main._nft_scope_tracked_convergence_components(c)
     labels = [b["label"] for b in components[0]["components"]]
-    assert labels == ["Mint Link", "OpenSea"]
+    assert labels == ["Mint Link (unverified)", "OpenSea"]
 
 
 def test_convergence_components_skip_the_duplicate_mint_link_button_when_it_matches_opensea():
@@ -512,12 +518,18 @@ def test_convergence_embed_links_the_mint_link_when_a_dedicated_site_exists():
     hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": "Whale"}]
     embed = main._nft_scope_tracked_convergence_embed(_fake_collection(website="https://mint.example.xyz"), hits)
     assert "[Mint Link](https://mint.example.xyz)" in embed["description"]
+    # Self-reported, third-party data this bot can't independently confirm -
+    # always caveated, unlike the OpenSea-fallback case below.
+    assert "unverified" in embed["description"]
 
 
 def test_convergence_embed_mint_link_falls_back_to_opensea_when_no_dedicated_site():
     hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": "Whale"}]
     embed = main._nft_scope_tracked_convergence_embed(_fake_collection(website=None), hits)
     assert f"[Mint Link]({_fake_collection()['openseaUrl']})" in embed["description"]
+    # No caveat needed - this bot built the OpenSea link itself directly
+    # from the confirmed slug, unlike a project's self-reported site.
+    assert "unverified" not in embed["description"]
 
 
 def test_convergence_embed_row_names_the_project_being_minted():
