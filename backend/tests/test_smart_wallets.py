@@ -364,7 +364,7 @@ def _fake_collection(**overrides):
     return data
 
 
-def test_convergence_embed_is_terse_and_names_tags_and_wallet_count():
+def test_convergence_embed_is_terse_and_names_wallet_count():
     hits = [
         {"address": "0x1111111111111111111111111111111111111a", "tag": "REALCOIN", "rank": 6, "pnl": 10.19, "category": "KOL"},
         {"address": "0x2222222222222222222222222222222222222b", "tag": "RH MACHINES", "rank": 1, "pnl": None, "category": None},
@@ -372,10 +372,14 @@ def test_convergence_embed_is_terse_and_names_tags_and_wallet_count():
     embed = main._nft_scope_tracked_convergence_embed(_fake_collection(), hits)
     assert "2 Wallet Minting" in embed["title"]
     assert embed["author"]["name"] == "🔔 Alert Tracker"
-    assert "**REALCOIN**" in embed["description"]
-    assert "**RH MACHINES**" in embed["description"]
     assert "`KOL`" in embed["description"]  # category badge shown when set
     assert "`Tracked`" in embed["description"]  # falls back to a generic badge, never blank, when category is unset
+    # Each wallet's historical credential tag ("REALCOIN", "RH MACHINES")
+    # is deliberately NOT shown here - it's about whatever project it was
+    # imported for, unrelated to the collection actually minting right
+    # now, which is what the title already names.
+    assert "REALCOIN" not in embed["description"]
+    assert "RH MACHINES" not in embed["description"]
     # A shortened, LINKED address is intentional here (unlike the self-
     # computed smart-wallet signal) - this list is externally curated,
     # not proprietary internal scoring, and showing which wallet matched

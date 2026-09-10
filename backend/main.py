@@ -7589,11 +7589,15 @@ def _nft_scope_tracked_convergence_wallet_rows(tracked_hits: list[dict]) -> dict
 
 
 def _nft_scope_tracked_convergence_embed(c: dict, tracked_hits: list[dict]) -> dict:
-    # A category badge, a shortened linked address, and the credential
-    # that earned it (bolded for scannability), one line per wallet - this
-    # list is externally curated, not proprietary internal scoring, so
-    # naming which wallet matched (and letting staff click straight to its
-    # OpenSea profile) is the whole point of the alert.
+    # A category badge and a shortened linked address, one line per
+    # wallet - this list is externally curated, not proprietary internal
+    # scoring, so naming which wallet matched (and letting staff click
+    # straight to its OpenSea profile) is the whole point of the alert.
+    # Deliberately NOT showing each wallet's `tag` here - that's the
+    # historical credential/community label from whenever it was
+    # imported (e.g. "HYPE TERMINAL"), unrelated to the collection
+    # actually minting right now (that's the embed's title), and showing
+    # it read as if it were somehow about THIS mint.
     by_address = _nft_scope_tracked_convergence_wallet_rows(tracked_hits)
     lines = []
     for addr, info in list(by_address.items())[:_SWT_CONVERGENCE_MAX_WALLET_ROWS]:
@@ -7607,8 +7611,7 @@ def _nft_scope_tracked_convergence_embed(c: dict, tracked_hits: list[dict]) -> d
         # "Tracked" is honest either way - it doesn't claim a specific
         # type this bot has no real basis for.
         badge = f"`{info['category'] or 'Tracked'}` "
-        tag = ", ".join(info["tags"][:2])
-        lines.append(f"{badge}[{short}](https://opensea.io/{addr}) · **{tag}**")
+        lines.append(f"{badge}[{short}](https://opensea.io/{addr})")
     if len(by_address) > _SWT_CONVERGENCE_MAX_WALLET_ROWS:
         lines.append(f"+{len(by_address) - _SWT_CONVERGENCE_MAX_WALLET_ROWS} more")
     opensea_url = c.get("openseaUrl")
