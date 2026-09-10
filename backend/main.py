@@ -814,7 +814,11 @@ async def post_latest_tracked_mint(request: Request):
             client, settings.discord_smart_wallet_channel_id, embed,
             components=_nft_scope_tracked_convergence_components(c),
         )
-    return {"posted": posted, "slug": slug, "tracked_wallets_in_this_mint": len(hits), "channel_id": settings.discord_smart_wallet_channel_id}
+    return {
+        "posted": posted, "slug": slug, "tracked_wallets_in_this_mint": len(hits),
+        "channel_id": settings.discord_smart_wallet_channel_id,
+        "hits": [{"address": h["address"], "tag": h["tag"], "category": h.get("category")} for h in hits],
+    }
 
 
 # ── Pidgin AutoMod setup (one-time / re-run-on-change) ──────────────────────
