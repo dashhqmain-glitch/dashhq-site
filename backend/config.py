@@ -36,6 +36,16 @@ class Settings(BaseSettings):
     discord_nft_scope_channel_id: str = ""
     nft_scope_enabled: bool = True
 
+    # Standalone Smart Wallet Convergence alerts (2+ separately-tracked
+    # wallets buying into the same collection at once - see
+    # _nft_scope_maybe_post_tracked_convergence in main.py) go to this
+    # channel specifically, not the general NFT Scope channel above.
+    # Defaults to the old NFT Intel channel - same audience/permissions
+    # already set up there, and it's sitting empty now that NFT Intel
+    # itself is gone. Still overridable via env var like every other
+    # channel setting here.
+    discord_smart_wallet_channel_id: str = "1535188801104908328"
+
     # /monitor is opt-in and normally DMs subscribers privately. When set,
     # any event a member has /monitor'd also gets posted here publicly
     # with those members @mentioned - visible even if their DMs are closed,

@@ -299,6 +299,109 @@ def test_score_includes_tracked_wallet_points():
     assert any("REALCOIN" in r for r in with_hits["reasons"])
 
 
+# ── Standalone tracked-wallet convergence alert ──────────────────────────
+
+def _fake_collection(**overrides):
+    data = {"name": "Test Collection", "slug": "test-collection", "floor": 0.05, "symbol": "ETH", "chain": "ethereum", "openseaUrl": "https://opensea.io/collection/test-collection", "image": None}
+    data.update(overrides)
+    return data
+
+
+def test_convergence_embed_names_tags_and_wallet_count():
+    hits = [
+        {"address": "0xa", "tag": "REALCOIN", "rank": 6, "pnl": 10.19},
+        {"address": "0xb", "tag": "RH MACHINES", "rank": 1, "pnl": None},
+    ]
+    embed = main._nft_scope_tracked_convergence_embed(_fake_collection(), hits)
+    assert "Smart Wallet Convergence" in embed["title"]
+    assert "2 separately tracked wallets" in embed["description"]
+    assert "REALCOIN" in embed["description"]
+    assert "RH MACHINES" in embed["description"]
+    assert "0xa" not in embed["description"] and "0xb" not in embed["description"]
+    assert embed["color"] == main._NFT_SCOPE_TRACKED_ALERT_COLOR
+
+
+async def test_maybe_post_convergence_skips_below_minimum_wallets():
+    async def fail_if_called(*a, **k):
+        raise AssertionError("should never post below the minimum")
+
+    with patch.object(main, "_post_channel_message", new=fail_if_called):
+        result = await main._nft_scope_maybe_post_tracked_convergence(
+            main.httpx.AsyncClient(), "slug", _fake_collection(),
+            [{"address": "0xa", "tag": "REALCOIN", "rank": None, "pnl": None}],
+        )
+    assert result is False
+
+
+async def test_maybe_post_convergence_skips_if_recently_posted():
+    hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None}, {"address": "0xb", "tag": "T2", "rank": None, "pnl": None}]
+
+    async def fake_recently_posted(client, slug):
+        return True
+
+    async def fail_if_called(*a, **k):
+        raise AssertionError("should never post while on cooldown")
+
+    with patch.object(main, "_nft_scope_recently_posted", new=fake_recently_posted), \
+         patch.object(main, "_post_channel_message", new=fail_if_called):
+        result = await main._nft_scope_maybe_post_tracked_convergence(main.httpx.AsyncClient(), "slug", _fake_collection(), hits)
+    assert result is False
+
+
+async def test_maybe_post_convergence_skips_if_wash_dirty():
+    hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None}, {"address": "0xb", "tag": "T2", "rank": None, "pnl": None}]
+
+    async def fake_recently_posted(client, slug):
+        return False
+
+    async def fake_clears_wash(client, slug):
+        return False
+
+    async def fail_if_called(*a, **k):
+        raise AssertionError("should never post through a failed wash-check")
+
+    with patch.object(main, "_nft_scope_recently_posted", new=fake_recently_posted), \
+         patch.object(main, "_nft_scope_clears_wash_check", new=fake_clears_wash), \
+         patch.object(main, "_post_channel_message", new=fail_if_called):
+        result = await main._nft_scope_maybe_post_tracked_convergence(main.httpx.AsyncClient(), "slug", _fake_collection(), hits)
+    assert result is False
+
+
+async def test_maybe_post_convergence_posts_and_marks_shared_cooldown():
+    hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None}, {"address": "0xb", "tag": "T2", "rank": None, "pnl": None}]
+    calls = {}
+
+    async def fake_recently_posted(client, slug):
+        return False
+
+    async def fake_clears_wash(client, slug):
+        return True
+
+    async def fake_post(client, channel_id, embed):
+        calls["channel_id"] = channel_id
+        return True
+
+    async def fake_mark_posted(client, slug, value):
+        calls["marked_posted"] = (slug, value)
+
+    async def fake_record_buyers(client, slug, floor, rapid_activity):
+        calls["recorded_buyers"] = (slug, floor, rapid_activity)
+
+    with patch.object(main, "_nft_scope_recently_posted", new=fake_recently_posted), \
+         patch.object(main, "_nft_scope_clears_wash_check", new=fake_clears_wash), \
+         patch.object(main, "_post_channel_message", new=fake_post), \
+         patch.object(main, "_nft_scope_mark_posted", new=fake_mark_posted), \
+         patch.object(main, "_nft_scope_record_call_buyers", new=fake_record_buyers):
+        result = await main._nft_scope_maybe_post_tracked_convergence(main.httpx.AsyncClient(), "test-slug", _fake_collection(), hits)
+
+    assert result is True
+    assert calls["channel_id"] == main.settings.discord_smart_wallet_channel_id
+    assert calls["marked_posted"][0] == "test-slug"
+    recorded_slug, recorded_floor, recorded_rapid = calls["recorded_buyers"]
+    assert recorded_slug == "test-slug"
+    assert set(recorded_rapid["buyer_addresses"]) == {"0xa", "0xb"}
+
+
 # ── _nft_scope_wallet_signals now returns a 3-tuple ──────────────────────
 
 async def test_wallet_signals_returns_three_way_empty_with_no_rapid_activity():

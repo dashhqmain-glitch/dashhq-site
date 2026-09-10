@@ -184,9 +184,19 @@ see what's tracked, or wipe one tag's wallets (or everything).
 references the same verified buyer addresses every other wallet signal
 already fetched against `smart_wallet_tags`, and `_nft_scope_tracked_wallet_points`
 scores the overlap (with a convergence bonus when several distinct tracked
-wallets show up on the same candidate at once). No new cron, no new
-channel, no new external API key - it rides the same 5-minute
-`/cron/nft-poll` cycle NFT Scope already runs.
+wallets show up on the same candidate at once) - this part only ever adds
+points, it never posts on its own. No new cron, no new external API key -
+it rides the same 5-minute `/cron/nft-poll` cycle NFT Scope already runs.
+
+**Standalone convergence alert** - the one exception to "never posts on
+its own": when 2+ *separate* tracked wallets buy into the same collection
+at once (`_nft_scope_maybe_post_tracked_convergence`), that's rare and
+high-signal enough to post immediately, independent of whether the
+collection clears any other NFT Scope gate. Goes to its own channel,
+`DISCORD_SMART_WALLET_CHANNEL_ID` (`backend/config.py`, defaults to the
+old NFT Intel channel - same audience already set up there). Shares NFT
+Scope's existing "posted at all" cooldown, so this and a normal tiered
+post for the same collection in the same cycle can never both fire.
 
 **New Supabase table**: `smart_wallet_tags` (`backend/schema.sql`) - one
 row per (wallet, tag), since a single wallet routinely carries several

@@ -7035,6 +7035,77 @@ def _nft_scope_tracked_wallet_points(tracked_hits: list[dict] | None) -> tuple[i
     return points, reasons
 
 
+# ── Standalone tracked-wallet convergence alert ──────────────────────────
+# Everything above (_nft_scope_tracked_wallet_points) only ever adds points
+# to NFT Scope's normal scoring - it can never post on its own. That's
+# deliberate for the score itself, but it means the tracked list had no way
+# to proactively surface anything the way NFT Intel used to (just far too
+# indiscriminately). This is the deliberately narrow exception: when 2+
+# SEPARATE, staff-curated tracked wallets converge on the same collection
+# at once, that convergence is rare and high-signal enough to post on its
+# own, independent of whether the collection clears any other NFT Scope
+# gate. Shares the same "posted to NFT Scope at all" cooldown as every
+# other pass (_nft_scope_recently_posted/_nft_scope_mark_posted), so this
+# and a normal tiered post for the same slug in the same cycle can never
+# both fire.
+_NFT_SCOPE_TRACKED_CONVERGENCE_ALERT_MIN_WALLETS = 2
+_NFT_SCOPE_TRACKED_ALERT_COLOR = 0x8B5CF6  # violet - the color NFT Intel used, now free, same "distinct from every other tier" reasoning
+
+
+def _nft_scope_tracked_convergence_embed(c: dict, tracked_hits: list[dict]) -> dict:
+    symbol = c.get("symbol") or "ETH"
+    distinct_addresses = {h["address"] for h in tracked_hits}
+    tags = sorted({h["tag"] for h in tracked_hits})
+    floor_text = "-"
+    if (floor := c.get("floor")) is not None:
+        floor_text = f"{floor:.4f} {symbol}"
+    lines = [
+        f"**{len(distinct_addresses)} separately tracked wallets** just bought into **{c['name']}** at the same "
+        "time - independent, credentialed wallets converging on the same collection is a much stronger tell "
+        "than any single wallet acting alone.",
+        "",
+        f"Tracked as: {', '.join(tags[:8])}" + (f" (+{len(tags) - 8} more)" if len(tags) > 8 else ""),
+        "",
+        "*This tracked-wallet list is staff-imported from external sources, not this bot's own scoring - "
+        "heuristic read, not financial advice. DYOR before any trade. NFA.*",
+    ]
+    return {
+        "title": f"🕵️ Smart Wallet Convergence — {c['name']}",
+        "url": c.get("openseaUrl"),
+        "description": "\n".join(lines),
+        "color": _NFT_SCOPE_TRACKED_ALERT_COLOR,
+        "fields": [
+            {"name": "Floor", "value": floor_text, "inline": True},
+            {"name": "Chain", "value": (c.get("chain") or "-").capitalize(), "inline": True},
+            {"name": "Wallets Converging", "value": str(len(distinct_addresses)), "inline": True},
+        ],
+        "thumbnail": {"url": c["image"]} if c.get("image") else None,
+        "footer": {"text": f"{TOOLKIT_FOOTER['text']} · Smart Wallet Convergence"},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def _nft_scope_maybe_post_tracked_convergence(client: httpx.AsyncClient, slug: str, c: dict, tracked_wallet_hits: list[dict] | None) -> bool:
+    distinct_addresses = {h["address"] for h in (tracked_wallet_hits or [])}
+    if len(distinct_addresses) < _NFT_SCOPE_TRACKED_CONVERGENCE_ALERT_MIN_WALLETS:
+        return False
+    if await _nft_scope_recently_posted(client, slug):
+        return False
+    if not await _nft_scope_clears_wash_check(client, slug):
+        return False
+    delivered = await _post_channel_message(client, settings.discord_smart_wallet_channel_id, _nft_scope_tracked_convergence_embed(c, tracked_wallet_hits))
+    if delivered:
+        await _nft_scope_mark_posted(client, slug, c.get("floor") or 0)
+        # These wallets are already proven good elsewhere (staff's curated
+        # list) - recording them here too means they also start feeding
+        # this bot's OWN self-computed win-rate system
+        # (nft_scope_call_buyers/nft_smart_wallets) if this collection
+        # later proves out, the same free side-effect every other posting
+        # path already gets.
+        await _nft_scope_record_call_buyers(client, slug, c.get("floor"), {"buyer_addresses": list(distinct_addresses)})
+    return delivered
+
+
 async def _nft_scope_wallet_signals(client: httpx.AsyncClient, rapid_activity: dict | None) -> tuple[list[dict], list[dict], list[dict]]:
     # Single entry point every pass calls instead of fetching each wallet
     # signal separately - all three run concurrently, so a candidate with a
@@ -7252,6 +7323,7 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
                 history, first_snapshot = await _nft_scope_snapshot_signals(client, slug)
                 wash_analysis = await _nft_scope_wash_analysis(client, slug) if _nft_scope_turnover_elevated(c) else None
                 smart_wallet_hits, activity_spike_hits, tracked_wallet_hits = await _nft_scope_wallet_signals(client, rapid_activity)
+                await _nft_scope_maybe_post_tracked_convergence(client, slug, c, tracked_wallet_hits)
                 score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis, smart_wallet_hits=smart_wallet_hits, activity_spike_hits=activity_spike_hits, tracked_wallet_hits=tracked_wallet_hits)
                 if score.get("floor_multiple") and score["floor_multiple"] >= _NFT_SCOPE_PROVED_MULTIPLE_THRESHOLD:
                     await _nft_scope_mark_slug_proved(client, slug, score["floor_multiple"])
@@ -7423,6 +7495,7 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
             history, first_snapshot = await _nft_scope_snapshot_signals(client, slug)
             wash_analysis = await _nft_scope_wash_analysis(client, slug) if _nft_scope_turnover_elevated(c) else None
             smart_wallet_hits, activity_spike_hits, tracked_wallet_hits = await _nft_scope_wallet_signals(client, rapid_activity)
+            await _nft_scope_maybe_post_tracked_convergence(client, slug, c, tracked_wallet_hits)
             score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis, smart_wallet_hits=smart_wallet_hits, activity_spike_hits=activity_spike_hits, tracked_wallet_hits=tracked_wallet_hits)
             if score.get("floor_multiple") and score["floor_multiple"] >= _NFT_SCOPE_PROVED_MULTIPLE_THRESHOLD:
                 await _nft_scope_mark_slug_proved(client, slug, score["floor_multiple"])
@@ -7501,6 +7574,7 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
                 pass
             wash_analysis = await _nft_scope_wash_analysis(client, slug) if _nft_scope_turnover_elevated(c) else None
             smart_wallet_hits, activity_spike_hits, tracked_wallet_hits = await _nft_scope_wallet_signals(client, rapid_activity)
+            await _nft_scope_maybe_post_tracked_convergence(client, slug, c, tracked_wallet_hits)
             score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis, smart_wallet_hits=smart_wallet_hits, activity_spike_hits=activity_spike_hits, tracked_wallet_hits=tracked_wallet_hits)
             if score.get("floor_multiple") and score["floor_multiple"] >= _NFT_SCOPE_PROVED_MULTIPLE_THRESHOLD:
                 await _nft_scope_mark_slug_proved(client, slug, score["floor_multiple"])
@@ -7570,6 +7644,7 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
                 history, first_snapshot = await _nft_scope_snapshot_signals(client, slug)
                 wash_analysis = await _nft_scope_wash_analysis(client, slug) if _nft_scope_turnover_elevated(c) else None
                 smart_wallet_hits, activity_spike_hits, tracked_wallet_hits = await _nft_scope_wallet_signals(client, rapid_activity)
+                await _nft_scope_maybe_post_tracked_convergence(client, slug, c, tracked_wallet_hits)
                 score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis, smart_wallet_hits=smart_wallet_hits, activity_spike_hits=activity_spike_hits, tracked_wallet_hits=tracked_wallet_hits)
                 if score.get("floor_multiple") and score["floor_multiple"] >= _NFT_SCOPE_PROVED_MULTIPLE_THRESHOLD:
                     await _nft_scope_mark_slug_proved(client, slug, score["floor_multiple"])
