@@ -184,6 +184,13 @@ COMMANDS = [
                 "name": "clear", "description": "Remove one tag's wallets, or everything if left blank", "type": 1,
                 "options": [{"name": "tag", "description": "Tag to remove (omit to clear everything)", "type": 3, "required": False}],
             },
+            {
+                "name": "set-category", "description": "Set a wallet's broad type badge (KOL, Degen, Sniper, etc.)", "type": 1,
+                "options": [
+                    {"name": "address", "description": "Wallet address - must already be tracked", "type": 3, "required": True},
+                    {"name": "category", "description": "e.g. KOL, Degen, Sniper, Whale", "type": 3, "required": True},
+                ],
+            },
         ],
     },
     {

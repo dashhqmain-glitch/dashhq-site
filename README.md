@@ -175,7 +175,16 @@ established (`/discord/smart-wallets-worker`) since fetching the
 attachment + parsing + bulk upsert can exceed Discord's 3-second window.
 
 **`/smart-wallets list`** / **`/smart-wallets clear [tag]`** (team only) -
-see what's tracked, or wipe one tag's wallets (or everything).
+see what's tracked, or wipe one tag's wallets (or everything). Both go
+through the same deferred-worker path as `import` - they used to answer
+Discord directly and hit its own timeout in production (a cold start plus
+a Supabase round trip on its own exceeded the 3-second ack window).
+
+**`/smart-wallets set-category`** (team only) - tags a wallet with a broad
+type badge (e.g. `KOL`, `Degen`, `Sniper`) shown on the convergence alert
+below. A different axis from `tag` (which project a wallet is credentialed
+in) - most import sources don't carry this, so it's set after the fact,
+per address, updating every tag row that address already has.
 
 **`/xray` enrichment** - any address with tracked-wallet rows shows a
 "🏷️ Tracked As" field with its credentials.
@@ -198,9 +207,26 @@ old NFT Intel channel - same audience already set up there). Shares NFT
 Scope's existing "posted at all" cooldown, so this and a normal tiered
 post for the same collection in the same cycle can never both fire.
 
+Deliberately terse, modeled on a reference alert-tracker bot: an
+"🔔 Alert Tracker" header, one line per wallet (category badge + a
+shortened address linked to its OpenSea profile + the credential that
+earned it), and an "OpenSea" link button on the message itself
+(`_nft_scope_tracked_convergence_components` - a Discord link-style
+button, no interaction handling needed) instead of a paragraph of prose.
+Showing the address here is intentional and different from the self-
+computed smart-wallet signal above (which never names one) - this list
+is externally curated already, not proprietary internal scoring, and
+which wallet matched is the actual point of the alert.
+
+**`/cron/test-smart-wallet-convergence`** - posts the real embed-building
+function with sample data to the configured channel, so staff can see the
+production formatting before a genuine signal ever fires it (same pattern
+as the existing `/cron/test-monitor-channel`).
+
 **New Supabase table**: `smart_wallet_tags` (`backend/schema.sql`) - one
 row per (wallet, tag), since a single wallet routinely carries several
-credentials at once.
+credentials at once. `category` is a separate nullable column, set via
+`/smart-wallets set-category` rather than at import time.
 
 `_NFT_SCOPE_CHAINS` also gained `ink` and `hyperevm` alongside the
 existing 7 chains, so NFT Scope's discovery passes (and this

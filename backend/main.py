@@ -735,13 +735,16 @@ async def test_smart_wallet_convergence(request: Request):
         "chain": "ethereum", "openseaUrl": "https://opensea.io/collection/sample-collection", "image": None,
     }
     sample_hits = [
-        {"address": "0x1111111111111111111111111111111111111a", "tag": "Top 6 REALCOIN", "rank": 6, "pnl": 10.19},
-        {"address": "0x2222222222222222222222222222222222222b", "tag": "Rank 1 RH MACHINES", "rank": 1, "pnl": None},
+        {"address": "0x1111111111111111111111111111111111111a", "tag": "Top 6 REALCOIN", "rank": 6, "pnl": 10.19, "category": "KOL"},
+        {"address": "0x2222222222222222222222222222222222222b", "tag": "Rank 1 RH MACHINES", "rank": 1, "pnl": None, "category": "Degen"},
     ]
     embed = _nft_scope_tracked_convergence_embed(sample_collection, sample_hits)
     embed["footer"] = {"text": f"{embed['footer']['text']} · TEST POST with sample data, not a real signal"}
     async with httpx.AsyncClient(timeout=10) as client:
-        posted = await _post_channel_message(client, settings.discord_smart_wallet_channel_id, embed)
+        posted = await _post_channel_message(
+            client, settings.discord_smart_wallet_channel_id, embed,
+            components=_nft_scope_tracked_convergence_components(sample_collection),
+        )
     return {"channel_id": settings.discord_smart_wallet_channel_id, "posted": posted}
 
 
@@ -3196,7 +3199,7 @@ def _swt_extract_tags_from_label(label: str) -> list[tuple[str, int | None]]:
     return out
 
 
-_SWT_NOTION_FIELD_RE = re.compile(r"^(Explorer|OpenSea|Rank|Tag):\s*(.*)$", re.IGNORECASE)
+_SWT_NOTION_FIELD_RE = re.compile(r"^(Explorer|OpenSea|Rank|Tag|Category):\s*(.*)$", re.IGNORECASE)
 
 
 def _parse_smart_wallet_tsv_lines(lines: list[str]) -> tuple[list[dict], int]:
@@ -3226,7 +3229,7 @@ def _parse_smart_wallet_tsv_lines(lines: list[str]) -> tuple[list[dict], int]:
             address = fields[1].lower()
             tag = fields[-1]
             if tag:
-                rows.append({"address": address, "tag": tag, "rank": int(fields[0]), "pnl": None})
+                rows.append({"address": address, "tag": tag, "rank": int(fields[0]), "pnl": None, "category": None})
             else:
                 skipped += 1
             continue
@@ -3243,12 +3246,12 @@ def _parse_smart_wallet_tsv_lines(lines: list[str]) -> tuple[list[dict], int]:
 
         if last.lower().startswith("http"):
             for tag, rank in _swt_extract_tags_from_label(label):
-                rows.append({"address": address, "tag": tag, "rank": rank, "pnl": pnl})
+                rows.append({"address": address, "tag": tag, "rank": rank, "pnl": pnl, "category": None})
         else:
             for tag in last.split(","):
                 tag = tag.strip()
                 if tag:
-                    rows.append({"address": address, "tag": tag, "rank": None, "pnl": pnl})
+                    rows.append({"address": address, "tag": tag, "rank": None, "pnl": pnl, "category": None})
     return rows, skipped
 
 
@@ -3279,6 +3282,7 @@ def _parse_smart_wallet_import(text: str) -> tuple[list[dict], int]:
         address = header.group(1).lower()
         rank: int | None = None
         tags_raw: str | None = None
+        category: str | None = None
         i += 1
         while i < n:
             candidate = lines[i].strip()
@@ -3296,6 +3300,8 @@ def _parse_smart_wallet_import(text: str) -> tuple[list[dict], int]:
                     rank = None
             elif name == "tag":
                 tags_raw = value
+            elif name == "category":
+                category = value or None
             i += 1
         if not tags_raw:
             skipped += 1
@@ -3303,7 +3309,7 @@ def _parse_smart_wallet_import(text: str) -> tuple[list[dict], int]:
         for tag in _SWT_LABEL_SEGMENT_RE.split(tags_raw):
             tag = tag.strip()
             if tag:
-                rows.append({"address": address, "tag": tag, "rank": rank, "pnl": None})
+                rows.append({"address": address, "tag": tag, "rank": rank, "pnl": None, "category": category})
 
     tsv_rows, tsv_skipped = _parse_smart_wallet_tsv_lines(leftover)
     rows.extend(tsv_rows)
@@ -3329,6 +3335,8 @@ def _dedupe_smart_wallet_rows(rows: list[dict]) -> list[dict]:
             continue
         if existing.get("rank") is None and row.get("rank") is not None:
             existing["rank"] = row["rank"]
+        if existing.get("category") is None and row.get("category") is not None:
+            existing["category"] = row["category"]
         if existing.get("pnl") is None and row.get("pnl") is not None:
             existing["pnl"] = row["pnl"]
     return list(merged.values())
@@ -3340,7 +3348,7 @@ async def _smart_wallet_tags_for_address(address: str) -> list[dict]:
             res = await client.get(
                 f"{settings.supabase_url}/rest/v1/smart_wallet_tags",
                 headers=_supabase_headers(),
-                params={"address": f"eq.{address.lower()}", "select": "tag,rank,pnl", "order": "rank.asc.nullslast"},
+                params={"address": f"eq.{address.lower()}", "select": "tag,rank,pnl,category", "order": "rank.asc.nullslast"},
             )
             res.raise_for_status()
             return res.json()
@@ -3442,6 +3450,34 @@ async def _smart_wallets_clear_run(tag: str) -> dict:
     return {"embeds": [_clean_embed(embed)]}
 
 
+async def _smart_wallets_set_category_run(address: str, category: str) -> dict:
+    address = address.lower().strip()
+    category = category.strip()
+    async with httpx.AsyncClient(timeout=15) as client:
+        res = await client.patch(
+            f"{settings.supabase_url}/rest/v1/smart_wallet_tags",
+            headers=_supabase_headers(prefer="return=representation"),
+            params={"address": f"eq.{address}"},
+            json={"category": category},
+        )
+        res.raise_for_status()
+        updated = res.json()
+    if not updated:
+        embed = {
+            "title": "Not tracked yet",
+            "description": f"`{address}` has no rows in smart_wallet_tags - import it first with `/smart-wallets import`.",
+            "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER,
+        }
+        return {"embeds": [_clean_embed(embed)]}
+    tags = ", ".join(sorted({r["tag"] for r in updated}))
+    embed = {
+        "title": "✅ Category set",
+        "description": f"`{address}` (tracked as: {tags}) is now tagged **{category}**.",
+        "color": EMBED_COLOR_GOOD, "footer": TOOLKIT_FOOTER,
+    }
+    return {"embeds": [_clean_embed(embed)]}
+
+
 async def _handle_smart_wallets_list_command(payload: dict) -> dict:
     if not _is_team_member(payload):
         return {"type": 4, "data": {"content": "This command is for team members only.", "flags": 64}}
@@ -3464,6 +3500,21 @@ async def _handle_smart_wallets_clear_command(payload: dict) -> dict:
     return {"type": 5}
 
 
+async def _handle_smart_wallets_set_category_command(payload: dict) -> dict:
+    if not _is_team_member(payload):
+        return {"type": 4, "data": {"content": "This command is for team members only.", "flags": 64}}
+    opts = _smart_wallets_sub_options(payload)
+    address = (opts.get("address") or "").strip()
+    category = (opts.get("category") or "").strip()
+    if not _SWT_ADDR_RE.fullmatch(address):
+        return {"type": 4, "data": {"content": "That doesn't look like a valid wallet address.", "flags": 64}}
+    if not category:
+        return {"type": 4, "data": {"content": "Category can't be empty.", "flags": 64}}
+    await _discord_deferred_ack(payload.get("id"), payload.get("token"), ephemeral=True)
+    await _dispatch_smart_wallets_worker(action="set_category", token=payload.get("token"), address=address, category=category)
+    return {"type": 5}
+
+
 async def _handle_smart_wallets_command(payload: dict) -> dict:
     sub_options = (payload.get("data") or {}).get("options") or []
     sub_name = sub_options[0].get("name") if sub_options else None
@@ -3473,6 +3524,8 @@ async def _handle_smart_wallets_command(payload: dict) -> dict:
         return await _handle_smart_wallets_list_command(payload)
     if sub_name == "clear":
         return await _handle_smart_wallets_clear_command(payload)
+    if sub_name == "set-category":
+        return await _handle_smart_wallets_set_category_command(payload)
     return {"type": 4, "data": {"content": "Unknown subcommand.", "flags": 64}}
 
 
@@ -3520,6 +3573,8 @@ async def discord_smart_wallets_worker(request: Request):
             await _discord_followup_patch(token, await _smart_wallets_list_response())
         elif action == "clear":
             await _discord_followup_patch(token, await _smart_wallets_clear_run(body.get("tag") or ""))
+        elif action == "set_category":
+            await _discord_followup_patch(token, await _smart_wallets_set_category_run(body["address"], body["category"]))
         else:
             await _discord_followup_patch(token, {"content": "Unrecognized request."})
     except Exception:
@@ -5012,13 +5067,15 @@ async def _discord_dm(client: httpx.AsyncClient, discord_user_id: str, embed: di
         return False
 
 
-async def _post_channel_message(client: httpx.AsyncClient, channel_id: str, embed: dict, content: str | None = None) -> bool:
+async def _post_channel_message(client: httpx.AsyncClient, channel_id: str, embed: dict, content: str | None = None, components: list | None = None) -> bool:
     if not channel_id or not settings.discord_bot_token:
         return False
     try:
         body = {"embeds": [embed]}
         if content:
             body["content"] = content
+        if components:
+            body["components"] = components
         res = await _discord_post_with_retry(
             client, f"{DISCORD_API}/channels/{channel_id}/messages",
             {"Authorization": f"Bot {settings.discord_bot_token}"}, body,
@@ -7124,7 +7181,7 @@ async def _nft_scope_tracked_wallet_hits(client: httpx.AsyncClient, rapid_activi
         res = await client.get(
             f"{settings.supabase_url}/rest/v1/smart_wallet_tags",
             headers=_supabase_headers(),
-            params={"address": f"in.({','.join(lowered)})", "select": "address,tag,rank,pnl"},
+            params={"address": f"in.({','.join(lowered)})", "select": "address,tag,rank,pnl,category"},
         )
         res.raise_for_status()
         return res.json()
@@ -7168,37 +7225,49 @@ _NFT_SCOPE_TRACKED_CONVERGENCE_ALERT_MIN_WALLETS = 2
 _NFT_SCOPE_TRACKED_ALERT_COLOR = 0x8B5CF6  # violet - the color NFT Intel used, now free, same "distinct from every other tier" reasoning
 
 
+_SWT_CONVERGENCE_MAX_WALLET_ROWS = 10  # keeps the post scannable - a real convergence rarely needs more to make the point
+
+
+def _nft_scope_tracked_convergence_wallet_rows(tracked_hits: list[dict]) -> dict[str, dict]:
+    by_address: dict[str, dict] = {}
+    for h in tracked_hits:
+        row = by_address.setdefault(h["address"], {"tags": [], "category": None})
+        row["tags"].append(h["tag"])
+        if h.get("category") and not row["category"]:
+            row["category"] = h["category"]
+    return by_address
+
+
 def _nft_scope_tracked_convergence_embed(c: dict, tracked_hits: list[dict]) -> dict:
-    symbol = c.get("symbol") or "ETH"
-    distinct_addresses = {h["address"] for h in tracked_hits}
-    tags = sorted({h["tag"] for h in tracked_hits})
-    floor_text = "-"
-    if (floor := c.get("floor")) is not None:
-        floor_text = f"{floor:.4f} {symbol}"
-    lines = [
-        f"**{len(distinct_addresses)} separately tracked wallets** just bought into **{c['name']}** at the same "
-        "time - independent, credentialed wallets converging on the same collection is a much stronger tell "
-        "than any single wallet acting alone.",
-        "",
-        f"Tracked as: {', '.join(tags[:8])}" + (f" (+{len(tags) - 8} more)" if len(tags) > 8 else ""),
-        "",
-        "*This tracked-wallet list is staff-imported from external sources, not this bot's own scoring - "
-        "heuristic read, not financial advice. DYOR before any trade. NFA.*",
-    ]
+    # Deliberately terse - a category badge, a shortened linked address,
+    # and the credential that earned it, one line per wallet. No prose:
+    # the point should read at a glance, the same way the reference
+    # tracker this was modeled on shows it.
+    by_address = _nft_scope_tracked_convergence_wallet_rows(tracked_hits)
+    lines = []
+    for addr, info in list(by_address.items())[:_SWT_CONVERGENCE_MAX_WALLET_ROWS]:
+        short = f"{addr[:6]}…{addr[-4:]}"
+        badge = f"`{info['category']}` " if info["category"] else ""
+        lines.append(f"{badge}[{short}](https://opensea.io/{addr}) · {', '.join(info['tags'][:2])}")
+    if len(by_address) > _SWT_CONVERGENCE_MAX_WALLET_ROWS:
+        lines.append(f"+{len(by_address) - _SWT_CONVERGENCE_MAX_WALLET_ROWS} more")
     return {
-        "title": f"🕵️ Smart Wallet Convergence — {c['name']}",
+        "author": {"name": "🔔 Alert Tracker"},
+        "title": f"🌱 {len(by_address)} Wallets Buying — {c['name']}",
         "url": c.get("openseaUrl"),
         "description": "\n".join(lines),
         "color": _NFT_SCOPE_TRACKED_ALERT_COLOR,
-        "fields": [
-            {"name": "Floor", "value": floor_text, "inline": True},
-            {"name": "Chain", "value": (c.get("chain") or "-").capitalize(), "inline": True},
-            {"name": "Wallets Converging", "value": str(len(distinct_addresses)), "inline": True},
-        ],
         "thumbnail": {"url": c["image"]} if c.get("image") else None,
-        "footer": {"text": f"{TOOLKIT_FOOTER['text']} · Smart Wallet Convergence"},
+        "footer": {"text": "Smart Wallet Convergence · NFA"},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def _nft_scope_tracked_convergence_components(c: dict) -> list:
+    url = c.get("openseaUrl")
+    if not url:
+        return []
+    return [{"type": 1, "components": [{"type": 2, "style": 5, "label": "OpenSea", "url": url}]}]
 
 
 async def _nft_scope_maybe_post_tracked_convergence(client: httpx.AsyncClient, slug: str, c: dict, tracked_wallet_hits: list[dict] | None) -> bool:
@@ -7209,7 +7278,11 @@ async def _nft_scope_maybe_post_tracked_convergence(client: httpx.AsyncClient, s
         return False
     if not await _nft_scope_clears_wash_check(client, slug):
         return False
-    delivered = await _post_channel_message(client, settings.discord_smart_wallet_channel_id, _nft_scope_tracked_convergence_embed(c, tracked_wallet_hits))
+    delivered = await _post_channel_message(
+        client, settings.discord_smart_wallet_channel_id,
+        _nft_scope_tracked_convergence_embed(c, tracked_wallet_hits),
+        components=_nft_scope_tracked_convergence_components(c),
+    )
     if delivered:
         await _nft_scope_mark_posted(client, slug, c.get("floor") or 0)
         # These wallets are already proven good elsewhere (staff's curated
@@ -8461,8 +8534,10 @@ async def _cmd_xray(address: str) -> dict:
         fields.append({"name": "Note", "value": "Token holdings could not be fully loaded this scan. Net Worth and Distinct Tokens may be incomplete. Try again.", "inline": False})
     tracked = await _smart_wallet_tags_for_address(data["address"])
     if tracked:
+        category = next((t["category"] for t in tracked if t.get("category")), None)
         tag_text = ", ".join(f"{t['tag']}" + (f" (Rank {t['rank']})" if t.get("rank") else "") for t in tracked[:6])
-        fields.append({"name": "🏷️ Tracked As", "value": tag_text, "inline": False})
+        label = f"🏷️ Tracked As ({category})" if category else "🏷️ Tracked As"
+        fields.append({"name": label, "value": tag_text, "inline": False})
     return {
         "title": f"{tier['emoji']} {tier['name']} · {data.get('ensName') or address}",
         "description": tier["flavor"],

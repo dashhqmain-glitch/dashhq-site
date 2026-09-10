@@ -42,7 +42,7 @@ def test_parses_a_single_notion_block():
     )
     rows, skipped = main._parse_smart_wallet_import(text)
     assert skipped == 0
-    assert rows == [{"address": "0x014d22878be05d5ab76237de4650fec467206d3d", "tag": "Hype Brokers", "rank": 59, "pnl": None}]
+    assert rows == [{"address": "0x014d22878be05d5ab76237de4650fec467206d3d", "tag": "Hype Brokers", "rank": 59, "pnl": None, "category": None}]
 
 
 def test_parses_multiple_concatenated_notion_blocks():
@@ -60,8 +60,8 @@ def test_parses_multiple_concatenated_notion_blocks():
     rows, skipped = main._parse_smart_wallet_import(text)
     assert skipped == 0
     assert len(rows) == 2
-    assert rows[0] == {"address": "0x00179a311d6b239f2d367372b0dd7799946e6ab6", "tag": "RH MACHINES", "rank": 1, "pnl": None}
-    assert rows[1] == {"address": "0xabc000000000000000000000000000000000000a", "tag": "COOL", "rank": 3, "pnl": None}
+    assert rows[0] == {"address": "0x00179a311d6b239f2d367372b0dd7799946e6ab6", "tag": "RH MACHINES", "rank": 1, "pnl": None, "category": None}
+    assert rows[1] == {"address": "0xabc000000000000000000000000000000000000a", "tag": "COOL", "rank": 3, "pnl": None, "category": None}
 
 
 def test_notion_block_with_multi_tag_line_explodes_into_multiple_rows():
@@ -139,7 +139,7 @@ def test_parses_tsv_with_explicit_tag_list():
     line = "0xFCC6899d35ef5682899378a01fd1de9111f2a394\tEarly REALCOIN @$139k\t10.19\tREALCOIN"
     rows, skipped = main._parse_smart_wallet_import(line)
     assert skipped == 0
-    assert rows == [{"address": "0xfcc6899d35ef5682899378a01fd1de9111f2a394", "tag": "REALCOIN", "rank": None, "pnl": 10.19}]
+    assert rows == [{"address": "0xfcc6899d35ef5682899378a01fd1de9111f2a394", "tag": "REALCOIN", "rank": None, "pnl": 10.19, "category": None}]
 
 
 def test_tsv_multi_tag_row_explodes_one_row_per_tag_sharing_pnl():
@@ -163,13 +163,13 @@ def test_tsv_unparseable_pnl_becomes_none_not_a_skip():
 def test_tsv_url_shape_derives_tag_from_top_n_pattern():
     line = "0xb70a3be7d9af9a4121cfd80e66c392674f7adbf5\tTop 6 COOL\t0\thttps://gmgn.ai/arc/address/0xb70a..."
     rows, _ = main._parse_smart_wallet_import(line)
-    assert rows == [{"address": "0xb70a3be7d9af9a4121cfd80e66c392674f7adbf5", "tag": "COOL", "rank": 6, "pnl": 0.0}]
+    assert rows == [{"address": "0xb70a3be7d9af9a4121cfd80e66c392674f7adbf5", "tag": "COOL", "rank": 6, "pnl": 0.0, "category": None}]
 
 
 def test_tsv_url_shape_derives_tag_from_early_at_price_pattern():
     line = "0xd70e9bfaaa0d2f81acb48670129578f8e82e3ab3\tEarly ARCANINE @$12k\t1286\thttps://gmgn.ai/arc/address/0xd70e..."
     rows, _ = main._parse_smart_wallet_import(line)
-    assert rows == [{"address": "0xd70e9bfaaa0d2f81acb48670129578f8e82e3ab3", "tag": "ARCANINE", "rank": None, "pnl": 1286.0}]
+    assert rows == [{"address": "0xd70e9bfaaa0d2f81acb48670129578f8e82e3ab3", "tag": "ARCANINE", "rank": None, "pnl": 1286.0, "category": None}]
 
 
 def test_tsv_url_shape_derives_tag_from_multiplier_pattern():
@@ -192,7 +192,7 @@ def test_tsv_url_shape_handles_pipe_separated_multi_tag_label():
 def test_tsv_url_shape_falls_back_to_raw_segment_when_no_pattern_matches():
     line = "0x3c7423c3f5392a8e9f28a6234732e45fee6d5c5a\tUnrecognized Credential Text\t0\thttps://gmgn.ai/arc/address/0x3c74..."
     rows, _ = main._parse_smart_wallet_import(line)
-    assert rows == [{"address": "0x3c7423c3f5392a8e9f28a6234732e45fee6d5c5a", "tag": "Unrecognized Credential Text", "rank": None, "pnl": 0.0}]
+    assert rows == [{"address": "0x3c7423c3f5392a8e9f28a6234732e45fee6d5c5a", "tag": "Unrecognized Credential Text", "rank": None, "pnl": 0.0, "category": None}]
 
 
 # ── _parse_smart_wallet_import: malformed input ──────────────────────────
@@ -225,7 +225,7 @@ def test_parses_rank_leading_five_column_shape():
     )
     rows, skipped = main._parse_smart_wallet_import(line)
     assert skipped == 0
-    assert rows == [{"address": "0x5ab2d1f5069dd2f9aeec3b0a8e923b1cdbe7fc44", "tag": "Project Mars Land", "rank": 1, "pnl": None}]
+    assert rows == [{"address": "0x5ab2d1f5069dd2f9aeec3b0a8e923b1cdbe7fc44", "tag": "Project Mars Land", "rank": 1, "pnl": None, "category": None}]
 
 
 def test_five_column_shape_parses_across_multiple_lines():
@@ -246,7 +246,7 @@ def test_five_column_shape_does_not_misfire_on_the_four_column_gmgn_shape():
     # ordinary address-first TSV branch, not the rank-first one.
     line = "0xfcc6899d35ef5682899378a01fd1de9111f2a394\tEarly REALCOIN @$139k\t10.19\tREALCOIN"
     rows, _ = main._parse_smart_wallet_import(line)
-    assert rows == [{"address": "0xfcc6899d35ef5682899378a01fd1de9111f2a394", "tag": "REALCOIN", "rank": None, "pnl": 10.19}]
+    assert rows == [{"address": "0xfcc6899d35ef5682899378a01fd1de9111f2a394", "tag": "REALCOIN", "rank": None, "pnl": 10.19, "category": None}]
 
 
 # ── _smart_wallet_tags_for_address ───────────────────────────────────────
@@ -363,18 +363,42 @@ def _fake_collection(**overrides):
     return data
 
 
-def test_convergence_embed_names_tags_and_wallet_count():
+def test_convergence_embed_is_terse_and_names_tags_and_wallet_count():
     hits = [
-        {"address": "0xa", "tag": "REALCOIN", "rank": 6, "pnl": 10.19},
-        {"address": "0xb", "tag": "RH MACHINES", "rank": 1, "pnl": None},
+        {"address": "0x1111111111111111111111111111111111111a", "tag": "REALCOIN", "rank": 6, "pnl": 10.19, "category": "KOL"},
+        {"address": "0x2222222222222222222222222222222222222b", "tag": "RH MACHINES", "rank": 1, "pnl": None, "category": None},
     ]
     embed = main._nft_scope_tracked_convergence_embed(_fake_collection(), hits)
-    assert "Smart Wallet Convergence" in embed["title"]
-    assert "2 separately tracked wallets" in embed["description"]
+    assert "2 Wallets Buying" in embed["title"]
+    assert embed["author"]["name"] == "🔔 Alert Tracker"
     assert "REALCOIN" in embed["description"]
     assert "RH MACHINES" in embed["description"]
-    assert "0xa" not in embed["description"] and "0xb" not in embed["description"]
+    assert "`KOL`" in embed["description"]  # category badge shown when set
+    # A shortened, LINKED address is intentional here (unlike the self-
+    # computed smart-wallet signal) - this list is externally curated,
+    # not proprietary internal scoring, and showing which wallet matched
+    # is the whole point of the alert.
+    assert "opensea.io/0x1111111111111111111111111111111111111a" in embed["description"]
     assert embed["color"] == main._NFT_SCOPE_TRACKED_ALERT_COLOR
+    assert embed["url"] == _fake_collection()["openseaUrl"]
+
+
+def test_convergence_embed_caps_wallet_rows_and_notes_the_overflow():
+    hits = [{"address": f"0x{i:040x}", "tag": "T", "rank": None, "pnl": None, "category": None} for i in range(15)]
+    embed = main._nft_scope_tracked_convergence_embed(_fake_collection(), hits)
+    assert "+5 more" in embed["description"]
+
+
+def test_convergence_components_link_to_opensea():
+    components = main._nft_scope_tracked_convergence_components(_fake_collection())
+    button = components[0]["components"][0]
+    assert button["style"] == 5  # LINK style
+    assert button["url"] == _fake_collection()["openseaUrl"]
+    assert "custom_id" not in button
+
+
+def test_convergence_components_empty_without_an_opensea_url():
+    assert main._nft_scope_tracked_convergence_components({"openseaUrl": None}) == []
 
 
 async def test_maybe_post_convergence_skips_below_minimum_wallets():
@@ -433,8 +457,9 @@ async def test_maybe_post_convergence_posts_and_marks_shared_cooldown():
     async def fake_clears_wash(client, slug):
         return True
 
-    async def fake_post(client, channel_id, embed):
+    async def fake_post(client, channel_id, embed, content=None, components=None):
         calls["channel_id"] = channel_id
+        calls["components"] = components
         return True
 
     async def fake_mark_posted(client, slug, value):
@@ -452,6 +477,7 @@ async def test_maybe_post_convergence_posts_and_marks_shared_cooldown():
 
     assert result is True
     assert calls["channel_id"] == main.settings.discord_smart_wallet_channel_id
+    assert calls["components"][0]["components"][0]["url"] == _fake_collection()["openseaUrl"]
     assert calls["marked_posted"][0] == "test-slug"
     recorded_slug, recorded_floor, recorded_rapid = calls["recorded_buyers"]
     assert recorded_slug == "test-slug"
@@ -592,7 +618,7 @@ async def test_worker_endpoint_imports_and_reports_a_summary():
         MockClient.return_value.__aenter__.return_value = FakeClient()
         await main.discord_smart_wallets_worker(FakeRequest())
 
-    assert patched["upserted"] == [{"address": "0xabc000000000000000000000000000000000000a", "tag": "COOL", "rank": None, "pnl": 1.0, "source": "discord-import"}]
+    assert patched["upserted"] == [{"address": "0xabc000000000000000000000000000000000000a", "tag": "COOL", "rank": None, "pnl": 1.0, "category": None, "source": "discord-import"}]
     assert "Imported 1 row" in patched["followup"]["content"]
 
 
@@ -701,3 +727,114 @@ async def test_clear_command_defers_and_passes_the_tag():
     assert result == {"type": 5}
     assert dispatched["kwargs"]["action"] == "clear"
     assert dispatched["kwargs"]["tag"] == "REALCOIN"
+
+
+# ── /smart-wallets set-category ──────────────────────────────────────────
+
+def _set_category_payload(permissions, address="0xabc000000000000000000000000000000000000a", category="KOL"):
+    return _payload(permissions=permissions, options=[{
+        "name": "set-category",
+        "options": [{"name": "address", "value": address}, {"name": "category", "value": category}],
+    }])
+
+
+async def test_set_category_command_rejects_non_team_members():
+    result = await main._handle_smart_wallets_set_category_command(_set_category_payload(permissions="0"))
+    assert "team members only" in result["data"]["content"]
+
+
+async def test_set_category_command_rejects_an_invalid_address():
+    result = await main._handle_smart_wallets_set_category_command(_set_category_payload(permissions="32", address="not-an-address"))
+    assert "valid wallet address" in result["data"]["content"]
+
+
+async def test_set_category_command_rejects_an_empty_category():
+    result = await main._handle_smart_wallets_set_category_command(_set_category_payload(permissions="32", category=""))
+    assert "can't be empty" in result["data"]["content"]
+
+
+async def test_set_category_command_defers_and_dispatches_with_lowercased_address():
+    dispatched = {}
+
+    async def fake_ack(interaction_id, token, ephemeral=False):
+        pass
+
+    async def fake_dispatch(**kwargs):
+        dispatched["kwargs"] = kwargs
+
+    payload = _set_category_payload(permissions="32", address="0xABC000000000000000000000000000000000000A", category="Degen")
+    with patch.object(main, "_discord_deferred_ack", new=fake_ack), \
+         patch.object(main, "_dispatch_smart_wallets_worker", new=fake_dispatch):
+        result = await main._handle_smart_wallets_set_category_command(payload)
+
+    assert result == {"type": 5}
+    assert dispatched["kwargs"]["action"] == "set_category"
+    assert dispatched["kwargs"]["address"] == "0xABC000000000000000000000000000000000000A"  # case normalization happens in the run function, not here
+    assert dispatched["kwargs"]["category"] == "Degen"
+
+
+async def test_handle_smart_wallets_command_routes_set_category_by_subcommand_name():
+    result = await main._handle_smart_wallets_command(_set_category_payload(permissions="0"))
+    assert "team members only" in result["data"]["content"]  # proves it reached set-category's own gate
+
+
+async def test_set_category_run_updates_matching_rows_and_reports_tags():
+    class FakeClient:
+        async def patch(self, url, headers=None, params=None, json=None):
+            assert url.endswith("/smart_wallet_tags")
+            assert params["address"] == "eq.0xabc000000000000000000000000000000000000a"
+            assert json == {"category": "KOL"}
+            return FakeRes(200, [
+                {"address": "0xabc000000000000000000000000000000000000a", "tag": "REALCOIN", "category": "KOL"},
+                {"address": "0xabc000000000000000000000000000000000000a", "tag": "FEFER", "category": "KOL"},
+            ])
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        result = await main._smart_wallets_set_category_run("0xABC000000000000000000000000000000000000A", "KOL")
+
+    embed = result["embeds"][0]
+    assert "Category set" in embed["title"]
+    assert "FEFER" in embed["description"] and "REALCOIN" in embed["description"]
+    assert "KOL" in embed["description"]
+
+
+async def test_set_category_run_reports_when_the_wallet_is_not_tracked():
+    class FakeClient:
+        async def patch(self, url, headers=None, params=None, json=None):
+            return FakeRes(200, [])
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        result = await main._smart_wallets_set_category_run("0xabc000000000000000000000000000000000000a", "KOL")
+
+    embed = result["embeds"][0]
+    assert "Not tracked yet" in embed["title"]
+    assert "import it first" in embed["description"]
+
+
+async def test_worker_endpoint_set_category_action_passes_args_through():
+    seen = {}
+
+    async def fake_run(address, category):
+        seen["address"] = address
+        seen["category"] = category
+        return {"embeds": [{"title": "✅ Category set"}]}
+
+    patched = {}
+
+    async def fake_followup(token, data):
+        patched["data"] = data
+
+    class FakeRequest:
+        headers = {"X-Internal-Secret": main.settings.cron_secret}
+
+        async def json(self):
+            return {"action": "set_category", "token": "tok1", "address": "0xabc", "category": "KOL"}
+
+    with patch.object(main, "_smart_wallets_set_category_run", new=fake_run), \
+         patch.object(main, "_discord_followup_patch", new=fake_followup):
+        await main.discord_smart_wallets_worker(FakeRequest())
+
+    assert seen == {"address": "0xabc", "category": "KOL"}
+    assert patched["data"]["embeds"][0]["title"] == "✅ Category set"

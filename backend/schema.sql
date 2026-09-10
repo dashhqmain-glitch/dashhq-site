@@ -605,3 +605,10 @@ create table if not exists smart_wallet_tags (
 create index if not exists smart_wallet_tags_address_idx on smart_wallet_tags (address);
 
 alter table smart_wallet_tags enable row level security;
+
+-- Broad wallet-type badge (e.g. "KOL", "Degen", "Sniper") - a different
+-- axis from `tag` (which project/community a wallet is credentialed in,
+-- e.g. "Top 6 REALCOIN"). Most import sources don't carry this yet, so
+-- it's staff-set after the fact via /smart-wallets set-category rather
+-- than required at import time. Nullable and safe to re-run.
+alter table smart_wallet_tags add column if not exists category text;
