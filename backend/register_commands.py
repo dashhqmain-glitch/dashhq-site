@@ -172,20 +172,25 @@ COMMANDS = [
     },
     {
         "name": "smart-wallets",
-        "description": "Team only: manage the curated smart-wallet tracker list",
-        "default_member_permissions": "32",
+        "description": "Manage the curated smart-wallet tracker list",
+        # No default_member_permissions here anymore - list/clear/set-category
+        # stay staff-only via their own _is_team_member checks, but `import`
+        # without an attached file is the open-to-everyone wallet submission
+        # form, so the top-level command itself has to be visible to citizens.
         "options": [
             {
-                "name": "import", "description": "Import a wallet tracker file (GMGN-style export or Notion export, combined into one file)", "type": 1,
-                "options": [{"name": "file", "description": "The tracker file to import", "type": 11, "required": True}],
+                "name": "import",
+                "description": "Team: import a tracker file. Everyone else: leave file blank to submit one wallet for review",
+                "type": 1,
+                "options": [{"name": "file", "description": "Team only - bulk tracker file (GMGN-style or Notion export). Leave blank to get the submission form instead", "type": 11, "required": False}],
             },
-            {"name": "list", "description": "Show what's currently tracked", "type": 1},
+            {"name": "list", "description": "Team only: show what's currently tracked", "type": 1},
             {
-                "name": "clear", "description": "Remove one tag's wallets, or everything if left blank", "type": 1,
+                "name": "clear", "description": "Team only: remove one tag's wallets, or everything if left blank", "type": 1,
                 "options": [{"name": "tag", "description": "Tag to remove (omit to clear everything)", "type": 3, "required": False}],
             },
             {
-                "name": "set-category", "description": "Set a wallet's broad type badge (KOL, Degen, Sniper, etc.)", "type": 1,
+                "name": "set-category", "description": "Team only: set a wallet's broad type badge (KOL, Degen, Sniper, etc.)", "type": 1,
                 "options": [
                     {"name": "address", "description": "Wallet address - must already be tracked", "type": 3, "required": True},
                     {"name": "category", "description": "e.g. KOL, Degen, Sniper, Whale", "type": 3, "required": True},

@@ -1355,6 +1355,8 @@ async def _dispatch_interaction(payload: dict, itype) -> dict:
         if modal_id.startswith("acowallet:"):
             _, _, drop_id = modal_id.partition(":")
             return await _handle_aco_wallet_submit(payload, drop_id)
+        if modal_id == "smartwallets_submit":
+            return await _handle_smart_wallet_submit_modal(payload)
 
         # the decline-reason box was just submitted
         custom_id = modal_id
@@ -1414,6 +1416,12 @@ async def _dispatch_interaction(payload: dict, itype) -> dict:
         return await _handle_aco_key_open(payload, drop_id or None)
     if history_id == "acokey_complete":
         return await _handle_aco_key_complete(payload)
+    if history_id.startswith("walletsubmit_approve:"):
+        _, _, submission_id = history_id.partition(":")
+        return await _handle_wallet_submission_review_button(payload, submission_id, approve=True)
+    if history_id.startswith("walletsubmit_reject:"):
+        _, _, submission_id = history_id.partition(":")
+        return await _handle_wallet_submission_review_button(payload, submission_id, approve=False)
 
     custom_id = payload.get("data", {}).get("custom_id", "")
     action, _, app_id = custom_id.partition(":")
@@ -3380,14 +3388,22 @@ def _smart_wallets_sub_options(payload: dict) -> dict:
 
 
 async def _handle_smart_wallets_import_command(payload: dict) -> dict:
-    if not _is_team_member(payload):
-        return {"type": 4, "data": {"content": "This command is for team members only.", "flags": 64}}
     opts = _smart_wallets_sub_options(payload)
     attachment_id = opts.get("file")
     attachments = ((payload.get("data") or {}).get("resolved") or {}).get("attachments") or {}
     attachment = attachments.get(attachment_id) if attachment_id else None
+
+    # No file attached - `file` is optional specifically so this same
+    # subcommand doubles as the member-facing entry point: any citizen can
+    # add one wallet themselves via a form instead of needing a staff-only
+    # bulk export. Staff still gets bulk import below when they DO attach one.
     if not attachment or not attachment.get("url"):
-        return {"type": 4, "data": {"content": "No file attached.", "flags": 64}}
+        if not _is_citizen(payload):
+            return {"type": 4, "data": {"content": "This command is reserved for verified Dash HQ citizens.", "flags": 64}}
+        return _smart_wallet_submit_modal()
+
+    if not _is_team_member(payload):
+        return {"type": 4, "data": {"content": "Bulk import is for team members only - leave `file` blank to submit a single wallet for review instead.", "flags": 64}}
 
     interaction_id = payload.get("id")
     token = payload.get("token")
@@ -3582,6 +3598,190 @@ async def discord_smart_wallets_worker(request: Request):
         if token:
             await _discord_followup_patch(token, {"content": "Something went wrong. Please try again."})
     return {"ok": True}
+
+
+# ── Member wallet submissions — /smart-wallets import with no file ──────
+# attached, the open-to-everyone counterpart to the staff bulk-import path
+# above. Any citizen can propose a wallet with their own short rank/
+# credential label and a category via the modal this opens, but it lands in
+# smart_wallet_submissions as "pending" - staff has to actually look at the
+# wallet's on-chain history (every configured chain's explorer + OpenSea,
+# plus this bot's own self-computed track record if it has one) before
+# Approve copies it into smart_wallet_tags, the same table /smart-wallets
+# import and /smart-wallets set-category already write to.
+_WALLET_SUBMIT_CATEGORIES = ["KOL", "Degen", "Whale", "Sniper"]
+
+
+async def _wallet_submission_track_record(client: httpx.AsyncClient, address: str) -> str:
+    best: dict | None = None
+    for table, sample_col in (("nft_smart_wallets", "total_calls"), ("nft_wallet_pnl_stats", "total_trades")):
+        try:
+            res = await client.get(
+                f"{settings.supabase_url}/rest/v1/{table}",
+                headers=_supabase_headers(),
+                params={"address": f"eq.{address}", "select": f"{sample_col},win_rate", "limit": "1"},
+            )
+            res.raise_for_status()
+            rows = res.json()
+        except httpx.HTTPError:
+            rows = []
+        if rows and rows[0].get(sample_col):
+            row = rows[0]
+            if not best or (row.get("win_rate") or 0) > (best.get("win_rate") or 0):
+                best = {"sample": row[sample_col], "win_rate": row.get("win_rate") or 0}
+    if not best:
+        return "No self-computed track record yet."
+    return f"🧠 {best['sample']} tracked call(s) in our own data, {best['win_rate']:.0%} win rate"
+
+
+def _wallet_submission_review_embed(submission: dict, track_record: str) -> dict:
+    address = submission["address"]
+    short = f"{address[:6]}…{address[-4:]}"
+    submitted_by = submission["submitted_by"]
+    submitter = "🤖 Auto-discovered (co-minted with a tracked wallet)" if submitted_by == "system" else f"<@{submitted_by}>"
+    return {
+        "author": {"name": "🆕 Wallet Submission — Pending Review"},
+        "title": short,
+        "description": (
+            f"**Tag:** {submission['tag']}\n"
+            f"**Category:** `{submission['category']}`\n"
+            f"**Submitted by:** {submitter}\n"
+            f"{track_record}\n\n"
+            f"**Links**\n{_wallet_explorer_links(address)}"
+        ),
+        "color": EMBED_COLOR_WARN,
+        "footer": {"text": f"Full address: {address}"},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _wallet_submission_review_components(submission_id: str) -> list:
+    return [{"type": 1, "components": [
+        {"type": 2, "style": 3, "label": "Approve", "custom_id": f"walletsubmit_approve:{submission_id}"},
+        {"type": 2, "style": 4, "label": "Reject", "custom_id": f"walletsubmit_reject:{submission_id}"},
+    ]}]
+
+
+def _smart_wallet_submit_modal() -> dict:
+    # Discord modals only support text-input components (no select/choice
+    # widgets), so category is a free-text field here, validated server-side
+    # against _WALLET_SUBMIT_CATEGORIES on submit rather than constrained by
+    # the client UI the way a slash-command choice option would be.
+    return {
+        "type": 9,
+        "data": {
+            "custom_id": "smartwallets_submit",
+            "title": "Submit A Smart Wallet",
+            "components": [
+                {"type": 1, "components": [{
+                    "type": 4, "custom_id": "address", "style": 1, "label": "Wallet address (0x...)",
+                    "min_length": 42, "max_length": 42, "required": True, "placeholder": "0xabc...",
+                }]},
+                {"type": 1, "components": [{
+                    "type": 4, "custom_id": "tag", "style": 1, "label": "Short rank/credential title",
+                    "max_length": 100, "required": True, "placeholder": "e.g. Called PVP early",
+                }]},
+                {"type": 1, "components": [{
+                    "type": 4, "custom_id": "category", "style": 1, "label": "Category",
+                    "max_length": 20, "required": True, "placeholder": "KOL, Degen, Whale, or Sniper",
+                }]},
+            ],
+        },
+    }
+
+
+async def _handle_smart_wallet_submit_modal(payload: dict) -> dict:
+    fields: dict[str, str] = {}
+    for row in payload.get("data", {}).get("components", []):
+        for comp in row.get("components", []):
+            fields[comp.get("custom_id")] = (comp.get("value") or "").strip()
+
+    address = fields.get("address", "").lower()
+    tag = fields.get("tag", "")[:100]
+    category = fields.get("category", "").strip().title()
+    if not _SWT_ADDR_RE.fullmatch(address):
+        return {"type": 4, "data": {"content": "That doesn't look like a wallet address - it should be `0x` followed by 40 hex characters.", "flags": 64}}
+    if not tag:
+        return {"type": 4, "data": {"content": "Give it a short rank/credential title, e.g. \"Called PVP early\".", "flags": 64}}
+    if category not in _WALLET_SUBMIT_CATEGORIES:
+        return {"type": 4, "data": {"content": f"Category must be one of: {', '.join(_WALLET_SUBMIT_CATEGORIES)}.", "flags": 64}}
+
+    interaction_id = payload.get("id")
+    token = payload.get("token")
+    await _discord_deferred_ack(interaction_id, token, ephemeral=True)
+
+    discord_user_id = payload.get("member", {}).get("user", {}).get("id", "")
+    async with httpx.AsyncClient(timeout=20) as client:
+        res = await client.post(
+            f"{settings.supabase_url}/rest/v1/smart_wallet_submissions",
+            headers=_supabase_headers(prefer="return=representation"),
+            json={"address": address, "tag": tag, "category": category, "submitted_by": discord_user_id},
+        )
+        res.raise_for_status()
+        submission = res.json()[0]
+
+        track_record = await _wallet_submission_track_record(client, address)
+        message_id = await _post_channel_message_get_id(
+            client, settings.discord_wallet_review_channel_id,
+            _wallet_submission_review_embed(submission, track_record),
+            components=_wallet_submission_review_components(submission["id"]),
+        )
+        if message_id:
+            await client.patch(
+                f"{settings.supabase_url}/rest/v1/smart_wallet_submissions",
+                headers=_supabase_headers(prefer="return=minimal"),
+                params={"id": f"eq.{submission['id']}"},
+                json={"discord_channel_id": settings.discord_wallet_review_channel_id, "discord_message_id": message_id},
+            )
+
+    content = "✅ Submitted for staff review." if message_id else "✅ Saved, but couldn't notify the review channel - a staff member will need to check `smart_wallet_submissions` directly."
+    await _discord_edit_original_raw(token, {"content": content})
+    return {"type": 5}
+
+
+async def _handle_wallet_submission_review_button(payload: dict, submission_id: str, approve: bool) -> dict:
+    if not _is_team_member(payload):
+        return {"type": 4, "data": {"content": "Team members only.", "flags": 64}}
+    if not submission_id:
+        return {"type": 4, "data": {"content": "Unrecognized submission.", "flags": 64}}
+    actor_id = payload.get("member", {}).get("user", {}).get("id", "")
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/smart_wallet_submissions",
+            headers=_supabase_headers(),
+            params={"id": f"eq.{submission_id}", "select": "*"},
+        )
+        res.raise_for_status()
+        rows = res.json()
+        if not rows:
+            return {"type": 4, "data": {"content": "Submission not found.", "flags": 64}}
+        submission = rows[0]
+        # Guards the same double-click/stale-view race _aco_finalize_drop guards -
+        # two staff clicking Approve/Reject on the same pending submission at once.
+        if submission["status"] != "pending":
+            return {"type": 4, "data": {"content": f"Already **{submission['status']}** - no change made.", "flags": 64}}
+
+        new_status = "approved" if approve else "rejected"
+        await client.patch(
+            f"{settings.supabase_url}/rest/v1/smart_wallet_submissions",
+            headers=_supabase_headers(prefer="return=minimal"),
+            params={"id": f"eq.{submission_id}"},
+            json={"status": new_status, "reviewed_by": actor_id, "reviewed_at": datetime.now(timezone.utc).isoformat()},
+        )
+        if approve:
+            await client.post(
+                f"{settings.supabase_url}/rest/v1/smart_wallet_tags",
+                headers=_supabase_headers(prefer="resolution=merge-duplicates,return=minimal"),
+                json={"address": submission["address"], "tag": submission["tag"], "category": submission["category"], "source": "smart-wallets-submit"},
+            )
+
+    embeds = (payload.get("message") or {}).get("embeds") or []
+    embed = embeds[0] if embeds else _wallet_submission_review_embed(submission, "")
+    verb = "✅ Approved" if approve else "❌ Rejected"
+    embed["author"] = {"name": f"{verb} by a team member — Wallet Submission"}
+    embed["color"] = EMBED_COLOR_GOOD if approve else EMBED_COLOR_BAD
+    return {"type": 7, "data": {"embeds": [embed], "components": []}}
 
 
 # Most public RPC endpoints don't send CORS headers (they're built for
@@ -4568,6 +4768,34 @@ _NFT_FLOOR_CHANGE_THRESHOLD_PCT = 8.0  # minimum floor move (either direction) w
 # no-op'ing forever.
 _NFT_SCOPE_CHAINS = ["ethereum", "base", "polygon", "robinhood", "arbitrum", "optimism", "avalanche", "ink", "hyperevm"]
 
+# Address -> block-explorer URL per chain, used only to build the link list
+# on the member wallet-submission form's moderator review embed (not scan coverage - that's
+# _NFT_SCOPE_CHAINS above). Confidence is high for the established chains
+# (Etherscan-family + Snowtrace) but LOW for robinhood/ink/hyperevm - all
+# three are new enough that their public explorer domain was not
+# independently verified before adding it here. Confirm each against
+# whatever's actually live before trusting a staff reviewer's click-through.
+_CHAIN_EXPLORERS = {
+    "ethereum": "https://etherscan.io/address/{a}",
+    "base": "https://basescan.org/address/{a}",
+    "polygon": "https://polygonscan.com/address/{a}",
+    "arbitrum": "https://arbiscan.io/address/{a}",
+    "optimism": "https://optimistic.etherscan.io/address/{a}",
+    "avalanche": "https://snowtrace.io/address/{a}",
+    "bsc": "https://bscscan.com/address/{a}",
+    "ink": "https://explorer.inkonchain.com/address/{a}",  # unverified
+    "hyperevm": "https://hyperevmscan.io/address/{a}",  # unverified
+    "robinhood": "https://explorer.robinhood.com/address/{a}",  # unverified - Robinhood Chain explorer not confirmed live
+}
+
+
+def _wallet_explorer_links(address: str) -> str:
+    links = [f"[OpenSea](https://opensea.io/{address})"]
+    for chain, template in _CHAIN_EXPLORERS.items():
+        label = chain.capitalize() if chain != "bsc" else "BSC"
+        links.append(f"[{label}]({template.format(a=address)})")
+    return " · ".join(links)
+
 
 async def _nft_store_snapshot(client: httpx.AsyncClient, c: dict) -> None:
     await client.post(
@@ -5087,6 +5315,30 @@ async def _post_channel_message(client: httpx.AsyncClient, channel_id: str, embe
     except httpx.HTTPError:
         logger.exception("Failed to post /monitor alert publicly")
         return False
+
+
+async def _post_channel_message_get_id(client: httpx.AsyncClient, channel_id: str, embed: dict, components: list | None = None) -> str | None:
+    # Same call as _post_channel_message, but returns the new message's id
+    # instead of a bare bool - needed anywhere a later interaction (an
+    # Approve/Reject button) has to come back and edit THIS specific
+    # message rather than just knowing the post succeeded.
+    if not channel_id or not settings.discord_bot_token:
+        return None
+    try:
+        body = {"embeds": [embed]}
+        if components:
+            body["components"] = components
+        res = await _discord_post_with_retry(
+            client, f"{DISCORD_API}/channels/{channel_id}/messages",
+            {"Authorization": f"Bot {settings.discord_bot_token}"}, body,
+        )
+        if res.status_code >= 300:
+            logger.error("Post to channel %s failed: %s %s", channel_id, res.status_code, res.text[:300])
+            return None
+        return res.json().get("id")
+    except httpx.HTTPError:
+        logger.exception("Failed to post message and capture its id")
+        return None
 
 
 async def _dm_watchlist_owners(client: httpx.AsyncClient, slug: str, embed: dict) -> None:
@@ -7239,22 +7491,25 @@ def _nft_scope_tracked_convergence_wallet_rows(tracked_hits: list[dict]) -> dict
 
 
 def _nft_scope_tracked_convergence_embed(c: dict, tracked_hits: list[dict]) -> dict:
-    # Deliberately terse - a category badge, a shortened linked address,
-    # and the credential that earned it, one line per wallet. No prose:
-    # the point should read at a glance, the same way the reference
-    # tracker this was modeled on shows it.
+    # Deliberately terse - a bold credential tag and a category badge, one
+    # line per wallet, no addresses or per-row links (no per-category
+    # channels to point them at here, unlike the reference tracker this was
+    # modeled on). The point should still read at a glance.
     by_address = _nft_scope_tracked_convergence_wallet_rows(tracked_hits)
     lines = []
     for addr, info in list(by_address.items())[:_SWT_CONVERGENCE_MAX_WALLET_ROWS]:
-        short = f"{addr[:6]}…{addr[-4:]}"
-        badge = f"`{info['category']}` " if info["category"] else ""
-        lines.append(f"{badge}[{short}](https://opensea.io/{addr}) · {', '.join(info['tags'][:2])}")
+        tag = ", ".join(info["tags"][:2])
+        badge = f" `{info['category']}`" if info["category"] else ""
+        lines.append(f"**{tag}**{badge}")
     if len(by_address) > _SWT_CONVERGENCE_MAX_WALLET_ROWS:
         lines.append(f"+{len(by_address) - _SWT_CONVERGENCE_MAX_WALLET_ROWS} more")
+    opensea_url = c.get("openseaUrl")
+    if opensea_url:
+        lines.append(f"\n🔗 [View Collection]({opensea_url})")
     return {
         "author": {"name": "🔔 Alert Tracker"},
-        "title": f"🌱 {len(by_address)} Wallets Buying — {c['name']}",
-        "url": c.get("openseaUrl"),
+        "title": f"🌱 {len(by_address)} Wallet Minting {c['name']}",
+        "url": opensea_url,
         "description": "\n".join(lines),
         "color": _NFT_SCOPE_TRACKED_ALERT_COLOR,
         "thumbnail": {"url": c["image"]} if c.get("image") else None,
@@ -7293,6 +7548,73 @@ async def _nft_scope_maybe_post_tracked_convergence(client: httpx.AsyncClient, s
         # path already gets.
         await _nft_scope_record_call_buyers(client, slug, c.get("floor"), {"buyer_addresses": list(distinct_addresses)})
     return delivered
+
+
+# ── Co-minter auto-discovery ─────────────────────────────────────────────
+# Studied the deleted NFT Intel's history before writing this (git log:
+# ccfe609 added it with a "co-minter auto-discovery" mechanic - a seed
+# wallet's mint triggered a scan of who else minted the same collection,
+# growing the tracked list automatically; 1b11ef4/6dc6c35 then had to cap
+# and de-flood it; 766b5a1 eventually replaced the whole feature because it
+# alerted straight off that auto-grown list with no review and no
+# reasoning per wallet). The co-minter idea itself was genuinely good
+# signal ("wallets that mint together tend to be worth watching together")
+# - what made NFT Intel get replaced was skipping review entirely. This
+# keeps the idea but drops it into the SAME staff-reviewed queue as a
+# member's own /smart-wallets submission, never straight into
+# smart_wallet_tags, and caps it hard per event the same way NFT Intel
+# eventually had to learn to.
+_SWT_CO_MINTER_DISCOVERY_MAX_PER_EVENT = 5
+
+
+async def _nft_scope_untracked_and_unsubmitted(client: httpx.AsyncClient, addresses: list[str]) -> list[str]:
+    if not addresses:
+        return []
+    in_filter = f"in.({','.join(addresses)})"
+    tagged_res, submitted_res = await asyncio.gather(
+        client.get(f"{settings.supabase_url}/rest/v1/smart_wallet_tags", headers=_supabase_headers(), params={"address": in_filter, "select": "address"}),
+        client.get(f"{settings.supabase_url}/rest/v1/smart_wallet_submissions", headers=_supabase_headers(), params={"address": in_filter, "status": "in.(pending,approved)", "select": "address"}),
+    )
+    known: set[str] = set()
+    for res in (tagged_res, submitted_res):
+        try:
+            res.raise_for_status()
+            known |= {row["address"] for row in res.json()}
+        except httpx.HTTPError:
+            continue  # fail open here - worst case a wallet gets suggested for review twice, not silently dropped
+    return [a for a in addresses if a not in known]
+
+
+async def _nft_scope_auto_discover_co_minters(client: httpx.AsyncClient, slug: str, c: dict, tracked_wallet_hits: list[dict], rapid_activity: dict | None) -> None:
+    tracked_addresses = {h["address"] for h in tracked_wallet_hits}
+    candidates = [a for a in (rapid_activity or {}).get("buyer_addresses") or [] if a not in tracked_addresses]
+    candidates = (await _nft_scope_untracked_and_unsubmitted(client, candidates))[:_SWT_CO_MINTER_DISCOVERY_MAX_PER_EVENT]
+
+    for address in candidates:
+        try:
+            res = await client.post(
+                f"{settings.supabase_url}/rest/v1/smart_wallet_submissions",
+                headers=_supabase_headers(prefer="return=representation"),
+                json={"address": address, "tag": f"Co-minted {c['name']} with a tracked wallet", "category": "Degen", "submitted_by": "system"},
+            )
+            res.raise_for_status()
+            submission = res.json()[0]
+        except httpx.HTTPError:
+            continue
+
+        track_record = await _wallet_submission_track_record(client, address)
+        message_id = await _post_channel_message_get_id(
+            client, settings.discord_wallet_review_channel_id,
+            _wallet_submission_review_embed(submission, track_record),
+            components=_wallet_submission_review_components(submission["id"]),
+        )
+        if message_id:
+            await client.patch(
+                f"{settings.supabase_url}/rest/v1/smart_wallet_submissions",
+                headers=_supabase_headers(prefer="return=minimal"),
+                params={"id": f"eq.{submission['id']}"},
+                json={"discord_channel_id": settings.discord_wallet_review_channel_id, "discord_message_id": message_id},
+            )
 
 
 async def _nft_scope_wallet_signals(client: httpx.AsyncClient, rapid_activity: dict | None) -> tuple[list[dict], list[dict], list[dict]]:
@@ -7512,7 +7834,8 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
                 history, first_snapshot = await _nft_scope_snapshot_signals(client, slug)
                 wash_analysis = await _nft_scope_wash_analysis(client, slug) if _nft_scope_turnover_elevated(c) else None
                 smart_wallet_hits, activity_spike_hits, tracked_wallet_hits = await _nft_scope_wallet_signals(client, rapid_activity)
-                await _nft_scope_maybe_post_tracked_convergence(client, slug, c, tracked_wallet_hits)
+                if await _nft_scope_maybe_post_tracked_convergence(client, slug, c, tracked_wallet_hits):
+                    await _nft_scope_auto_discover_co_minters(client, slug, c, tracked_wallet_hits, rapid_activity)
                 score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis, smart_wallet_hits=smart_wallet_hits, activity_spike_hits=activity_spike_hits, tracked_wallet_hits=tracked_wallet_hits)
                 if score.get("floor_multiple") and score["floor_multiple"] >= _NFT_SCOPE_PROVED_MULTIPLE_THRESHOLD:
                     await _nft_scope_mark_slug_proved(client, slug, score["floor_multiple"])
@@ -7684,7 +8007,9 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
             history, first_snapshot = await _nft_scope_snapshot_signals(client, slug)
             wash_analysis = await _nft_scope_wash_analysis(client, slug) if _nft_scope_turnover_elevated(c) else None
             smart_wallet_hits, activity_spike_hits, tracked_wallet_hits = await _nft_scope_wallet_signals(client, rapid_activity)
-            await _nft_scope_maybe_post_tracked_convergence(client, slug, c, tracked_wallet_hits)
+            # No standalone Alert Tracker post here - this pass is secondary-market
+            # trending discovery, not minting, and the alert is minting-only. The
+            # tracked-wallet signal still feeds the normal score below either way.
             score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis, smart_wallet_hits=smart_wallet_hits, activity_spike_hits=activity_spike_hits, tracked_wallet_hits=tracked_wallet_hits)
             if score.get("floor_multiple") and score["floor_multiple"] >= _NFT_SCOPE_PROVED_MULTIPLE_THRESHOLD:
                 await _nft_scope_mark_slug_proved(client, slug, score["floor_multiple"])
@@ -7763,7 +8088,8 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
                 pass
             wash_analysis = await _nft_scope_wash_analysis(client, slug) if _nft_scope_turnover_elevated(c) else None
             smart_wallet_hits, activity_spike_hits, tracked_wallet_hits = await _nft_scope_wallet_signals(client, rapid_activity)
-            await _nft_scope_maybe_post_tracked_convergence(client, slug, c, tracked_wallet_hits)
+            # No standalone Alert Tracker post here either - momentum on an
+            # already-tracked collection is secondary-market activity, not minting.
             score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis, smart_wallet_hits=smart_wallet_hits, activity_spike_hits=activity_spike_hits, tracked_wallet_hits=tracked_wallet_hits)
             if score.get("floor_multiple") and score["floor_multiple"] >= _NFT_SCOPE_PROVED_MULTIPLE_THRESHOLD:
                 await _nft_scope_mark_slug_proved(client, slug, score["floor_multiple"])
@@ -7833,7 +8159,8 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
                 history, first_snapshot = await _nft_scope_snapshot_signals(client, slug)
                 wash_analysis = await _nft_scope_wash_analysis(client, slug) if _nft_scope_turnover_elevated(c) else None
                 smart_wallet_hits, activity_spike_hits, tracked_wallet_hits = await _nft_scope_wallet_signals(client, rapid_activity)
-                await _nft_scope_maybe_post_tracked_convergence(client, slug, c, tracked_wallet_hits)
+                # No standalone Alert Tracker post here either - this pass is what
+                # proven wallets are currently holding, not active minting.
                 score = _nft_scope_score(c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot, wash_analysis=wash_analysis, smart_wallet_hits=smart_wallet_hits, activity_spike_hits=activity_spike_hits, tracked_wallet_hits=tracked_wallet_hits)
                 if score.get("floor_multiple") and score["floor_multiple"] >= _NFT_SCOPE_PROVED_MULTIPLE_THRESHOLD:
                     await _nft_scope_mark_slug_proved(client, slug, score["floor_multiple"])
@@ -9028,6 +9355,12 @@ TOOLKIT_TOOLS = {
         "short": "Team only: announce a new ACO drop and open wallet submissions",
         "usage": "/aco-drop",
         "example": "/aco-drop",
+    },
+    "smart-wallets": {
+        "emoji": "🕵️", "label": "Submit A Smart Wallet",
+        "short": "Propose a wallet for the tracked smart-wallet list - opens a short form, staff reviews it before it counts toward any alert",
+        "usage": "/smart-wallets import (leave the file blank to get the submission form)",
+        "example": "/smart-wallets import",
     },
 }
 

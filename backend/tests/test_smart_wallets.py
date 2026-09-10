@@ -6,6 +6,7 @@ gates."""
 from unittest.mock import patch
 
 import main
+from config import settings
 
 
 class FakeRes:
@@ -369,16 +370,16 @@ def test_convergence_embed_is_terse_and_names_tags_and_wallet_count():
         {"address": "0x2222222222222222222222222222222222222b", "tag": "RH MACHINES", "rank": 1, "pnl": None, "category": None},
     ]
     embed = main._nft_scope_tracked_convergence_embed(_fake_collection(), hits)
-    assert "2 Wallets Buying" in embed["title"]
+    assert "2 Wallet Minting" in embed["title"]
     assert embed["author"]["name"] == "🔔 Alert Tracker"
-    assert "REALCOIN" in embed["description"]
-    assert "RH MACHINES" in embed["description"]
+    assert "**REALCOIN**" in embed["description"]
+    assert "**RH MACHINES**" in embed["description"]
     assert "`KOL`" in embed["description"]  # category badge shown when set
-    # A shortened, LINKED address is intentional here (unlike the self-
-    # computed smart-wallet signal) - this list is externally curated,
-    # not proprietary internal scoring, and showing which wallet matched
-    # is the whole point of the alert.
-    assert "opensea.io/0x1111111111111111111111111111111111111a" in embed["description"]
+    # Deliberately no per-wallet address/link in the row itself (no
+    # per-category channel to point it at) - just a bottom "View
+    # Collection" link into the collection as a whole.
+    assert "opensea.io/0x1111111111111111111111111111111111111a" not in embed["description"]
+    assert "[View Collection]" in embed["description"]
     assert embed["color"] == main._NFT_SCOPE_TRACKED_ALERT_COLOR
     assert embed["url"] == _fake_collection()["openseaUrl"]
 
@@ -484,6 +485,76 @@ async def test_maybe_post_convergence_posts_and_marks_shared_cooldown():
     assert set(recorded_rapid["buyer_addresses"]) == {"0xa", "0xb"}
 
 
+# ── Co-minter auto-discovery ──────────────────────────────────────────────
+
+async def test_untracked_and_unsubmitted_filters_out_known_addresses():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "smart_wallet_tags" in url:
+                return FakeRes(200, [{"address": "0xa"}])
+            if "smart_wallet_submissions" in url:
+                return FakeRes(200, [{"address": "0xb"}])
+            return FakeRes(200, [])
+
+    result = await main._nft_scope_untracked_and_unsubmitted(FakeClient(), ["0xa", "0xb", "0xc"])
+    assert result == ["0xc"]
+
+
+async def test_untracked_and_unsubmitted_short_circuits_on_no_addresses():
+    async def fail_if_called(*a, **k):
+        raise AssertionError("should never query with an empty candidate list")
+
+    class FakeClient:
+        get = fail_if_called
+
+    assert await main._nft_scope_untracked_and_unsubmitted(FakeClient(), []) == []
+
+
+async def test_auto_discover_co_minters_excludes_tracked_wallets_caps_and_posts_pending_submissions():
+    settings.discord_bot_token = "tok"
+    settings.discord_wallet_review_channel_id = "modchan1"
+    tracked_hits = [{"address": "0xa", "tag": "REALCOIN", "category": "KOL"}]
+    # 0xa is already the tracked wallet that triggered convergence, 0xb is
+    # already known (tagged or pending elsewhere) - neither should get a
+    # fresh submission. 7 fresh candidates remain, capped down to 5.
+    rapid_activity = {"buyer_addresses": ["0xa", "0xb"] + [f"0x{i:040x}" for i in range(7)]}
+    submitted_addresses = []
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "smart_wallet_tags" in url:
+                return FakeRes(200, [])
+            if "smart_wallet_submissions" in url:
+                return FakeRes(200, [{"address": "0xb"}])
+            return FakeRes(200, [])
+
+        async def post(self, url, headers=None, json=None):
+            if "smart_wallet_submissions" in url:
+                submitted_addresses.append(json["address"])
+                return FakeRes(200, [{**json, "id": f"sub-{json['address']}"}])
+            if "/messages" in url:
+                return FakeRes(200, {"id": "msg1"})
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            return FakeRes(200, {})
+
+    await main._nft_scope_auto_discover_co_minters(FakeClient(), "slug", _fake_collection(), tracked_hits, rapid_activity)
+
+    assert "0xa" not in submitted_addresses  # the tracked wallet itself
+    assert "0xb" not in submitted_addresses  # already known/pending
+    assert len(submitted_addresses) == main._SWT_CO_MINTER_DISCOVERY_MAX_PER_EVENT
+
+
+def test_auto_discovered_submission_shows_a_bot_badge_instead_of_a_broken_mention():
+    embed = main._wallet_submission_review_embed(
+        {"address": "0xabc", "tag": "Co-minted Test with a tracked wallet", "category": "Degen", "submitted_by": "system"},
+        "No self-computed track record yet.",
+    )
+    assert "🤖 Auto-discovered" in embed["description"]
+    assert "<@system>" not in embed["description"]
+
+
 # ── _nft_scope_wallet_signals now returns a 3-tuple ──────────────────────
 
 async def test_wallet_signals_returns_three_way_empty_with_no_rapid_activity():
@@ -550,9 +621,45 @@ async def test_cmd_xray_omits_tracked_field_when_not_matched():
 
 # ── Command handlers: team-only gates ─────────────────────────────────────
 
-async def test_import_command_rejects_non_team_members():
+async def test_import_command_without_a_file_opens_the_submission_modal_for_any_citizen():
+    # No file attached is the member-facing path now (/smart-wallets import
+    # with the file left blank) - open to any citizen, not staff-gated.
     result = await main._handle_smart_wallets_import_command(_payload(permissions="0"))
-    assert "team members only" in result["data"]["content"]
+    assert result["type"] == 9  # MODAL
+    assert result["data"]["custom_id"] == "smartwallets_submit"
+
+
+async def test_import_command_with_a_file_still_rejects_non_team_members():
+    payload = _payload(
+        permissions="0",
+        options=[{"name": "import", "options": [{"name": "file", "value": "att1"}]}],
+        resolved={"attachments": {"att1": {"url": "https://example.com/f.csv"}}},
+    )
+    result = await main._handle_smart_wallets_import_command(payload)
+    assert "team members only" in result["data"]["content"].lower()
+
+
+async def test_import_command_with_a_file_still_dispatches_bulk_import_for_staff():
+    dispatched = {}
+
+    async def fake_ack(interaction_id, token, ephemeral=False):
+        pass
+
+    async def fake_dispatch(**kwargs):
+        dispatched["kwargs"] = kwargs
+
+    payload = _payload(
+        permissions="32",
+        options=[{"name": "import", "options": [{"name": "file", "value": "att1"}]}],
+        resolved={"attachments": {"att1": {"url": "https://example.com/f.csv"}}},
+    )
+    with patch.object(main, "_discord_deferred_ack", new=fake_ack), \
+         patch.object(main, "_dispatch_smart_wallets_worker", new=fake_dispatch):
+        result = await main._handle_smart_wallets_import_command(payload)
+
+    assert result == {"type": 5}
+    assert dispatched["kwargs"]["action"] == "import"
+    assert dispatched["kwargs"]["file_url"] == "https://example.com/f.csv"
 
 
 async def test_list_command_rejects_non_team_members():
@@ -565,16 +672,186 @@ async def test_clear_command_rejects_non_team_members():
     assert "team members only" in result["data"]["content"]
 
 
-async def test_import_command_requires_an_attachment():
+async def test_import_command_without_a_file_opens_modal_even_for_staff():
+    # Staff can use the same simple form too - only an ATTACHED file routes
+    # to the bulk-import/team-only path.
     payload = _payload(permissions="32", options=[{"name": "import", "options": []}])
     result = await main._handle_smart_wallets_import_command(payload)
-    assert "No file attached" in result["data"]["content"]
+    assert result["type"] == 9
+    assert result["data"]["custom_id"] == "smartwallets_submit"
 
 
 async def test_handle_smart_wallets_command_routes_by_subcommand():
     payload = _payload(permissions="0", options=[{"name": "list"}])
     result = await main._handle_smart_wallets_command(payload)
     assert "team members only" in result["data"]["content"]  # proves it reached the list handler's own gate
+
+
+# ── Member wallet submissions (the modal /smart-wallets import opens) ────
+
+def _modal_payload(address="0xc0d1ff953a6147556dc0c309509a2b15ea13a68a", tag="Called PVP early", category="Degen", user_id="u1"):
+    return {
+        "id": "int1", "token": "tok1",
+        "member": {"permissions": "0", "user": {"id": user_id, "username": "someone"}},
+        "data": {"custom_id": "smartwallets_submit", "components": [
+            {"type": 1, "components": [{"custom_id": "address", "value": address}]},
+            {"type": 1, "components": [{"custom_id": "tag", "value": tag}]},
+            {"type": 1, "components": [{"custom_id": "category", "value": category}]},
+        ]},
+    }
+
+
+async def test_submit_modal_rejects_a_bad_address():
+    result = await main._handle_smart_wallet_submit_modal(_modal_payload(address="not-a-wallet"))
+    assert "doesn't look like a wallet address" in result["data"]["content"]
+
+
+async def test_submit_modal_rejects_an_unrecognized_category():
+    result = await main._handle_smart_wallet_submit_modal(_modal_payload(category="Legend"))
+    assert "must be one of" in result["data"]["content"]
+
+
+async def test_submit_modal_inserts_pending_row_and_posts_to_the_review_channel():
+    settings.discord_bot_token = "tok"
+    settings.discord_wallet_review_channel_id = "modchan1"
+    inserted = {}
+    posts = []
+    patches = []
+
+    class FakeClient:
+        async def post(self, url, headers=None, json=None):
+            if "smart_wallet_submissions" in url:
+                inserted["body"] = json
+                return FakeRes(200, [{**json, "id": "sub1"}])
+            if "nft_smart_wallets" in url or "nft_wallet_pnl_stats" in url:
+                return FakeRes(200, [])
+            if "/messages" in url:
+                posts.append((url, json))
+                return FakeRes(200, {"id": "msg1"})
+            return FakeRes(200, {})
+
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [])
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            patches.append((url, json))
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        result = await main._handle_smart_wallet_submit_modal(_modal_payload())
+
+    assert result == {"type": 5}
+    assert inserted["body"] == {
+        "address": "0xc0d1ff953a6147556dc0c309509a2b15ea13a68a",
+        "tag": "Called PVP early", "category": "Degen", "submitted_by": "u1",
+    }
+    review_url, review_body = posts[0]
+    assert "modchan1" in review_url
+    assert review_body["components"][0]["components"][0]["custom_id"] == "walletsubmit_approve:sub1"
+    # The submission row gets patched with where the review embed landed,
+    # so the Approve/Reject buttons later know which message to edit.
+    sub_patch = next(j for u, j in patches if "smart_wallet_submissions" in u)
+    assert sub_patch["discord_message_id"] == "msg1"
+
+
+# ── Staff Approve/Reject on a submission ──────────────────────────────────
+
+def _review_button_payload(custom_id, permissions="32", embeds=None):
+    return {
+        "member": {"permissions": permissions, "user": {"id": "staff1", "username": "mod"}},
+        "data": {"custom_id": custom_id},
+        "message": {"embeds": embeds or [{"title": "0xc0d1…3a68", "description": "x"}]},
+    }
+
+
+async def test_review_button_rejects_non_team_members():
+    result = await main._handle_wallet_submission_review_button(
+        _review_button_payload("walletsubmit_approve:sub1", permissions="0"), "sub1", approve=True,
+    )
+    assert "Team members only" in result["data"]["content"]
+
+
+async def test_review_button_approve_writes_to_smart_wallet_tags_and_edits_the_message():
+    patches = []
+    tag_writes = []
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [{
+                "id": "sub1", "address": "0xc0d1ff953a6147556dc0c309509a2b15ea13a68a",
+                "tag": "Called PVP early", "category": "Degen", "status": "pending",
+            }])
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            patches.append((url, json))
+            return FakeRes(200, {})
+
+        async def post(self, url, headers=None, json=None):
+            tag_writes.append((url, json))
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        result = await main._handle_wallet_submission_review_button(
+            _review_button_payload("walletsubmit_approve:sub1"), "sub1", approve=True,
+        )
+
+    assert result["type"] == 7
+    assert "Approved" in result["data"]["embeds"][0]["author"]["name"]
+    assert result["data"]["components"] == []
+    assert result["data"]["embeds"][0]["color"] == main.EMBED_COLOR_GOOD
+    sub_patch = next(j for u, j in patches if "smart_wallet_submissions" in u)
+    assert sub_patch["status"] == "approved"
+    assert sub_patch["reviewed_by"] == "staff1"
+    tags_url, tags_body = tag_writes[0]
+    assert "smart_wallet_tags" in tags_url
+    assert tags_body == {
+        "address": "0xc0d1ff953a6147556dc0c309509a2b15ea13a68a",
+        "tag": "Called PVP early", "category": "Degen", "source": "smart-wallets-submit",
+    }
+
+
+async def test_review_button_reject_does_not_write_to_smart_wallet_tags():
+    tag_writes = []
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [{
+                "id": "sub1", "address": "0xc0d1ff953a6147556dc0c309509a2b15ea13a68a",
+                "tag": "Called PVP early", "category": "Degen", "status": "pending",
+            }])
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            return FakeRes(200, {})
+
+        async def post(self, url, headers=None, json=None):
+            tag_writes.append((url, json))
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        result = await main._handle_wallet_submission_review_button(
+            _review_button_payload("walletsubmit_reject:sub1"), "sub1", approve=False,
+        )
+
+    assert "Rejected" in result["data"]["embeds"][0]["author"]["name"]
+    assert result["data"]["embeds"][0]["color"] == main.EMBED_COLOR_BAD
+    assert tag_writes == []
+
+
+async def test_review_button_guards_against_double_review():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [{"id": "sub1", "status": "approved"}])
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        result = await main._handle_wallet_submission_review_button(
+            _review_button_payload("walletsubmit_approve:sub1"), "sub1", approve=True,
+        )
+
+    assert "already **approved**" in result["data"]["content"].lower()
 
 
 # ── /discord/smart-wallets-worker ─────────────────────────────────────────

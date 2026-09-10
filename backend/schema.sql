@@ -612,3 +612,39 @@ alter table smart_wallet_tags enable row level security;
 -- it's staff-set after the fact via /smart-wallets set-category rather
 -- than required at import time. Nullable and safe to re-run.
 alter table smart_wallet_tags add column if not exists category text;
+
+-- Manually added via staff/community judgment, not through /smart-wallets
+-- import or a /wallet-submit review - a wallet worth tracking from day one.
+insert into smart_wallet_tags (address, tag, category)
+values ('0xc0d1ff953a6147556dc0c309509a2b15ea13a68a', 'Community Add', 'Degen')
+on conflict (address, tag) do update set category = excluded.category;
+
+-- ── Smart Wallet Submissions - member-submitted, staff-reviewed ───────────
+-- The open-to-everyone counterpart to /smart-wallets import above: running
+-- /smart-wallets import with no file attached opens a form any citizen can
+-- fill in (their own rank/credential label and a KOL/Degen/Whale/Sniper
+-- category), but it
+-- lands here as `pending` rather than going straight into smart_wallet_tags
+-- - staff has to actually look at the wallet's on-chain history (the
+-- review embed links every chain's explorer + OpenSea) before approving it
+-- into the list NFT Scope's scoring and the Alert Tracker actually trust.
+-- Approving copies (address, tag, category) into smart_wallet_tags;
+-- rejecting just leaves the record here as a permanent audit trail.
+create table if not exists smart_wallet_submissions (
+  id                  uuid primary key default gen_random_uuid(),
+  address             text not null,  -- lowercased 0x address
+  tag                 text not null,  -- submitter's short rank/credential title
+  category            text not null,  -- KOL | Degen | Whale | Sniper
+  submitted_by        text not null,  -- discord_id
+  status              text not null default 'pending', -- pending | approved | rejected
+  reviewed_by         text,
+  reviewed_at         timestamptz,
+  discord_channel_id  text,
+  discord_message_id  text,  -- the mod-channel review embed, edited in place on approve/reject
+  submitted_at        timestamptz not null default now()
+);
+
+create index if not exists smart_wallet_submissions_status_idx on smart_wallet_submissions (status);
+create index if not exists smart_wallet_submissions_address_idx on smart_wallet_submissions (address);
+
+alter table smart_wallet_submissions enable row level security;

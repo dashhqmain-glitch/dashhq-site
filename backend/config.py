@@ -46,6 +46,15 @@ class Settings(BaseSettings):
     # channel setting here.
     discord_smart_wallet_channel_id: str = "1535188801104908328"
 
+    # Where the member wallet-submission form's review embed (address, proposed tag/category,
+    # per-chain explorer + OpenSea links, self-computed track record if any)
+    # posts for staff to Approve/Reject - deliberately its own setting
+    # rather than reusing discord_ops_alert_channel_id even though they
+    # happen to share a default value, since wallet vetting and CI/deploy
+    # failure alerts are unrelated concerns that shouldn't be forced to
+    # share a channel just because the IDs matched today.
+    discord_wallet_review_channel_id: str = "1074665247266308097"
+
     # /monitor is opt-in and normally DMs subscribers privately. When set,
     # any event a member has /monitor'd also gets posted here publicly
     # with those members @mentioned - visible even if their DMs are closed,
