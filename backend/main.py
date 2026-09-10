@@ -718,6 +718,33 @@ async def test_monitor_channel(request: Request, channel_id: str = Query(None, m
     return {"configured": True, "channel_id": target, "posted": posted}
 
 
+@app.get("/cron/test-smart-wallet-convergence")
+async def test_smart_wallet_convergence(request: Request):
+    # Same "let me actually see it" verification as
+    # /cron/test-monitor-channel above, but for the Smart Wallet
+    # Convergence alert specifically - posts the real
+    # _nft_scope_tracked_convergence_embed output with realistic sample
+    # data, so what shows up in the channel is the actual production
+    # formatting, not a hand-written mockup. Clearly labeled as a test
+    # post in the footer so it can't be mistaken for a genuine signal.
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    sample_collection = {
+        "name": "Sample Collection", "slug": "sample-collection", "floor": 0.42, "symbol": "ETH",
+        "chain": "ethereum", "openseaUrl": "https://opensea.io/collection/sample-collection", "image": None,
+    }
+    sample_hits = [
+        {"address": "0x1111111111111111111111111111111111111a", "tag": "Top 6 REALCOIN", "rank": 6, "pnl": 10.19},
+        {"address": "0x2222222222222222222222222222222222222b", "tag": "Rank 1 RH MACHINES", "rank": 1, "pnl": None},
+    ]
+    embed = _nft_scope_tracked_convergence_embed(sample_collection, sample_hits)
+    embed["footer"] = {"text": f"{embed['footer']['text']} · TEST POST with sample data, not a real signal"}
+    async with httpx.AsyncClient(timeout=10) as client:
+        posted = await _post_channel_message(client, settings.discord_smart_wallet_channel_id, embed)
+    return {"channel_id": settings.discord_smart_wallet_channel_id, "posted": posted}
+
+
 # ── Pidgin AutoMod setup (one-time / re-run-on-change) ──────────────────────
 # English-only enforcement in #general via Discord's native AutoMod - free,
 # no persistent bot connection needed. Everything else in this backend is
