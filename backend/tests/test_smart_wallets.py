@@ -529,7 +529,7 @@ async def test_worker_endpoint_imports_and_reports_a_summary():
         headers = {"X-Internal-Secret": main.settings.cron_secret}
 
         async def json(self):
-            return {"token": "tok1", "file_url": "https://cdn.discordapp.com/attachments/x/y/z.txt"}
+            return {"action": "import", "token": "tok1", "file_url": "https://cdn.discordapp.com/attachments/x/y/z.txt"}
 
     with patch("main.httpx.AsyncClient") as MockClient, \
          patch.object(main, "_discord_followup_patch", new=fake_followup):
@@ -538,3 +538,110 @@ async def test_worker_endpoint_imports_and_reports_a_summary():
 
     assert patched["upserted"] == [{"address": "0xabc000000000000000000000000000000000000a", "tag": "COOL", "rank": None, "pnl": 1.0, "source": "discord-import"}]
     assert "Imported 1 row" in patched["followup"]["content"]
+
+
+async def test_worker_endpoint_list_action_posts_a_followup():
+    class FakeRequest:
+        headers = {"X-Internal-Secret": main.settings.cron_secret}
+
+        async def json(self):
+            return {"action": "list", "token": "tok1"}
+
+    async def fake_list_response():
+        return {"embeds": [{"title": "🏷️ Smart Wallet Tags"}]}
+
+    patched = {}
+
+    async def fake_followup(token, data):
+        patched["token"] = token
+        patched["data"] = data
+
+    with patch.object(main, "_smart_wallets_list_response", new=fake_list_response), \
+         patch.object(main, "_discord_followup_patch", new=fake_followup):
+        await main.discord_smart_wallets_worker(FakeRequest())
+
+    assert patched["token"] == "tok1"
+    assert patched["data"]["embeds"][0]["title"] == "🏷️ Smart Wallet Tags"
+
+
+async def test_worker_endpoint_clear_action_passes_the_tag_through():
+    class FakeRequest:
+        headers = {"X-Internal-Secret": main.settings.cron_secret}
+
+        async def json(self):
+            return {"action": "clear", "token": "tok1", "tag": "REALCOIN"}
+
+    seen = {}
+
+    async def fake_clear_run(tag):
+        seen["tag"] = tag
+        return {"embeds": [{"title": "🗑️ Cleared"}]}
+
+    patched = {}
+
+    async def fake_followup(token, data):
+        patched["data"] = data
+
+    with patch.object(main, "_smart_wallets_clear_run", new=fake_clear_run), \
+         patch.object(main, "_discord_followup_patch", new=fake_followup):
+        await main.discord_smart_wallets_worker(FakeRequest())
+
+    assert seen["tag"] == "REALCOIN"
+    assert patched["data"]["embeds"][0]["title"] == "🗑️ Cleared"
+
+
+async def test_worker_endpoint_unrecognized_action_reports_gracefully():
+    class FakeRequest:
+        headers = {"X-Internal-Secret": main.settings.cron_secret}
+
+        async def json(self):
+            return {"token": "tok1"}  # no action key at all
+
+    patched = {}
+
+    async def fake_followup(token, data):
+        patched["data"] = data
+
+    with patch.object(main, "_discord_followup_patch", new=fake_followup):
+        await main.discord_smart_wallets_worker(FakeRequest())
+
+    assert "Unrecognized" in patched["data"]["content"]
+
+
+# ── /smart-wallets list and clear are now deferred, like import ─────────
+
+async def test_list_command_defers_instead_of_answering_directly():
+    dispatched = {}
+
+    async def fake_ack(interaction_id, token, ephemeral=False):
+        dispatched["acked"] = True
+
+    async def fake_dispatch(**kwargs):
+        dispatched["kwargs"] = kwargs
+
+    with patch.object(main, "_discord_deferred_ack", new=fake_ack), \
+         patch.object(main, "_dispatch_smart_wallets_worker", new=fake_dispatch):
+        result = await main._handle_smart_wallets_list_command(_payload(permissions="32", options=[{"name": "list"}]))
+
+    assert result == {"type": 5}
+    assert dispatched["acked"] is True
+    assert dispatched["kwargs"]["action"] == "list"
+
+
+async def test_clear_command_defers_and_passes_the_tag():
+    dispatched = {}
+
+    async def fake_ack(interaction_id, token, ephemeral=False):
+        pass
+
+    async def fake_dispatch(**kwargs):
+        dispatched["kwargs"] = kwargs
+
+    payload = _payload(permissions="32", options=[{"name": "clear", "options": [{"name": "tag", "value": "REALCOIN"}]}])
+    with patch.object(main, "_discord_deferred_ack", new=fake_ack), \
+         patch.object(main, "_dispatch_smart_wallets_worker", new=fake_dispatch):
+        result = await main._handle_smart_wallets_clear_command(payload)
+
+    assert result == {"type": 5}
+    assert dispatched["kwargs"]["action"] == "clear"
+    assert dispatched["kwargs"]["tag"] == "REALCOIN"

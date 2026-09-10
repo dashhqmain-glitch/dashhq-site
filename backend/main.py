@@ -3299,13 +3299,11 @@ async def _handle_smart_wallets_import_command(payload: dict) -> dict:
     interaction_id = payload.get("id")
     token = payload.get("token")
     await _discord_deferred_ack(interaction_id, token, ephemeral=True)
-    await _dispatch_smart_wallets_worker(token=token, file_url=attachment["url"])
+    await _dispatch_smart_wallets_worker(action="import", token=token, file_url=attachment["url"])
     return {"type": 5}
 
 
-async def _handle_smart_wallets_list_command(payload: dict) -> dict:
-    if not _is_team_member(payload):
-        return {"type": 4, "data": {"content": "This command is for team members only.", "flags": 64}}
+async def _smart_wallets_list_response() -> dict:
     async with httpx.AsyncClient(timeout=15) as client:
         res = await client.get(
             f"{settings.supabase_url}/rest/v1/smart_wallet_tags",
@@ -3316,7 +3314,7 @@ async def _handle_smart_wallets_list_command(payload: dict) -> dict:
         rows = res.json()
     if not rows:
         embed = {"title": "🏷️ Smart Wallet Tags", "description": "Nothing imported yet. Use `/smart-wallets import`.", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
-        return {"embeds": [_clean_embed(embed)], "flags": 64}
+        return {"embeds": [_clean_embed(embed)]}
     tag_counts: dict[str, int] = {}
     addresses = set()
     for r in rows:
@@ -3329,13 +3327,10 @@ async def _handle_smart_wallets_list_command(payload: dict) -> dict:
         "color": EMBED_COLOR,
         "footer": {"text": f"{len(addresses)} distinct wallet(s) across {len(tag_counts)} tag(s) · Last import {rows[0]['imported_at'][:10]}"},
     }
-    return {"embeds": [_clean_embed(embed)], "flags": 64}
+    return {"embeds": [_clean_embed(embed)]}
 
 
-async def _handle_smart_wallets_clear_command(payload: dict) -> dict:
-    if not _is_team_member(payload):
-        return {"type": 4, "data": {"content": "This command is for team members only.", "flags": 64}}
-    tag = (_smart_wallets_sub_options(payload).get("tag") or "").strip()
+async def _smart_wallets_clear_run(tag: str) -> dict:
     filter_params = {"tag": f"eq.{tag}"} if tag else {"address": "not.is.null"}
     async with httpx.AsyncClient(timeout=15) as client:
         count_res = await client.get(
@@ -3347,7 +3342,7 @@ async def _handle_smart_wallets_clear_command(payload: dict) -> dict:
         count = len(count_res.json())
         if count == 0:
             embed = {"title": "Nothing to clear", "description": f'No rows match "{tag}".' if tag else "The table is already empty.", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
-            return {"embeds": [_clean_embed(embed)], "flags": 64}
+            return {"embeds": [_clean_embed(embed)]}
         del_res = await client.delete(
             f"{settings.supabase_url}/rest/v1/smart_wallet_tags",
             headers=_supabase_headers(prefer="return=minimal"),
@@ -3359,7 +3354,29 @@ async def _handle_smart_wallets_clear_command(payload: dict) -> dict:
         "description": f"Removed {count} row(s)" + (f" tagged **{tag}**." if tag else " (everything)."),
         "color": EMBED_COLOR_GOOD, "footer": TOOLKIT_FOOTER,
     }
-    return {"embeds": [_clean_embed(embed)], "flags": 64}
+    return {"embeds": [_clean_embed(embed)]}
+
+
+async def _handle_smart_wallets_list_command(payload: dict) -> dict:
+    if not _is_team_member(payload):
+        return {"type": 4, "data": {"content": "This command is for team members only.", "flags": 64}}
+    # Deferred, not answered directly - same reasoning as /history: a cold
+    # serverless start plus a Supabase round trip can exceed Discord's
+    # 3-second ack window on its own (confirmed live: this exact command
+    # timed out with Discord's own "didn't respond in time" error before
+    # this fix).
+    await _discord_deferred_ack(payload.get("id"), payload.get("token"), ephemeral=True)
+    await _dispatch_smart_wallets_worker(action="list", token=payload.get("token"))
+    return {"type": 5}
+
+
+async def _handle_smart_wallets_clear_command(payload: dict) -> dict:
+    if not _is_team_member(payload):
+        return {"type": 4, "data": {"content": "This command is for team members only.", "flags": 64}}
+    tag = (_smart_wallets_sub_options(payload).get("tag") or "").strip()
+    await _discord_deferred_ack(payload.get("id"), payload.get("token"), ephemeral=True)
+    await _dispatch_smart_wallets_worker(action="clear", token=payload.get("token"), tag=tag)
+    return {"type": 5}
 
 
 async def _handle_smart_wallets_command(payload: dict) -> dict:
@@ -3374,42 +3391,56 @@ async def _handle_smart_wallets_command(payload: dict) -> dict:
     return {"type": 4, "data": {"content": "Unknown subcommand.", "flags": 64}}
 
 
+async def _smart_wallets_import_run(token: str, file_url: str) -> None:
+    async with httpx.AsyncClient(timeout=30) as client:
+        file_res = await client.get(file_url)
+        file_res.raise_for_status()
+        rows, skipped = _parse_smart_wallet_import(file_res.text)
+        if not rows:
+            await _discord_followup_patch(token, {"content": f"Nothing parsable in that file ({skipped} line(s) skipped)."})
+            return
+        distinct_addresses = {r["address"] for r in rows}
+        distinct_tags = {r["tag"] for r in rows}
+        for i in range(0, len(rows), 500):  # Supabase/PostgREST-friendly batch size
+            chunk = [{**r, "source": "discord-import"} for r in rows[i:i + 500]]
+            res = await client.post(
+                f"{settings.supabase_url}/rest/v1/smart_wallet_tags",
+                headers=_supabase_headers(prefer="resolution=merge-duplicates,return=minimal"),
+                json=chunk,
+            )
+            res.raise_for_status()
+        summary = f"✅ Imported {len(rows)} row(s) across {len(distinct_tags)} tag(s) for {len(distinct_addresses)} distinct wallet(s)."
+        if skipped:
+            summary += f" ⚠️ {skipped} line(s) couldn't be parsed and were skipped."
+        await _discord_followup_patch(token, {"content": summary})
+
+
 @app.post("/discord/smart-wallets-worker")
 async def discord_smart_wallets_worker(request: Request):
     # Not reachable from Discord directly - same internal-secret gate as
-    # /discord/history-worker, and exists for the same reason: this does
-    # real network + parsing work an interaction's 3-second window can't
-    # reliably absorb.
+    # /discord/history-worker, and exists for the same reason: none of
+    # these three actions can reliably fit inside an interaction's
+    # 3-second ack window on a cold serverless start, even the "just a
+    # read" ones - list/clear moved to this same worker after confirming
+    # /smart-wallets list alone hit Discord's own timeout in production.
     if request.headers.get("X-Internal-Secret") != settings.cron_secret:
         raise HTTPException(status_code=401, detail="unauthorized")
     body = await request.json()
+    action = body.get("action")
     token = body.get("token")
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            file_res = await client.get(body["file_url"])
-            file_res.raise_for_status()
-            rows, skipped = _parse_smart_wallet_import(file_res.text)
-            if not rows:
-                await _discord_followup_patch(token, {"content": f"Nothing parsable in that file ({skipped} line(s) skipped)."})
-                return {"ok": True}
-            distinct_addresses = {r["address"] for r in rows}
-            distinct_tags = {r["tag"] for r in rows}
-            for i in range(0, len(rows), 500):  # Supabase/PostgREST-friendly batch size
-                chunk = [{**r, "source": "discord-import"} for r in rows[i:i + 500]]
-                res = await client.post(
-                    f"{settings.supabase_url}/rest/v1/smart_wallet_tags",
-                    headers=_supabase_headers(prefer="resolution=merge-duplicates,return=minimal"),
-                    json=chunk,
-                )
-                res.raise_for_status()
-            summary = f"✅ Imported {len(rows)} row(s) across {len(distinct_tags)} tag(s) for {len(distinct_addresses)} distinct wallet(s)."
-            if skipped:
-                summary += f" ⚠️ {skipped} line(s) couldn't be parsed and were skipped."
-            await _discord_followup_patch(token, {"content": summary})
+        if action == "import":
+            await _smart_wallets_import_run(token, body["file_url"])
+        elif action == "list":
+            await _discord_followup_patch(token, await _smart_wallets_list_response())
+        elif action == "clear":
+            await _discord_followup_patch(token, await _smart_wallets_clear_run(body.get("tag") or ""))
+        else:
+            await _discord_followup_patch(token, {"content": "Unrecognized request."})
     except Exception:
-        logger.exception("smart-wallets import worker failed")
+        logger.exception("smart-wallets worker failed for action %s", action)
         if token:
-            await _discord_followup_patch(token, {"content": "Something went wrong importing that file."})
+            await _discord_followup_patch(token, {"content": "Something went wrong. Please try again."})
     return {"ok": True}
 
 
