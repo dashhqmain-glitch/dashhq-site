@@ -396,6 +396,91 @@ def test_convergence_embed_caps_wallet_rows_and_notes_the_overflow():
     assert "+5 more" in embed["description"]
 
 
+def test_convergence_embed_shows_an_estimated_category_prefixed_with_tilde():
+    hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": None}]
+    embed = main._nft_scope_tracked_convergence_embed(_fake_collection(), hits, estimated={"0xa": "Whale"})
+    assert "`~Whale`" in embed["description"]
+    assert "`Tracked`" not in embed["description"]
+
+
+def test_convergence_embed_confirmed_category_wins_over_an_estimate():
+    hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": "KOL"}]
+    embed = main._nft_scope_tracked_convergence_embed(_fake_collection(), hits, estimated={"0xa": "Whale"})
+    assert "`KOL`" in embed["description"]
+    assert "~Whale" not in embed["description"]
+
+
+# ── _estimate_wallet_categories ───────────────────────────────────────────
+
+async def test_estimate_categories_returns_empty_for_no_addresses():
+    assert await main._estimate_wallet_categories(main.httpx.AsyncClient(), []) == {}
+
+
+async def test_estimate_categories_needs_a_minimum_sample():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "nft_sale_events_log" in url and "buyer" in (params or {}):
+                return FakeRes(200, [{"buyer": "0xa", "slug": "s1", "price": 5.0, "event_at": "2026-01-01T00:00:00Z"}])
+            return FakeRes(200, [])
+
+    result = await main._estimate_wallet_categories(FakeClient(), ["0xa"])
+    assert result == {}  # only 1 observed buy - not enough to estimate anything
+
+
+async def test_estimate_categories_classifies_a_whale_by_volume():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "buyer" in (params or {}):
+                return FakeRes(200, [
+                    {"buyer": "0xa", "slug": "s1", "price": 1.5, "event_at": "2026-01-01T00:00:00Z"},
+                    {"buyer": "0xa", "slug": "s2", "price": 1.0, "event_at": "2026-01-02T00:00:00Z"},
+                ])
+            return FakeRes(200, [
+                {"slug": "s1", "event_at": "2026-01-01T00:00:00Z"},
+                {"slug": "s2", "event_at": "2026-01-02T00:00:00Z"},
+            ])
+
+    result = await main._estimate_wallet_categories(FakeClient(), ["0xa"])
+    assert result == {"0xa": "Whale"}  # 2.5 ETH total, over the whale threshold
+
+
+async def test_estimate_categories_classifies_a_sniper_by_early_entry_timing():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "buyer" in (params or {}):
+                return FakeRes(200, [
+                    {"buyer": "0xa", "slug": "s1", "price": None, "event_at": "2026-01-01T00:00:30Z"},
+                    {"buyer": "0xa", "slug": "s2", "price": None, "event_at": "2026-01-02T00:01:00Z"},
+                ])
+            # Every buyer's earliest recorded event per slug - 0xa bought
+            # within a minute of each, well inside the 10-minute window.
+            return FakeRes(200, [
+                {"slug": "s1", "event_at": "2026-01-01T00:00:00Z"},
+                {"slug": "s1", "event_at": "2026-01-01T00:15:00Z"},
+                {"slug": "s2", "event_at": "2026-01-02T00:00:00Z"},
+            ])
+
+    result = await main._estimate_wallet_categories(FakeClient(), ["0xa"])
+    assert result == {"0xa": "Sniper"}
+
+
+async def test_estimate_categories_classifies_a_degen_by_distinct_collection_count():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "buyer" in (params or {}):
+                return FakeRes(200, [
+                    {"buyer": "0xa", "slug": f"s{i}", "price": None, "event_at": "2026-01-01T00:00:00Z"}
+                    for i in range(4)
+                ])
+            # No early-entry signal (buys land hours after each slug's
+            # earliest logged event) and no price data, so this can only
+            # resolve via the distinct-collection-count path.
+            return FakeRes(200, [{"slug": f"s{i}", "event_at": "2025-01-01T00:00:00Z"} for i in range(4)])
+
+    result = await main._estimate_wallet_categories(FakeClient(), ["0xa"])
+    assert result == {"0xa": "Degen"}
+
+
 def test_convergence_components_link_to_opensea():
     components = main._nft_scope_tracked_convergence_components(_fake_collection())
     button = components[0]["components"][0]

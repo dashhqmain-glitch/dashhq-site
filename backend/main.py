@@ -749,7 +749,7 @@ async def test_smart_wallet_convergence(request: Request):
 
 
 @app.get("/cron/post-latest-tracked-mint")
-async def post_latest_tracked_mint(request: Request):
+async def post_latest_tracked_mint(request: Request, ping: bool = False):
     # The REAL-data companion to /cron/test-smart-wallet-convergence above
     # (that one always uses hand-picked sample data, on purpose - this one
     # doesn't). Finds whichever collection a currently-tracked
@@ -807,17 +807,28 @@ async def post_latest_tracked_mint(request: Request):
         all_buyers = sorted({row["buyer"] for row in buyers_res.json()})
 
         hits = await _nft_scope_tracked_wallet_hits(client, {"buyer_addresses": all_buyers})
+        estimated = await _estimate_wallet_categories(client, [h["address"] for h in hits if not h.get("category")])
         c = await _nft_collection_core(slug)
-        embed = _nft_scope_tracked_convergence_embed(c, hits)
+        embed = _nft_scope_tracked_convergence_embed(c, hits, estimated)
         embed["footer"] = {"text": f"{embed['footer']['text']} · Manually triggered preview with REAL data, not a live alert"}
+        # Silent by default - a manual preview call shouldn't ping anyone
+        # every time someone wants to eyeball the embed. ?ping=true opts
+        # into the same role-mention content the live pipeline sends, to
+        # actually verify the ping itself works without waiting for a
+        # genuine scan-detected convergence.
+        role_content = f"<@&{settings.discord_minting_now_role_id}> 🌱 **Minting now**" if (ping and settings.discord_minting_now_role_id) else None
         posted = await _post_channel_message(
             client, settings.discord_smart_wallet_channel_id, embed,
+            content=role_content,
             components=_nft_scope_tracked_convergence_components(c),
         )
     return {
         "posted": posted, "slug": slug, "tracked_wallets_in_this_mint": len(hits),
         "channel_id": settings.discord_smart_wallet_channel_id,
-        "hits": [{"address": h["address"], "tag": h["tag"], "category": h.get("category")} for h in hits],
+        "hits": [
+            {"address": h["address"], "tag": h["tag"], "category": h.get("category"), "estimated_category": estimated.get(h["address"])}
+            for h in hits
+        ],
     }
 
 
@@ -7588,7 +7599,99 @@ def _nft_scope_tracked_convergence_wallet_rows(tracked_hits: list[dict]) -> dict
     return by_address
 
 
-def _nft_scope_tracked_convergence_embed(c: dict, tracked_hits: list[dict]) -> dict:
+# ── Heuristic category estimate for wallets staff never classified ──────
+# Most bulk-imported wallets only ever get a tag/rank, never a real
+# KOL/Whale/Degen/Sniper category (that's a separate manual
+# /smart-wallets set-category step) - showing nothing but a generic
+# "Tracked" badge for every one of them defeated the point of the alert
+# (knowing what KIND of wallet is converging on a mint). This estimates
+# one from data the bot has actually observed (nft_sale_events_log), not
+# a new external integration - inherently partial (only what's been
+# logged since this bot started watching a wallet, not its whole real
+# history), which is exactly why the embed prefixes an estimate with "~"
+# rather than showing it identically to a staff-confirmed category.
+# Can't estimate KOL at all - that's an identity claim, not something
+# derivable from on-chain behavior.
+_ESTIMATE_WHALE_VOLUME_ETH = 2.0  # total observed spend across logged buys
+_ESTIMATE_DEGEN_MIN_SLUGS = 4  # distinct collections touched in observed history
+_ESTIMATE_SNIPER_EARLY_WINDOW_SECONDS = 600  # "early" = within 10 min of the earliest buy logged for that slug
+_ESTIMATE_SNIPER_MIN_RATIO = 0.5
+_ESTIMATE_MIN_SAMPLE = 2  # at least 2 observed buys before estimating anything - one data point proves nothing
+
+
+def _parse_event_at(ts: str) -> float:
+    return datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp()
+
+
+async def _estimate_wallet_categories(client: httpx.AsyncClient, addresses: list[str]) -> dict[str, str]:
+    if not addresses:
+        return {}
+    try:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/nft_sale_events_log",
+            headers=_supabase_headers(),
+            params={"buyer": f"in.({','.join(addresses)})", "select": "buyer,slug,price,event_at", "limit": "2000"},
+        )
+        res.raise_for_status()
+        rows = res.json()
+    except httpx.HTTPError:
+        return {}
+    if not rows:
+        return {}
+
+    by_wallet: dict[str, list[dict]] = {}
+    all_slugs: set[str] = set()
+    for r in rows:
+        by_wallet.setdefault(r["buyer"], []).append(r)
+        all_slugs.add(r["slug"])
+
+    earliest_per_slug: dict[str, float] = {}
+    try:
+        slug_res = await client.get(
+            f"{settings.supabase_url}/rest/v1/nft_sale_events_log",
+            headers=_supabase_headers(),
+            params={"slug": f"in.({','.join(all_slugs)})", "select": "slug,event_at", "limit": "5000"},
+        )
+        slug_res.raise_for_status()
+        for r in slug_res.json():
+            try:
+                ts = _parse_event_at(r["event_at"])
+            except (ValueError, KeyError):
+                continue
+            if r["slug"] not in earliest_per_slug or ts < earliest_per_slug[r["slug"]]:
+                earliest_per_slug[r["slug"]] = ts
+    except httpx.HTTPError:
+        pass
+
+    estimates: dict[str, str] = {}
+    for addr, buys in by_wallet.items():
+        if len(buys) < _ESTIMATE_MIN_SAMPLE:
+            continue
+        volume = sum(b["price"] for b in buys if b.get("price"))
+        distinct_slugs = {b["slug"] for b in buys}
+        early_count = timed = 0
+        for b in buys:
+            earliest = earliest_per_slug.get(b["slug"])
+            if earliest is None:
+                continue
+            try:
+                ts = _parse_event_at(b["event_at"])
+            except (ValueError, KeyError):
+                continue
+            timed += 1
+            if ts - earliest <= _ESTIMATE_SNIPER_EARLY_WINDOW_SECONDS:
+                early_count += 1
+
+        if volume >= _ESTIMATE_WHALE_VOLUME_ETH:
+            estimates[addr] = "Whale"
+        elif timed >= _ESTIMATE_MIN_SAMPLE and (early_count / timed) >= _ESTIMATE_SNIPER_MIN_RATIO:
+            estimates[addr] = "Sniper"
+        elif len(distinct_slugs) >= _ESTIMATE_DEGEN_MIN_SLUGS:
+            estimates[addr] = "Degen"
+    return estimates
+
+
+def _nft_scope_tracked_convergence_embed(c: dict, tracked_hits: list[dict], estimated: dict[str, str] | None = None) -> dict:
     # A category badge and a shortened linked address, one line per
     # wallet - this list is externally curated, not proprietary internal
     # scoring, so naming which wallet matched (and letting staff click
@@ -7599,18 +7702,19 @@ def _nft_scope_tracked_convergence_embed(c: dict, tracked_hits: list[dict]) -> d
     # actually minting right now (that's the embed's title), and showing
     # it read as if it were somehow about THIS mint.
     by_address = _nft_scope_tracked_convergence_wallet_rows(tracked_hits)
+    estimated = estimated or {}
     lines = []
     for addr, info in list(by_address.items())[:_SWT_CONVERGENCE_MAX_WALLET_ROWS]:
         short = f"{addr[:6]}…{addr[-4:]}"
-        # Always show a badge, never a blank - most real bulk-imported
-        # wallets never get a category set (rank/tag come from the import
-        # itself; category is a separate manual /smart-wallets
-        # set-category step), and the alert reading as if only SOME
-        # wallets carry a badge looked like a rendering bug rather than
-        # what it actually was: missing staff classification data.
-        # "Tracked" is honest either way - it doesn't claim a specific
-        # type this bot has no real basis for.
-        badge = f"`{info['category'] or 'Tracked'}` "
+        # Priority: staff-confirmed category, then a heuristic estimate
+        # (prefixed "~" so it never reads as confirmed), then the
+        # generic fallback when there's simply not enough signal either way.
+        if info["category"]:
+            badge = f"`{info['category']}` "
+        elif estimated.get(addr):
+            badge = f"`~{estimated[addr]}` "
+        else:
+            badge = "`Tracked` "
         lines.append(f"{badge}[{short}](https://opensea.io/{addr})")
     if len(by_address) > _SWT_CONVERGENCE_MAX_WALLET_ROWS:
         lines.append(f"+{len(by_address) - _SWT_CONVERGENCE_MAX_WALLET_ROWS} more")
@@ -7645,9 +7749,11 @@ async def _nft_scope_maybe_post_tracked_convergence(client: httpx.AsyncClient, s
     if not await _nft_scope_clears_wash_check(client, slug):
         return False
     ping = f"<@&{settings.discord_minting_now_role_id}> 🌱 **Minting now**" if settings.discord_minting_now_role_id else None
+    uncategorized = [h["address"] for h in tracked_wallet_hits if not h.get("category")]
+    estimated = await _estimate_wallet_categories(client, uncategorized)
     delivered = await _post_channel_message(
         client, settings.discord_smart_wallet_channel_id,
-        _nft_scope_tracked_convergence_embed(c, tracked_wallet_hits),
+        _nft_scope_tracked_convergence_embed(c, tracked_wallet_hits, estimated),
         content=ping,
         components=_nft_scope_tracked_convergence_components(c),
     )
