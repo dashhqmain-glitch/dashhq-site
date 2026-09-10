@@ -172,19 +172,22 @@ COMMANDS = [
     },
     {
         "name": "smart-wallets",
-        "description": "Manage the curated smart-wallet tracker list",
-        # No default_member_permissions here anymore - list/clear/set-category
-        # stay staff-only via their own _is_team_member checks, but `import`
-        # without an attached file is the open-to-everyone wallet submission
-        # form, so the top-level command itself has to be visible to citizens.
+        "description": "Team only: manage the curated smart-wallet tracker list",
+        # Fully staff-only again, hidden from regular members' Discord UI
+        # entirely (same as /history, /pidgin-exempt) - the member-facing
+        # path lives on the separate /wallet-submit command instead, so
+        # members never see this command's staff subcommands
+        # (list/clear/set-category) cluttering their autocomplete just
+        # because part of this command used to need to be visible to them.
+        "default_member_permissions": "32",
         "options": [
             {
                 "name": "import",
-                "description": "Team: import a tracker file. Everyone else: leave file blank to submit wallet(s) for review",
+                "description": "Import a wallet tracker file (GMGN-style export or Notion export, combined into one file)",
                 "type": 1,
-                "options": [{"name": "file", "description": "Team only - bulk tracker file (GMGN-style or Notion export). Leave blank to get the submission form instead", "type": 11, "required": False}],
+                "options": [{"name": "file", "description": "The tracker file to import", "type": 11, "required": True}],
             },
-            {"name": "list", "description": "Team only: show what's currently tracked", "type": 1},
+            {"name": "list", "description": "Show what's currently tracked", "type": 1},
             {
                 "name": "clear", "description": "Team only: remove one tag's wallets, or everything if left blank", "type": 1,
                 "options": [{"name": "tag", "description": "Tag to remove (omit to clear everything)", "type": 3, "required": False}],
@@ -198,6 +201,14 @@ COMMANDS = [
             },
             {"name": "leaderboard", "description": "Team only: see who's submitted the most approved wallets", "type": 1},
         ],
+    },
+    {
+        "name": "wallet-submit",
+        "description": "Propose one or several wallets for the tracked smart-wallet list - staff reviews each",
+        # Deliberately no options at all - opens straight to a modal
+        # (address/tag/category, paste one wallet or several) with nothing
+        # to fill in on the command itself first, same shape as ACO's own
+        # "Submit Wallet(s)" modal.
     },
     {
         "name": "history",

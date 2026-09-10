@@ -887,25 +887,18 @@ async def test_cmd_xray_omits_tracked_field_when_not_matched():
 
 # ── Command handlers: team-only gates ─────────────────────────────────────
 
-async def test_import_command_without_a_file_opens_the_submission_modal_for_any_citizen():
-    # No file attached is the member-facing path now (/smart-wallets import
-    # with the file left blank) - open to any citizen, not staff-gated.
+async def test_import_command_rejects_non_team_members():
     result = await main._handle_smart_wallets_import_command(_payload(permissions="0"))
-    assert result["type"] == 9  # MODAL
-    assert result["data"]["custom_id"] == "smartwallets_submit"
+    assert "team members only" in result["data"]["content"]
 
 
-async def test_import_command_with_a_file_still_rejects_non_team_members():
-    payload = _payload(
-        permissions="0",
-        options=[{"name": "import", "options": [{"name": "file", "value": "att1"}]}],
-        resolved={"attachments": {"att1": {"url": "https://example.com/f.csv"}}},
-    )
+async def test_import_command_requires_an_attachment():
+    payload = _payload(permissions="32", options=[{"name": "import", "options": []}])
     result = await main._handle_smart_wallets_import_command(payload)
-    assert "team members only" in result["data"]["content"].lower()
+    assert "No file attached" in result["data"]["content"]
 
 
-async def test_import_command_with_a_file_still_dispatches_bulk_import_for_staff():
+async def test_import_command_dispatches_bulk_import_for_staff():
     dispatched = {}
 
     async def fake_ack(interaction_id, token, ephemeral=False):
@@ -938,12 +931,17 @@ async def test_clear_command_rejects_non_team_members():
     assert "team members only" in result["data"]["content"]
 
 
-async def test_import_command_without_a_file_opens_modal_even_for_staff():
-    # Staff can use the same simple form too - only an ATTACHED file routes
-    # to the bulk-import/team-only path.
-    payload = _payload(permissions="32", options=[{"name": "import", "options": []}])
-    result = await main._handle_smart_wallets_import_command(payload)
-    assert result["type"] == 9
+# ── /wallet-submit - the dedicated, always-visible member command ────────
+
+async def test_wallet_submit_command_rejects_non_citizens():
+    with patch.object(main, "_is_citizen", return_value=False):
+        result = await main._handle_wallet_submit_command(_payload(permissions="0"))
+    assert "reserved for verified Dash HQ citizens" in result["data"]["content"]
+
+
+async def test_wallet_submit_command_opens_the_modal_directly():
+    result = await main._handle_wallet_submit_command(_payload(permissions="0"))
+    assert result["type"] == 9  # MODAL
     assert result["data"]["custom_id"] == "smartwallets_submit"
 
 

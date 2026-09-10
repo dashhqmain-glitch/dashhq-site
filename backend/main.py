@@ -1521,6 +1521,8 @@ async def _dispatch_interaction(payload: dict, itype) -> dict:
             return await _handle_aco_info_command(payload)
         if cmd_name == "smart-wallets":
             return await _handle_smart_wallets_command(payload)
+        if cmd_name == "wallet-submit":
+            return await _handle_wallet_submit_command(payload)
         return await _handle_toolkit_command(payload)
 
     if itype == 4:  # APPLICATION_COMMAND_AUTOCOMPLETE
@@ -3574,22 +3576,14 @@ def _smart_wallets_sub_options(payload: dict) -> dict:
 
 
 async def _handle_smart_wallets_import_command(payload: dict) -> dict:
+    if not _is_team_member(payload):
+        return {"type": 4, "data": {"content": "This command is for team members only.", "flags": 64}}
     opts = _smart_wallets_sub_options(payload)
     attachment_id = opts.get("file")
     attachments = ((payload.get("data") or {}).get("resolved") or {}).get("attachments") or {}
     attachment = attachments.get(attachment_id) if attachment_id else None
-
-    # No file attached - `file` is optional specifically so this same
-    # subcommand doubles as the member-facing entry point: any citizen can
-    # add one wallet themselves via a form instead of needing a staff-only
-    # bulk export. Staff still gets bulk import below when they DO attach one.
     if not attachment or not attachment.get("url"):
-        if not _is_citizen(payload):
-            return {"type": 4, "data": {"content": "This command is reserved for verified Dash HQ citizens.", "flags": 64}}
-        return _smart_wallet_submit_modal()
-
-    if not _is_team_member(payload):
-        return {"type": 4, "data": {"content": "Bulk import is for team members only - leave `file` blank to submit a single wallet for review instead.", "flags": 64}}
+        return {"type": 4, "data": {"content": "No file attached.", "flags": 64}}
 
     interaction_id = payload.get("id")
     token = payload.get("token")
@@ -4020,12 +4014,17 @@ def _parse_smart_wallet_addresses(raw: str) -> tuple[list[str], list[str]]:
 
 
 def _smart_wallet_submit_modal() -> dict:
-    # One unified modal for both a single wallet and a small batch - no
-    # separate "file import" path for members anymore (that's still
-    # available to staff via /smart-wallets import <file>, unchanged, for
-    # genuinely large exports). Discord modals only support text-input
-    # components (no select/choice widgets), so category is free text
-    # here, validated server-side against _WALLET_SUBMIT_CATEGORIES.
+    # One unified modal for both a single wallet and a small batch, opened
+    # directly by /wallet-submit with no options to fill in first (same
+    # "button/command -> modal, nothing else to navigate" shape as ACO's
+    # own wallet-submission modal) - kept as a completely separate command
+    # from /smart-wallets specifically so regular members never see that
+    # command's staff subcommands (list/clear/set-category) cluttering
+    # their autocomplete just because /smart-wallets has to be visible to
+    # them for something. Staff bulk import stays on /smart-wallets import
+    # <file>, fully hidden from members again. Discord modals only support
+    # text-input components (no select/choice widgets), so category is
+    # free text here, validated server-side against _WALLET_SUBMIT_CATEGORIES.
     return {
         "type": 9,
         "data": {
@@ -4047,6 +4046,12 @@ def _smart_wallet_submit_modal() -> dict:
             ],
         },
     }
+
+
+async def _handle_wallet_submit_command(payload: dict) -> dict:
+    if not _is_citizen(payload):
+        return {"type": 4, "data": {"content": "This command is reserved for verified Dash HQ citizens.", "flags": 64}}
+    return _smart_wallet_submit_modal()
 
 
 async def _handle_smart_wallet_submit_modal(payload: dict) -> dict:
@@ -9896,11 +9901,11 @@ TOOLKIT_TOOLS = {
         "usage": "/my-aco · /aco-info",
         "example": "/my-aco",
     },
-    "smart-wallets": {
+    "wallet-submit": {
         "emoji": "🕵️", "label": "Submit A Smart Wallet",
         "short": "Propose one or several wallets for the tracked smart-wallet list - opens a short form, staff reviews each before it counts toward any alert",
-        "usage": "/smart-wallets import (leave the file blank to get the submission form)",
-        "example": "/smart-wallets import",
+        "usage": "/wallet-submit",
+        "example": "/wallet-submit",
     },
 }
 
