@@ -463,6 +463,7 @@ async def test_maybe_post_convergence_posts_and_marks_shared_cooldown():
     async def fake_post(client, channel_id, embed, content=None, components=None):
         calls["channel_id"] = channel_id
         calls["components"] = components
+        calls["content"] = content
         return True
 
     async def fake_mark_posted(client, slug, value):
@@ -482,9 +483,41 @@ async def test_maybe_post_convergence_posts_and_marks_shared_cooldown():
     assert calls["channel_id"] == main.settings.discord_smart_wallet_channel_id
     assert calls["components"][0]["components"][0]["url"] == _fake_collection()["openseaUrl"]
     assert calls["marked_posted"][0] == "test-slug"
+    assert calls["content"] is None  # no role configured by default - no ping
     recorded_slug, recorded_floor, recorded_rapid = calls["recorded_buyers"]
     assert recorded_slug == "test-slug"
     assert set(recorded_rapid["buyer_addresses"]) == {"0xa", "0xb"}
+
+
+async def test_maybe_post_convergence_pings_the_minting_now_role_when_configured():
+    hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None}, {"address": "0xb", "tag": "T2", "rank": None, "pnl": None}]
+    calls = {}
+    settings.discord_minting_now_role_id = "role999"
+
+    async def fake_recently_posted(client, slug):
+        return False
+
+    async def fake_clears_wash(client, slug):
+        return True
+
+    async def fake_post(client, channel_id, embed, content=None, components=None):
+        calls["content"] = content
+        return True
+
+    async def noop(*a, **k):
+        pass
+
+    try:
+        with patch.object(main, "_nft_scope_recently_posted", new=fake_recently_posted), \
+             patch.object(main, "_nft_scope_clears_wash_check", new=fake_clears_wash), \
+             patch.object(main, "_post_channel_message", new=fake_post), \
+             patch.object(main, "_nft_scope_mark_posted", new=noop), \
+             patch.object(main, "_nft_scope_record_call_buyers", new=noop):
+            await main._nft_scope_maybe_post_tracked_convergence(main.httpx.AsyncClient(), "test-slug", _fake_collection(), hits)
+    finally:
+        settings.discord_minting_now_role_id = ""
+
+    assert calls["content"] == "<@&role999> 🌱 **Minting now**"
 
 
 # ── Co-minter auto-discovery ──────────────────────────────────────────────
