@@ -79,6 +79,33 @@ def test_notion_block_missing_tag_line_is_skipped():
     assert skipped == 1
 
 
+def test_mixed_notion_blocks_and_tsv_rows_in_one_file_both_parse():
+    # Real bug, confirmed live: the parser used to branch ONCE on "does a
+    # Notion header appear anywhere in the file," so a file starting with
+    # Notion blocks and ending with pasted TSV rows silently dropped every
+    # TSV row - only the Notion wallets survived. A real staff upload
+    # combines sources exactly like this.
+    text = (
+        "# 0xabc000000000000000000000000000000000000a\n"
+        "Explorer: https://example.com/a\n"
+        "Rank: 1\n"
+        "Tag: RH MACHINES\n"
+        "\n"
+        "# 0xdef000000000000000000000000000000000000b\n"
+        "Rank: 2\n"
+        "Tag: RH MACHINES\n"
+        "\n"
+        "0xfcc6899d35ef5682899378a01fd1de9111f2a394\tEarly REALCOIN @$139k\t10.19\tREALCOIN\n"
+    )
+    rows, skipped = main._parse_smart_wallet_import(text)
+    assert skipped == 0
+    addresses_and_tags = {(r["address"], r["tag"]) for r in rows}
+    assert ("0xabc000000000000000000000000000000000000a", "RH MACHINES") in addresses_and_tags
+    assert ("0xdef000000000000000000000000000000000000b", "RH MACHINES") in addresses_and_tags
+    assert ("0xfcc6899d35ef5682899378a01fd1de9111f2a394", "REALCOIN") in addresses_and_tags
+    assert len(rows) == 3
+
+
 # ── _parse_smart_wallet_import: TSV with explicit comma tag list ────────
 
 def test_parses_tsv_with_explicit_tag_list():

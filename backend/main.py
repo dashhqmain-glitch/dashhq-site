@@ -3133,8 +3133,6 @@ async def discord_history_worker(request: Request):
 # NFT Scope's own rapid-activity check already fetches.
 _SWT_ADDR_RE = re.compile(r"0x[a-fA-F0-9]{40}")
 _SWT_NOTION_HEADER_RE = re.compile(r"^#\s*(0x[a-fA-F0-9]{40})", re.IGNORECASE)
-_SWT_NOTION_RANK_RE = re.compile(r"^Rank:\s*(-?\d+)", re.IGNORECASE | re.MULTILINE)
-_SWT_NOTION_TAG_RE = re.compile(r"^Tag:\s*(.+)$", re.IGNORECASE | re.MULTILINE)
 _SWT_LABEL_SEGMENT_RE = re.compile(r"\s*[•|]\s*")
 # Order matters - first match wins. Covers every credential shape actually
 # seen in real scraped trackers: "Top N TAG", "Early TAG @$Xk", "Sniper
@@ -3171,38 +3169,21 @@ def _swt_extract_tags_from_label(label: str) -> list[tuple[str, int | None]]:
     return out
 
 
-def _parse_smart_wallet_import(text: str) -> tuple[list[dict], int]:
-    # Auto-detects whichever of the two real source shapes staff throws at
-    # this: a Notion wallet-page export (one "# 0x..." block per wallet
-    # with Rank:/Tag: lines - staff concatenates the exported .md files
-    # into one upload, e.g. `Get-Content *.md > combined.txt`), or a
-    # tab-separated leaderboard row in either of its two real flavors
-    # (an explicit comma-separated tag list, or a composite credential
-    # label plus a trailing profile URL). Returns (rows, skipped_count) -
-    # every address lowercased, never raises on a malformed line.
+_SWT_NOTION_FIELD_RE = re.compile(r"^(Explorer|OpenSea|Rank|Tag):\s*(.*)$", re.IGNORECASE)
+
+
+def _parse_smart_wallet_tsv_lines(lines: list[str]) -> tuple[list[dict], int]:
+    # The leaderboard-row half of the parser: a tab-separated row in any
+    # of the three real flavors seen in practice - an explicit comma-
+    # separated tag list, a composite credential label plus a trailing
+    # profile URL, or "rank, address, explorer_url, opensea_url,
+    # project_name" (rank leading, tag trailing). Operates on a plain
+    # line list (not raw text) so it can be handed either the whole file
+    # or just the leftover lines _parse_smart_wallet_import didn't
+    # consume as a Notion block.
     rows: list[dict] = []
     skipped = 0
-
-    if _SWT_NOTION_HEADER_RE.search(text):
-        blocks = re.split(r"(?=^#\s*0x[a-fA-F0-9]{40})", text, flags=re.IGNORECASE | re.MULTILINE)
-        for block in blocks:
-            header = _SWT_NOTION_HEADER_RE.match(block.strip())
-            if not header:
-                continue
-            address = header.group(1).lower()
-            tag_match = _SWT_NOTION_TAG_RE.search(block)
-            if not tag_match:
-                skipped += 1
-                continue
-            rank_match = _SWT_NOTION_RANK_RE.search(block)
-            rank = int(rank_match.group(1)) if rank_match else None
-            for tag in _SWT_LABEL_SEGMENT_RE.split(tag_match.group(1).strip()):
-                tag = tag.strip()
-                if tag:
-                    rows.append({"address": address, "tag": tag, "rank": rank, "pnl": None})
-        return rows, skipped
-
-    for line in text.splitlines():
+    for line in lines:
         line = line.strip()
         if not line:
             continue
@@ -3214,11 +3195,6 @@ def _parse_smart_wallet_import(text: str) -> tuple[list[dict], int]:
             continue
         fields = [f.strip() for f in fields]
 
-        # A 5th real-world shape: "rank, address, explorer_url, opensea_url,
-        # project_name" (rank leads, tag trails, two URL columns in the
-        # middle carry no signal this bot needs). Detected by rank being
-        # numeric and the SECOND field being the address, rather than the
-        # first - every other shape above puts the address first.
         if len(fields) >= 5 and fields[0].lstrip("-").isdigit() and _SWT_ADDR_RE.fullmatch(fields[1]):
             address = fields[1].lower()
             tag = fields[-1]
@@ -3246,6 +3222,65 @@ def _parse_smart_wallet_import(text: str) -> tuple[list[dict], int]:
                 tag = tag.strip()
                 if tag:
                     rows.append({"address": address, "tag": tag, "rank": None, "pnl": pnl})
+    return rows, skipped
+
+
+def _parse_smart_wallet_import(text: str) -> tuple[list[dict], int]:
+    # Scans line-by-line rather than branching once on "does a Notion
+    # header appear anywhere" - a real staff upload routinely combines
+    # sources (a Notion export concatenated with a pasted GMGN-style
+    # list), and an all-or-nothing check on the whole file silently
+    # dropped every non-Notion row the first time that happened. Each
+    # Notion block is bounded by its own small field grammar
+    # (Explorer:/OpenSea:/Rank:/Tag:, blanks allowed between them) rather
+    # than "until the next header or EOF", so it can never swallow
+    # trailing content that belongs to a different format. Everything
+    # not consumed as a Notion block falls through to the ordinary
+    # leaderboard-row parser, unchanged.
+    rows: list[dict] = []
+    skipped = 0
+    leftover: list[str] = []
+
+    lines = text.splitlines()
+    i, n = 0, len(lines)
+    while i < n:
+        header = _SWT_NOTION_HEADER_RE.match(lines[i].strip())
+        if not header:
+            leftover.append(lines[i])
+            i += 1
+            continue
+        address = header.group(1).lower()
+        rank: int | None = None
+        tags_raw: str | None = None
+        i += 1
+        while i < n:
+            candidate = lines[i].strip()
+            if not candidate:
+                i += 1
+                continue
+            field = _SWT_NOTION_FIELD_RE.match(candidate)
+            if not field:
+                break
+            name, value = field.group(1).lower(), field.group(2).strip()
+            if name == "rank":
+                try:
+                    rank = int(value)
+                except ValueError:
+                    rank = None
+            elif name == "tag":
+                tags_raw = value
+            i += 1
+        if not tags_raw:
+            skipped += 1
+            continue
+        for tag in _SWT_LABEL_SEGMENT_RE.split(tags_raw):
+            tag = tag.strip()
+            if tag:
+                rows.append({"address": address, "tag": tag, "rank": rank, "pnl": None})
+
+    tsv_rows, tsv_skipped = _parse_smart_wallet_tsv_lines(leftover)
+    rows.extend(tsv_rows)
+    skipped += tsv_skipped
     return rows, skipped
 
 
