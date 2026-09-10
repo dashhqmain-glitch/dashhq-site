@@ -934,6 +934,54 @@ async def check_role_ping_permissions(request: Request):
     }
 
 
+@app.get("/cron/recent-wallet-submissions")
+async def recent_wallet_submissions(request: Request, limit: int = 20):
+    # Read-only visibility into smart_wallet_submissions + whether an
+    # approved one actually made it into smart_wallet_tags - a quick way
+    # to confirm real /wallet-submit activity landed correctly without
+    # needing direct database access.
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        subs_res = await client.get(
+            f"{settings.supabase_url}/rest/v1/smart_wallet_submissions",
+            headers=_supabase_headers(),
+            params={"select": "*", "order": "submitted_at.desc", "limit": str(limit)},
+        )
+        subs_res.raise_for_status()
+        submissions = subs_res.json()
+
+        addresses = sorted({s["address"] for s in submissions})
+        tagged: set[str] = set()
+        if addresses:
+            tags_res = await client.get(
+                f"{settings.supabase_url}/rest/v1/smart_wallet_tags",
+                headers=_supabase_headers(),
+                params={"address": f"in.({','.join(addresses)})", "select": "address"},
+            )
+            tags_res.raise_for_status()
+            tagged = {row["address"] for row in tags_res.json()}
+
+    return {
+        "count": len(submissions),
+        "submissions": [
+            {
+                "address": s["address"], "tag": s["tag"], "category": s["category"],
+                "status": s["status"], "submitted_by": s["submitted_by"], "submitted_at": s["submitted_at"],
+                "in_smart_wallet_tags": s["address"] in tagged,
+                # A row that's approved but NOT in smart_wallet_tags would
+                # be a real bug in the approve-button handler - flagging
+                # it explicitly rather than making someone notice the
+                # mismatch by eye.
+                "consistent": (s["status"] != "approved") or (s["address"] in tagged),
+            }
+            for s in submissions
+        ],
+    }
+
+
 # ── Pidgin AutoMod setup (one-time / re-run-on-change) ──────────────────────
 # English-only enforcement in #general via Discord's native AutoMod - free,
 # no persistent bot connection needed. Everything else in this backend is
@@ -4114,14 +4162,25 @@ async def _handle_smart_wallet_submit_modal(payload: dict) -> dict:
     discord_user_id = payload.get("member", {}).get("user", {}).get("id", "")
     posted = 0
     async with httpx.AsyncClient(timeout=30) as client:
-        for address in valid:
+        # Skip anything already tracked (smart_wallet_tags) or already
+        # sitting in the review queue (pending/approved) - no point
+        # burning staff review time on a duplicate of a wallet that's
+        # either already trusted or already waiting on a verdict.
+        new_addresses = await _nft_scope_untracked_and_unsubmitted(client, valid)
+        duplicates = [a for a in valid if a not in new_addresses]
+        for address in new_addresses:
             if await _submit_wallet_for_review(client, address, tag, category, discord_user_id):
                 posted += 1
 
     if len(valid) == 1:
-        summary = "✅ Submitted for staff review." if posted else "⚠️ Something went wrong submitting that wallet - please try again."
+        if duplicates:
+            summary = "👀 Already on our radar - that wallet's already tracked or pending review. Got another one for us?"
+        else:
+            summary = "✅ Submitted for staff review." if posted else "⚠️ Something went wrong submitting that wallet - please try again."
     else:
         summary = f"✅ {posted}/{len(valid)} wallet(s) submitted for staff review."
+        if duplicates:
+            summary += f" 👀 {len(duplicates)} were already on our radar - keep 'em coming!"
     if invalid:
         summary += f" ⚠️ {len(invalid)} line(s) didn't look like a valid address and were skipped."
     if overflow:

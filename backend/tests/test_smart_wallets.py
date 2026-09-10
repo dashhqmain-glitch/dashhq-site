@@ -1197,6 +1197,59 @@ async def test_submit_modal_accepts_kol_exactly_as_selected_no_title_casing_bug(
     assert result != {"type": 4, "data": {"content": "Category must be one of: KOL, Degen, Whale, Sniper.", "flags": 64}}
 
 
+# ── Duplicate submissions are caught, not re-queued ────────────────────────
+
+async def test_submit_modal_tells_the_member_a_single_wallet_is_already_known():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "smart_wallet_tags" in url:
+                return FakeRes(200, [{"address": "0xc0d1ff953a6147556dc0c309509a2b15ea13a68a"}])
+            return FakeRes(200, [])
+
+        async def post(self, url, headers=None, json=None):
+            if "smart_wallet_submissions" in url:
+                raise AssertionError("should never create a new submission for an already-known wallet")
+            return FakeRes(200, {})  # e.g. the deferred-ack callback
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            return FakeRes(200, {})
+
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        result = await main._handle_smart_wallet_submit_modal(_modal_payload())
+
+    assert result == {"type": 5}
+
+
+async def test_submit_modal_skips_known_wallets_in_a_batch_but_submits_the_rest():
+    posted_addresses = []
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "smart_wallet_submissions" in url:
+                return FakeRes(200, [{"address": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}])  # already pending
+            return FakeRes(200, [])
+
+        async def post(self, url, headers=None, json=None):
+            if "smart_wallet_submissions" in url:
+                posted_addresses.append(json["address"])
+                return FakeRes(200, [{**json, "id": "sub1"}])
+            if "/messages" in url:
+                return FakeRes(200, {"id": "msg1"})
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            return FakeRes(200, {})
+
+    raw = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    with patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        result = await main._handle_smart_wallet_submit_modal(_modal_payload(address=raw))
+
+    assert result == {"type": 5}
+    assert posted_addresses == ["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]  # the already-pending one was skipped
+
+
 # ── Multi-wallet paste in the same modal ──────────────────────────────────
 
 def test_parse_smart_wallet_addresses_splits_newlines_and_commas_and_dedupes():
