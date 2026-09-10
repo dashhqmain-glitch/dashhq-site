@@ -982,6 +982,65 @@ async def recent_wallet_submissions(request: Request, limit: int = 20):
     }
 
 
+@app.get("/cron/inspect-wallet")
+async def inspect_wallet(request: Request, address: str):
+    # Answers "why didn't this wallet's mint post" with actual data
+    # instead of a guess: is it really tracked, has the live scan ever
+    # logged ANY of its activity at all, and if so, when/where. If
+    # nft_sale_events_log has zero rows for it, the live scan's own
+    # detection pipeline (recent-activity threshold, chain scan window,
+    # cron timing) never saw the mint in the first place - a completely
+    # different problem than the convergence/quality gates ever firing.
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    address = address.lower().strip()
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        tags_res = await client.get(
+            f"{settings.supabase_url}/rest/v1/smart_wallet_tags",
+            headers=_supabase_headers(),
+            params={"address": f"eq.{address}", "select": "tag,category,imported_at"},
+        )
+        tags_res.raise_for_status()
+        tags = tags_res.json()
+
+        events_res = await client.get(
+            f"{settings.supabase_url}/rest/v1/nft_sale_events_log",
+            headers=_supabase_headers(),
+            params={"buyer": f"eq.{address}", "select": "slug,event_at,logged_at", "order": "event_at.desc", "limit": "10"},
+        )
+        events_res.raise_for_status()
+        events = events_res.json()
+
+        subs_res = await client.get(
+            f"{settings.supabase_url}/rest/v1/smart_wallet_submissions",
+            headers=_supabase_headers(),
+            params={"address": f"eq.{address}", "select": "tag,category,status,submitted_at"},
+        )
+        subs_res.raise_for_status()
+        submissions = subs_res.json()
+
+    return {
+        "address": address,
+        "in_smart_wallet_tags": tags,
+        "submissions": submissions,
+        "logged_sale_events": events,
+        "verdict": (
+            "Tracked, but this bot's live scan has never logged ANY activity for this wallet - "
+            "the mint likely never crossed the recent-activity detection threshold, wasn't among "
+            "the chain's most-recently-created collections when the scan last ran, or the cron "
+            "cycle simply hasn't run since it happened."
+            if tags and not events else
+            "Has logged activity - check which slug/timestamp above and compare against the "
+            "convergence (2+ tracked wallets), quality-score, and wash-trade gates for that mint."
+            if tags and events else
+            "Not currently in smart_wallet_tags - it isn't actually being tracked right now, "
+            "whatever 'on the radar' meant."
+        ),
+    }
+
+
 # ── Pidgin AutoMod setup (one-time / re-run-on-change) ──────────────────────
 # English-only enforcement in #general via Discord's native AutoMod - free,
 # no persistent bot connection needed. Everything else in this backend is
