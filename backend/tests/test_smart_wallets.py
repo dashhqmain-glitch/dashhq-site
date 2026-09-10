@@ -375,6 +375,7 @@ def test_convergence_embed_is_terse_and_names_tags_and_wallet_count():
     assert "**REALCOIN**" in embed["description"]
     assert "**RH MACHINES**" in embed["description"]
     assert "`KOL`" in embed["description"]  # category badge shown when set
+    assert "`Tracked`" in embed["description"]  # falls back to a generic badge, never blank, when category is unset
     # A shortened, LINKED address is intentional here (unlike the self-
     # computed smart-wallet signal) - this list is externally curated,
     # not proprietary internal scoring, and showing which wallet matched

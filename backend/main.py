@@ -821,6 +821,31 @@ async def post_latest_tracked_mint(request: Request):
     }
 
 
+@app.post("/cron/create-minting-now-role")
+async def create_minting_now_role(request: Request):
+    # One-off setup helper - creates the "Minting Now" role via the bot's
+    # own API (needs Manage Roles) and hands back its id, so it can be set
+    # as DISCORD_MINTING_NOW_ROLE_ID without digging through Discord's
+    # role-creation UI by hand. Deliberately a manual POST, not wired into
+    # any automatic flow or dedup'd server-side - calling it twice makes
+    # two roles.
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not settings.discord_bot_token or not settings.discord_guild_id:
+        raise HTTPException(status_code=400, detail="discord_bot_token/discord_guild_id not configured")
+    async with httpx.AsyncClient(timeout=10) as client:
+        res = await client.post(
+            f"{DISCORD_API}/guilds/{settings.discord_guild_id}/roles",
+            headers={"Authorization": f"Bot {settings.discord_bot_token}"},
+            json={"name": "🌱 Minting Now", "mentionable": True, "hoist": False, "color": 0x57F287},
+        )
+    if res.status_code >= 300:
+        raise HTTPException(status_code=502, detail=f"Discord API error creating role: {res.status_code} {res.text[:300]}")
+    role = res.json()
+    return {"role_id": role["id"], "name": role["name"]}
+
+
 # ── Pidgin AutoMod setup (one-time / re-run-on-change) ──────────────────────
 # English-only enforcement in #general via Discord's native AutoMod - free,
 # no persistent bot connection needed. Everything else in this backend is
@@ -7573,7 +7598,15 @@ def _nft_scope_tracked_convergence_embed(c: dict, tracked_hits: list[dict]) -> d
     lines = []
     for addr, info in list(by_address.items())[:_SWT_CONVERGENCE_MAX_WALLET_ROWS]:
         short = f"{addr[:6]}…{addr[-4:]}"
-        badge = f"`{info['category']}` " if info["category"] else ""
+        # Always show a badge, never a blank - most real bulk-imported
+        # wallets never get a category set (rank/tag come from the import
+        # itself; category is a separate manual /smart-wallets
+        # set-category step), and the alert reading as if only SOME
+        # wallets carry a badge looked like a rendering bug rather than
+        # what it actually was: missing staff classification data.
+        # "Tracked" is honest either way - it doesn't claim a specific
+        # type this bot has no real basis for.
+        badge = f"`{info['category'] or 'Tracked'}` "
         tag = ", ".join(info["tags"][:2])
         lines.append(f"{badge}[{short}](https://opensea.io/{addr}) · **{tag}**")
     if len(by_address) > _SWT_CONVERGENCE_MAX_WALLET_ROWS:
@@ -7608,9 +7641,11 @@ async def _nft_scope_maybe_post_tracked_convergence(client: httpx.AsyncClient, s
         return False
     if not await _nft_scope_clears_wash_check(client, slug):
         return False
+    ping = f"<@&{settings.discord_minting_now_role_id}> 🌱 **Minting now**" if settings.discord_minting_now_role_id else None
     delivered = await _post_channel_message(
         client, settings.discord_smart_wallet_channel_id,
         _nft_scope_tracked_convergence_embed(c, tracked_wallet_hits),
+        content=ping,
         components=_nft_scope_tracked_convergence_components(c),
     )
     if delivered:

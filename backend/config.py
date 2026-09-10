@@ -55,6 +55,14 @@ class Settings(BaseSettings):
     # share a channel just because the IDs matched today.
     discord_wallet_review_channel_id: str = "1074665247266308097"
 
+    # Pinged (content, alongside the embed) on a real Alert Tracker post
+    # so anyone holding this role gets notified the moment a tracked
+    # wallet is confirmed minting - separate from citizen_role_id, which
+    # gates the whole toolkit rather than one specific alert. Empty means
+    # no ping, matching every other optional-feature channel/role setting
+    # here - the post itself still goes out either way.
+    discord_minting_now_role_id: str = ""
+
     # /monitor is opt-in and normally DMs subscribers privately. When set,
     # any event a member has /monitor'd also gets posted here publicly
     # with those members @mentioned - visible even if their DMs are closed,
