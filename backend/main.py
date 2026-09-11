@@ -9020,7 +9020,14 @@ async def alchemy_address_activity_webhook(chain: str, request: Request):
             try:
                 if await _nft_scope_maybe_post_from_slug_direct(client, slug):
                     posted += 1
-            except (httpx.HTTPError, HTTPException):
+            except Exception:
+                # Deliberately broad, not just httpx.HTTPError/HTTPException -
+                # this is a webhook receiver Alchemy expects a fast, reliable
+                # 200 from; one bad slug's unexpected bug must never fail the
+                # whole delivery (and lose every OTHER slug in this same
+                # batch too) or risk Alchemy backing off/disabling the
+                # webhook over repeated 500s. Still logged, never silent.
+                logger.exception("Failed to process webhook-detected slug %s", slug)
                 continue
 
     return {"ok": True, "mints_logged": len(mints), "slugs_touched": sorted(affected_slugs), "posted": posted}
@@ -9189,8 +9196,19 @@ async def _nft_scope_maybe_post_from_slug_direct(client: httpx.AsyncClient, slug
         headers=_supabase_headers(), params={"slug": f"eq.{slug}", "select": "buyer"},
     )
     buyers_res.raise_for_status()
-    rapid_activity = {"buyer_addresses": sorted({row["buyer"] for row in buyers_res.json()})}
-    tracked_wallet_hits = await _nft_scope_tracked_wallet_hits(client, rapid_activity)
+    # Deliberately its own lightweight shape (buyer_addresses only) - this
+    # sweep can legitimately fire off a single tracked wallet's single
+    # mint, which _detect_rapid_activity's 3-sale minimum would treat as
+    # "not enough activity" and refuse to build a signal for at all.
+    # Real bug, confirmed live in production: this partial dict was ALSO
+    # being handed to _nft_scope_score as if it were a real rapid_activity
+    # payload - _nft_scope_score reads count/unique_buyers/etc as soon as
+    # the dict is truthy, so every real webhook-triggered mint 500'd the
+    # instant scoring ran. Fixed by fetching the actual rapid-activity
+    # shape (or None) separately below, which _nft_scope_score already
+    # handles correctly either way.
+    buyer_activity = {"buyer_addresses": sorted({row["buyer"] for row in buyers_res.json()})}
+    tracked_wallet_hits = await _nft_scope_tracked_wallet_hits(client, buyer_activity)
     if len({h["address"] for h in tracked_wallet_hits}) < _NFT_SCOPE_TRACKED_CONVERGENCE_ALERT_MIN_WALLETS:
         return False
 
@@ -9198,14 +9216,15 @@ async def _nft_scope_maybe_post_from_slug_direct(client: httpx.AsyncClient, slug
     top_offer_amount = await _nft_scope_top_offer_amount(client, slug, c)
     history, first_snapshot = await _nft_scope_snapshot_signals(client, slug)
     wash_analysis = await _nft_scope_wash_analysis(client, slug) if _nft_scope_turnover_elevated(c) else None
-    smart_wallet_hits, activity_spike_hits, _ = await _nft_scope_wallet_signals(client, rapid_activity)
+    smart_wallet_hits, activity_spike_hits, _ = await _nft_scope_wallet_signals(client, buyer_activity)
+    rapid_activity = await _detect_rapid_activity(client, slug)
     score = _nft_scope_score(
         c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot,
         wash_analysis=wash_analysis, smart_wallet_hits=smart_wallet_hits, activity_spike_hits=activity_spike_hits,
         tracked_wallet_hits=tracked_wallet_hits,
     )
     if await _nft_scope_maybe_post_tracked_convergence(client, slug, c, tracked_wallet_hits, score):
-        await _nft_scope_auto_discover_co_minters(client, slug, c, tracked_wallet_hits, rapid_activity)
+        await _nft_scope_auto_discover_co_minters(client, slug, c, tracked_wallet_hits, buyer_activity)
         return True
     return False
 
@@ -9262,7 +9281,10 @@ async def _tracked_wallet_watch_sweep(client: httpx.AsyncClient, deadline: float
         try:
             if await _nft_scope_maybe_post_from_slug_direct(client, slug):
                 posted += 1
-        except httpx.HTTPError:
+        except Exception:
+            # Same reasoning as the webhook receiver's identical guard -
+            # one bad slug must never break the rest of this sweep cycle.
+            logger.exception("Failed to process watch-sweep-detected slug %s", slug)
             continue
 
     return {"checked": checked, "mints_found": mints_found, "posted": posted, "slugs_touched": sorted(affected_slugs)}

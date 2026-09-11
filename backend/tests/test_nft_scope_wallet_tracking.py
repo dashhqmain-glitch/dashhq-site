@@ -686,3 +686,66 @@ async def test_maybe_post_from_slug_direct_requires_the_convergence_minimum():
         result = await main._nft_scope_maybe_post_from_slug_direct(FakeClient(), "some-slug")
 
     assert result is False
+
+
+async def test_maybe_post_from_slug_direct_scores_with_a_real_rapid_activity_shape():
+    # Real bug, confirmed live in production: this function used to hand
+    # its own partial {"buyer_addresses": [...]} dict straight to
+    # _nft_scope_score as if it were a full rapid_activity payload -
+    # _nft_scope_score reads rapid_activity["count"]/["unique_buyers"]
+    # unconditionally once the dict is truthy, so every real webhook-
+    # triggered mint crashed with KeyError: 'count' the instant scoring
+    # ran (a 500 on every real Alchemy delivery, invisible to every test
+    # here since none previously drove execution this far with a truthy
+    # tracked-wallet-hits result). Must now call the real
+    # _detect_rapid_activity for scoring instead, which _nft_scope_score
+    # already knows how to handle correctly (a real shape, or None).
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "nft_sale_events_log" in url:
+                return FakeRes(200, [{"buyer": "0xtracked"}])
+            if "smart_wallet_tags" in url:
+                return FakeRes(200, [{"address": "0xtracked", "tag": "T", "rank": None, "pnl": None, "category": None}])
+            return FakeRes(200, [])
+
+    real_rapid_activity = {
+        "count": 4, "unique_buyers": 3, "unique_sellers": 2, "window_minutes": 30,
+        "price_surge_pct": None, "is_sharp": False, "sharp_count": 1, "sharp_window_minutes": 5,
+        "buyer_addresses": ["0xtracked"],
+    }
+    captured = {}
+
+    async def fake_detect_rapid_activity(client, slug):
+        return real_rapid_activity
+
+    async def fake_collection_core(slug):
+        return {"slug": slug, "name": "Test", "image": None, "floor": 0.05, "chain": "ethereum", "openseaUrl": "https://opensea.io/collection/test"}
+
+    async def fake_none(*a, **k):
+        return None
+
+    async def fake_snapshot_signals(client, slug):
+        return [], None
+
+    async def fake_wallet_signals(client, rapid_activity):
+        return [], [], []
+
+    def fake_score(*a, **k):
+        captured["rapid_activity"] = k.get("rapid_activity")
+        return {"tier": "green", "blocked": False, "has_real_activity": True, "has_timeliness_signal": True}
+
+    async def fake_maybe_post_convergence(client, slug, c, tracked_wallet_hits, score):
+        return False
+
+    with patch.object(main, "_nft_collection_core", new=fake_collection_core), \
+         patch.object(main, "_nft_scope_top_offer_amount", new=fake_none), \
+         patch.object(main, "_nft_scope_snapshot_signals", new=fake_snapshot_signals), \
+         patch.object(main, "_nft_scope_turnover_elevated", return_value=False), \
+         patch.object(main, "_nft_scope_wallet_signals", new=fake_wallet_signals), \
+         patch.object(main, "_detect_rapid_activity", new=fake_detect_rapid_activity), \
+         patch.object(main, "_nft_scope_score", new=fake_score), \
+         patch.object(main, "_nft_scope_maybe_post_tracked_convergence", new=fake_maybe_post_convergence):
+        result = await main._nft_scope_maybe_post_from_slug_direct(FakeClient(), "some-slug")
+
+    assert result is False
+    assert captured["rapid_activity"] == real_rapid_activity
