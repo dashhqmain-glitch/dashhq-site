@@ -1399,6 +1399,48 @@ async def test_review_button_approve_writes_to_smart_wallet_tags_and_edits_the_m
     }
 
 
+async def test_review_button_approve_immediately_adds_to_alchemy_webhooks():
+    # Direct request: an approved wallet must be covered right away, not
+    # wait up to 5 minutes for the next regular sync cycle.
+    settings.alchemy_webhook_auth_token = "token"
+    settings.alchemy_webhook_id_ethereum = "wh_eth"
+    for chain in main._ALCHEMY_WEBHOOK_CHAINS:
+        if chain != "ethereum":
+            setattr(settings, f"alchemy_webhook_id_{chain}", "")
+    alchemy_calls = []
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [{
+                "id": "sub1", "address": "0xc0d1ff953a6147556dc0c309509a2b15ea13a68a",
+                "tag": "Called PVP early", "category": "Degen", "status": "pending",
+            }])
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            if "dashboard.alchemy.com" in url:
+                alchemy_calls.append(json)
+            return FakeRes(200, {})
+
+        async def post(self, url, headers=None, json=None):
+            return FakeRes(200, {})
+
+    try:
+        with patch("main.httpx.AsyncClient") as MockClient:
+            MockClient.return_value.__aenter__.return_value = FakeClient()
+            await main._handle_wallet_submission_review_button(
+                _review_button_payload("walletsubmit_approve:sub1"), "sub1", approve=True,
+            )
+    finally:
+        settings.alchemy_webhook_auth_token = ""
+        settings.alchemy_webhook_id_ethereum = ""
+
+    assert alchemy_calls == [{
+        "webhook_id": "wh_eth",
+        "addresses_to_add": ["0xc0d1ff953a6147556dc0c309509a2b15ea13a68a"],
+        "addresses_to_remove": [],
+    }]
+
+
 async def test_review_button_reject_does_not_write_to_smart_wallet_tags():
     tag_writes = []
 

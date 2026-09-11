@@ -248,6 +248,42 @@ def _clear_webhook_sync_settings():
     settings.alchemy_webhook_id_ethereum = ""
 
 
+async def test_add_single_address_skips_without_auth_token():
+    settings.alchemy_webhook_auth_token = ""
+
+    class ExplodingClient:
+        async def patch(self, *a, **k):
+            raise AssertionError("should never make a network call")
+
+    await main._alchemy_webhook_add_single_address(ExplodingClient(), "0xa")
+
+
+async def test_add_single_address_patches_each_configured_webhook_immediately():
+    # The fast path for the Approve button - direct request that a newly
+    # approved wallet gets covered right away, not on the next 5-minute
+    # cycle. Must stay cheap (no GET/diff, just one small PATCH per
+    # configured webhook) since this runs inside a Discord interaction's
+    # ~3s response window.
+    _set_webhook_sync_settings()
+    settings.alchemy_webhook_id_robinhood = "wh_rh"
+    calls = []
+
+    class FakeClient:
+        async def patch(self, url, headers=None, json=None):
+            calls.append(json)
+            return FakeRes(200, {})
+
+    try:
+        await main._alchemy_webhook_add_single_address(FakeClient(), "0xnew")
+    finally:
+        _clear_webhook_sync_settings()
+        settings.alchemy_webhook_id_robinhood = ""
+
+    assert {"webhook_id": "wh_eth", "addresses_to_add": ["0xnew"], "addresses_to_remove": []} in calls
+    assert {"webhook_id": "wh_rh", "addresses_to_add": ["0xnew"], "addresses_to_remove": []} in calls
+    assert len(calls) == 2  # only the two configured webhooks, not ink/base/polygon
+
+
 async def test_webhook_sync_adds_and_removes_to_match_tracked_list():
     # Add and remove go out as SEPARATE calls (not one combined body) -
     # both work fine independently against Alchemy's real API, and

@@ -4472,6 +4472,7 @@ async def _handle_wallet_submission_review_button(payload: dict, submission_id: 
                 headers=_supabase_headers(prefer="resolution=merge-duplicates,return=minimal"),
                 json={"address": submission["address"], "tag": submission["tag"], "category": submission["category"], "source": "smart-wallets-submit"},
             )
+            await _alchemy_webhook_add_single_address(client, submission["address"])
 
     embeds = (payload.get("message") or {}).get("embeds") or []
     embed = embeds[0] if embeds else _wallet_submission_review_embed(submission, "")
@@ -9113,6 +9114,34 @@ async def _alchemy_webhook_update_addresses(client: httpx.AsyncClient, webhook_i
     return ok
 
 
+async def _alchemy_webhook_add_single_address(client: httpx.AsyncClient, address: str) -> None:
+    # Fast path for the one place a full _alchemy_webhook_sync_addresses
+    # call is too slow to risk: the /wallet-submit Approve button, which
+    # has to respond inside Discord's ~3s interaction window. A full sync
+    # fetches and diffs each webhook's entire current address list (up to
+    # several paginated GETs per chain) - this instead does one tiny,
+    # known-correct PATCH per configured webhook (no GET, no diff, just
+    # "add this one address"), safely fast enough for an interaction
+    # response. Best-effort and silent on failure - a missed call here
+    # still self-heals on the next regular 5-minute sync, same as every
+    # other insertion path already does.
+    if not settings.alchemy_webhook_auth_token:
+        return
+    for chain in _ALCHEMY_WEBHOOK_CHAINS:
+        webhook_id = _alchemy_webhook_id(chain)
+        if not webhook_id:
+            continue
+        try:
+            res = await client.patch(
+                "https://dashboard.alchemy.com/api/update-webhook-addresses",
+                headers={"X-Alchemy-Token": settings.alchemy_webhook_auth_token, "Content-Type": "application/json"},
+                json={"webhook_id": webhook_id, "addresses_to_add": [address], "addresses_to_remove": []},
+            )
+            res.raise_for_status()
+        except httpx.HTTPError:
+            logger.exception("Immediate single-address webhook add failed for %s on %s", address, chain)
+
+
 async def _alchemy_webhook_sync_addresses(client: httpx.AsyncClient) -> dict:
     # Reconciles each of the 5 chain webhooks' tracked-address lists
     # against smart_wallet_tags - piggybacked on the existing 5-minute
@@ -9123,7 +9152,10 @@ async def _alchemy_webhook_sync_addresses(client: httpx.AsyncClient) -> dict:
     # the next cycle catches it. A full diff-and-set every cycle is cheap
     # (one GET + at most one PATCH per configured webhook, no chain reads
     # at all), unlike the tracked-wallet checks this whole change exists
-    # to cut down on.
+    # to cut down on. The Approve button (see
+    # _alchemy_webhook_add_single_address above) additionally gets an
+    # immediate, much cheaper add the moment a wallet is approved, rather
+    # than waiting for this cycle at all.
     if not settings.alchemy_webhook_auth_token:
         return {"skipped": "alchemy_webhook_auth_token not configured"}
     desired = set(await _alchemy_webhook_tracked_addresses(client))
