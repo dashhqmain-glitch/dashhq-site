@@ -1157,6 +1157,60 @@ async def trigger_webhook_sync(request: Request):
     return result
 
 
+@app.get("/cron/diagnose-slug-posting")
+async def diagnose_slug_posting(request: Request, slug: str):
+    # Answers "why didn't this real, already-logged slug post" with real
+    # data - mirrors _nft_scope_maybe_post_from_slug_direct's exact steps
+    # (same calls, same order) but reports which gate stopped it instead
+    # of actually posting, so a real quality-filter rejection isn't
+    # confused for a bug ever again.
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        buyers_res = await client.get(
+            f"{settings.supabase_url}/rest/v1/nft_sale_events_log",
+            headers=_supabase_headers(), params={"slug": f"eq.{slug}", "select": "buyer"},
+        )
+        buyers_res.raise_for_status()
+        buyer_activity = {"buyer_addresses": sorted({row["buyer"] for row in buyers_res.json()})}
+        tracked_wallet_hits = await _nft_scope_tracked_wallet_hits(client, buyer_activity)
+        distinct = {h["address"] for h in tracked_wallet_hits}
+        if len(distinct) < _NFT_SCOPE_TRACKED_CONVERGENCE_ALERT_MIN_WALLETS:
+            return {"slug": slug, "gate_failed": "convergence_minimum", "tracked_wallets": len(distinct)}
+
+        recently_posted = await _nft_scope_recently_posted(client, slug)
+        if recently_posted:
+            return {"slug": slug, "gate_failed": "recently_posted", "tracked_wallets": len(distinct)}
+
+        clears_wash = await _nft_scope_clears_wash_check(client, slug)
+        if not clears_wash:
+            return {"slug": slug, "gate_failed": "wash_check", "tracked_wallets": len(distinct)}
+
+        c = await _nft_collection_core(slug)
+        top_offer_amount = await _nft_scope_top_offer_amount(client, slug, c)
+        history, first_snapshot = await _nft_scope_snapshot_signals(client, slug)
+        wash_analysis = await _nft_scope_wash_analysis(client, slug) if _nft_scope_turnover_elevated(c) else None
+        smart_wallet_hits, activity_spike_hits, _ = await _nft_scope_wallet_signals(client, buyer_activity)
+        rapid_activity = await _detect_rapid_activity(client, slug)
+        score = _nft_scope_score(
+            c, top_offer_amount, history=history, rapid_activity=rapid_activity, first_snapshot=first_snapshot,
+            wash_analysis=wash_analysis, smart_wallet_hits=smart_wallet_hits, activity_spike_hits=activity_spike_hits,
+            tracked_wallet_hits=tracked_wallet_hits,
+        )
+        worth_posting = _nft_scope_worth_posting(score)
+        return {
+            "slug": slug, "tracked_wallets": len(distinct),
+            "gate_failed": None if worth_posting else "worth_posting",
+            "score": {"tier": score.get("tier"), "blocked": score.get("blocked"),
+                      "has_real_activity": score.get("has_real_activity"), "has_timeliness_signal": score.get("has_timeliness_signal"),
+                      "points": score.get("score"), "reasons": score.get("reasons"), "red_flags": score.get("red_flags")},
+            "collection": {"totalSupply": c.get("totalSupply"), "salesTotal": c.get("salesTotal"), "owners": c.get("owners"),
+                            "verified": c.get("verified"), "category": c.get("category"), "floor": c.get("floor"), "floorUsd": c.get("floorUsd")},
+        }
+
+
 @app.get("/cron/test-alchemy")
 async def test_alchemy(request: Request, address: str, chain: str = "ethereum"):
     # Raw, unswallowed diagnostic - _alchemy_rpc deliberately returns None
