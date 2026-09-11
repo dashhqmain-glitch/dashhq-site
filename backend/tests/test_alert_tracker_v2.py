@@ -141,6 +141,22 @@ def test_activity_to_mint_returns_none_without_contract():
     assert main._alchemy_webhook_activity_to_mint(activity) is None
 
 
+def test_activity_to_mint_recognizes_an_erc721_mint_tagged_category_token():
+    # Real-world gap, not hypothetical: Alchemy's own documented examples
+    # show an ERC721 transfer arriving with category "token" rather than
+    # "erc721" (erc721TokenId is still present either way). Detection here
+    # is structural (a real token-id field present), not a category
+    # string match, specifically so this can't silently drop a real mint.
+    activity = {
+        "fromAddress": main._TRACKED_WALLET_NULL_ADDRESS, "toAddress": "0xBUYER",
+        "category": "token", "erc721TokenId": "0x2a",
+        "rawContract": {"address": "0xCONTRACT"},
+    }
+    mint = main._alchemy_webhook_activity_to_mint(activity)
+    assert mint["token_id"] == "42"
+    assert mint["contract"] == "0xcontract"
+
+
 # ── /webhooks/alchemy-address-activity/{chain} ────────────────────────────
 
 def _signed_body(chain: str, payload: dict) -> tuple[bytes, str]:

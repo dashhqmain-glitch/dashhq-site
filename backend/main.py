@@ -8999,20 +8999,26 @@ def _verify_alchemy_webhook_signature(chain: str, signature: str, body: bytes) -
 def _alchemy_webhook_activity_to_mint(activity: dict) -> dict | None:
     # Same "is this a mint" test as the sweep's own parsing
     # (_alchemy_wallet_recent_mints): fromAddress is the null address, and
-    # it's an NFT-category transfer - just against the webhook's payload
+    # it carries a real NFT token ID - just against the webhook's payload
     # shape instead of alchemy_getAssetTransfers' response shape, which
     # names the same concepts differently (erc721TokenId/erc1155Metadata
     # here vs a flat tokenId there).
+    #
+    # Deliberately does NOT gate on category == "erc721"/"erc1155" - real
+    # examples of Alchemy's own Address Activity payloads show an ERC721
+    # transfer arriving with category "token" instead (erc721TokenId
+    # still present either way), and this webhook is too important to
+    # silently drop a real mint over an exact string match this
+    # inconsistent. Checking for the token-id fields directly is
+    # structural, not label-based, and can't produce a false positive -
+    # it still requires the null-address mint pattern below.
     if (activity.get("fromAddress") or "").lower() != _TRACKED_WALLET_NULL_ADDRESS:
         return None
-    category = activity.get("category")
     contract = ((activity.get("rawContract") or {}).get("address") or "").lower()
     if not contract:
         return None
-    raw_token_id = None
-    if category == "erc721":
-        raw_token_id = activity.get("erc721TokenId")
-    elif category == "erc1155":
+    raw_token_id = activity.get("erc721TokenId")
+    if raw_token_id is None:
         metadata = activity.get("erc1155Metadata") or []
         raw_token_id = metadata[0].get("tokenId") if metadata else None
     if raw_token_id is None:
@@ -9045,7 +9051,10 @@ async def alchemy_address_activity_webhook(chain: str, request: Request):
         raise HTTPException(status_code=400, detail="Invalid JSON")
 
     activity = ((payload.get("event") or {}).get("activity")) or []
-    mints = [m for a in activity if a.get("category") in ("erc721", "erc1155") and (m := _alchemy_webhook_activity_to_mint(a))]
+    # No category pre-filter here - _alchemy_webhook_activity_to_mint
+    # already checks structurally (real token-id field present, not the
+    # category label), which is the whole point of that change.
+    mints = [m for a in activity if (m := _alchemy_webhook_activity_to_mint(a))]
     if not mints:
         return {"ok": True, "mints_logged": 0, "posted": 0}
 
