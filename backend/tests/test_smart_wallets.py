@@ -644,7 +644,7 @@ async def test_maybe_post_convergence_posts_with_a_single_tracked_wallet():
     async def noop(*a, **k):
         pass
 
-    with patch.object(main, "_nft_scope_recently_posted", new=fake_recently_posted), \
+    with patch.object(main, "_alert_tracker_already_posted", new=fake_recently_posted), \
          patch.object(main, "_nft_scope_clears_wash_check", new=fake_clears_wash), \
          patch.object(main, "_post_channel_message", new=fake_post), \
          patch.object(main, "_nft_scope_mark_posted", new=noop), \
@@ -663,7 +663,7 @@ async def test_maybe_post_convergence_skips_if_recently_posted():
     async def fail_if_called(*a, **k):
         raise AssertionError("should never post while on cooldown")
 
-    with patch.object(main, "_nft_scope_recently_posted", new=fake_recently_posted), \
+    with patch.object(main, "_alert_tracker_already_posted", new=fake_recently_posted), \
          patch.object(main, "_post_channel_message", new=fail_if_called):
         result = await main._nft_scope_maybe_post_tracked_convergence(main.httpx.AsyncClient(), "slug", _fake_collection(), hits, _good_score())
     assert result is False
@@ -681,7 +681,7 @@ async def test_maybe_post_convergence_skips_if_wash_dirty():
     async def fail_if_called(*a, **k):
         raise AssertionError("should never post through a failed wash-check")
 
-    with patch.object(main, "_nft_scope_recently_posted", new=fake_recently_posted), \
+    with patch.object(main, "_alert_tracker_already_posted", new=fake_recently_posted), \
          patch.object(main, "_nft_scope_clears_wash_check", new=fake_clears_wash), \
          patch.object(main, "_post_channel_message", new=fail_if_called):
         result = await main._nft_scope_maybe_post_tracked_convergence(main.httpx.AsyncClient(), "slug", _fake_collection(), hits, _good_score())
@@ -700,7 +700,7 @@ async def test_maybe_post_convergence_skips_if_score_too_low():
     async def fail_if_called(*a, **k):
         raise AssertionError("should never post a project that fails NFT Scope's own bar")
 
-    with patch.object(main, "_nft_scope_recently_posted", new=fake_recently_posted), \
+    with patch.object(main, "_alert_tracker_already_posted", new=fake_recently_posted), \
          patch.object(main, "_nft_scope_clears_wash_check", new=fake_clears_wash), \
          patch.object(main, "_post_channel_message", new=fail_if_called):
         blocked = await main._nft_scope_maybe_post_tracked_convergence(main.httpx.AsyncClient(), "slug", _fake_collection(), hits, _good_score(blocked=True))
@@ -709,11 +709,19 @@ async def test_maybe_post_convergence_skips_if_score_too_low():
     assert low_tier is False
 
 
-async def test_maybe_post_convergence_posts_and_marks_shared_cooldown():
+async def test_maybe_post_convergence_posts_and_records_its_own_call():
+    # Real bug, confirmed live: this used to also call _nft_scope_mark_posted,
+    # setting the SAME nft_scope_any_post cooldown every other NFT Scope pass
+    # shares - meaning a routine NFT Scope discovery post for a collection
+    # would silently block the Alert Tracker from ever posting about that
+    # same collection later, and vice versa. Alert Tracker and NFT Scope are
+    # two separate systems - a successful post must record ONLY in
+    # alert_tracker_calls (via _alert_tracker_record_call), never touch the
+    # shared NFT Scope flag at all.
     hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None}, {"address": "0xb", "tag": "T2", "rank": None, "pnl": None}]
     calls = {}
 
-    async def fake_recently_posted(client, slug):
+    async def fake_already_posted(client, slug):
         return False
 
     async def fake_clears_wash(client, slug):
@@ -725,27 +733,31 @@ async def test_maybe_post_convergence_posts_and_marks_shared_cooldown():
         calls["content"] = content
         return True
 
-    async def fake_mark_posted(client, slug, value):
-        calls["marked_posted"] = (slug, value)
+    async def fail_if_called(*a, **k):
+        raise AssertionError("must not touch the shared NFT Scope posted-flag")
 
     async def fake_record_buyers(client, slug, floor, rapid_activity):
         calls["recorded_buyers"] = (slug, floor, rapid_activity)
 
-    with patch.object(main, "_nft_scope_recently_posted", new=fake_recently_posted), \
+    async def fake_record_call(client, slug, floor, wallets):
+        calls["alert_tracker_call"] = (slug, floor, sorted(wallets))
+
+    with patch.object(main, "_alert_tracker_already_posted", new=fake_already_posted), \
          patch.object(main, "_nft_scope_clears_wash_check", new=fake_clears_wash), \
          patch.object(main, "_post_channel_message", new=fake_post), \
-         patch.object(main, "_nft_scope_mark_posted", new=fake_mark_posted), \
-         patch.object(main, "_nft_scope_record_call_buyers", new=fake_record_buyers):
+         patch.object(main, "_nft_scope_mark_posted", new=fail_if_called), \
+         patch.object(main, "_nft_scope_record_call_buyers", new=fake_record_buyers), \
+         patch.object(main, "_alert_tracker_record_call", new=fake_record_call):
         result = await main._nft_scope_maybe_post_tracked_convergence(main.httpx.AsyncClient(), "test-slug", _fake_collection(), hits, _good_score())
 
     assert result is True
     assert calls["channel_id"] == main.settings.discord_smart_wallet_channel_id
     assert calls["components"][0]["components"][0]["url"] == _fake_collection()["openseaUrl"]
-    assert calls["marked_posted"][0] == "test-slug"
     assert calls["content"] is None  # no role configured by default - no ping
     recorded_slug, recorded_floor, recorded_rapid = calls["recorded_buyers"]
     assert recorded_slug == "test-slug"
     assert set(recorded_rapid["buyer_addresses"]) == {"0xa", "0xb"}
+    assert calls["alert_tracker_call"] == ("test-slug", _fake_collection()["floor"], ["0xa", "0xb"])
 
 
 async def test_maybe_post_convergence_pings_the_minting_now_role_when_configured():
@@ -767,7 +779,7 @@ async def test_maybe_post_convergence_pings_the_minting_now_role_when_configured
         pass
 
     try:
-        with patch.object(main, "_nft_scope_recently_posted", new=fake_recently_posted), \
+        with patch.object(main, "_alert_tracker_already_posted", new=fake_recently_posted), \
              patch.object(main, "_nft_scope_clears_wash_check", new=fake_clears_wash), \
              patch.object(main, "_post_channel_message", new=fake_post), \
              patch.object(main, "_nft_scope_mark_posted", new=noop), \

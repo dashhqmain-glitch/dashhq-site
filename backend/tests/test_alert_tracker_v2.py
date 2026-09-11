@@ -506,6 +506,75 @@ def test_embed_footer_omits_record_stat_below_minimum_sample():
     assert embed["footer"]["text"] == "Smart Wallet Convergence · NFA"
 
 
+# ── _alert_tracker_already_posted: independent of NFT Scope ──────────────
+
+async def test_alert_tracker_already_posted_checks_its_own_table_not_nft_scopes():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            assert url.endswith("/alert_tracker_calls")
+            assert params["slug"] == "eq.test-slug"
+            return FakeRes(200, [{"id": 1}])
+
+    result = await main._alert_tracker_already_posted(FakeClient(), "test-slug")
+    assert result is True
+
+
+async def test_alert_tracker_already_posted_false_with_no_rows():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [])
+
+    result = await main._alert_tracker_already_posted(FakeClient(), "test-slug")
+    assert result is False
+
+
+async def test_alert_tracker_already_posted_fails_open_on_error():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(500)
+
+    result = await main._alert_tracker_already_posted(FakeClient(), "test-slug")
+    assert result is False
+
+
+async def test_convergence_posts_even_when_nft_scope_already_posted_this_slug():
+    # THE actual real-world bug, confirmed live in production: an ordinary
+    # NFT Scope discovery/trending/momentum post for a collection sets the
+    # shared nft_scope_any_post flag - _nft_scope_recently_posted (checked
+    # here) would then return True and silently block the Alert Tracker
+    # from EVER posting about that same collection afterward, even once
+    # tracked wallets genuinely converged on it. Alert Tracker and NFT
+    # Scope must be fully independent: this proves a post still goes
+    # through even when NFT Scope's own flag says "already posted."
+    hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None}, {"address": "0xb", "tag": "T2", "rank": None, "pnl": None}]
+
+    async def fake_nft_scope_recently_posted_true(client, slug):
+        return True  # NFT Scope already posted about this slug normally
+
+    async def fake_alert_tracker_already_posted_false(client, slug):
+        return False  # but the Alert Tracker itself never has
+
+    async def fake_clears_wash(client, slug):
+        return True
+
+    async def fake_post(client, channel_id, embed, content=None, components=None):
+        return True
+
+    async def noop(*a, **k):
+        pass
+
+    with patch.object(main, "_nft_scope_recently_posted", new=fake_nft_scope_recently_posted_true), \
+         patch.object(main, "_alert_tracker_already_posted", new=fake_alert_tracker_already_posted_false), \
+         patch.object(main, "_nft_scope_clears_wash_check", new=fake_clears_wash), \
+         patch.object(main, "_post_channel_message", new=fake_post), \
+         patch.object(main, "_nft_scope_mark_posted", new=noop), \
+         patch.object(main, "_nft_scope_record_call_buyers", new=noop), \
+         patch.object(main, "_alert_tracker_record_call", new=noop):
+        result = await main._nft_scope_maybe_post_tracked_convergence(main.httpx.AsyncClient(), "slug", _fake_collection(), hits, _good_score())
+
+    assert result is True
+
+
 # ── alert_tracker_calls: write + prove ────────────────────────────────────
 
 async def test_alert_tracker_record_call_posts_expected_row():
@@ -541,7 +610,7 @@ async def test_maybe_post_convergence_records_an_alert_tracker_call():
     async def fake_record_call(client, slug, floor, wallets):
         calls["recorded"] = (slug, floor, sorted(wallets))
 
-    with patch.object(main, "_nft_scope_recently_posted", new=fake_recently_posted), \
+    with patch.object(main, "_alert_tracker_already_posted", new=fake_recently_posted), \
          patch.object(main, "_nft_scope_clears_wash_check", new=fake_clears_wash), \
          patch.object(main, "_post_channel_message", new=fake_post), \
          patch.object(main, "_nft_scope_mark_posted", new=noop), \

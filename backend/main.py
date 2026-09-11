@@ -1203,9 +1203,9 @@ async def diagnose_slug_posting(request: Request, slug: str):
         if len(distinct) < _NFT_SCOPE_TRACKED_CONVERGENCE_ALERT_MIN_WALLETS:
             return {"slug": slug, "gate_failed": "convergence_minimum", "tracked_wallets": len(distinct)}
 
-        recently_posted = await _nft_scope_recently_posted(client, slug)
-        if recently_posted:
-            return {"slug": slug, "gate_failed": "recently_posted", "tracked_wallets": len(distinct)}
+        already_posted = await _alert_tracker_already_posted(client, slug)
+        if already_posted:
+            return {"slug": slug, "gate_failed": "already_posted", "tracked_wallets": len(distinct)}
 
         clears_wash = await _nft_scope_clears_wash_check(client, slug)
         if not clears_wash:
@@ -8678,6 +8678,31 @@ async def _alert_tracker_prove_due_calls(client: httpx.AsyncClient) -> dict:
     return {"checked": checked, "proved": proved}
 
 
+async def _alert_tracker_already_posted(client: httpx.AsyncClient, slug: str) -> bool:
+    # Real bug, confirmed live: the Alert Tracker's own "already posted"
+    # gate used to be _nft_scope_recently_posted, which checks
+    # nft_scope_any_post - a cooldown flag SHARED by every NFT Scope
+    # posting pass (fresh mints, trending, momentum, holdings), not just
+    # the Alert Tracker. That meant an ordinary NFT Scope discovery post
+    # for a collection silently blocked the Alert Tracker from EVER
+    # posting about that same collection afterward, even when tracked
+    # wallets later converged on it - exactly backwards, since a
+    # multi-wallet convergence is a stronger, more specific signal than
+    # a routine discovery post. Alert Tracker and NFT Scope are two
+    # separate systems and must not share this gate. Checks
+    # alert_tracker_calls directly instead - the one source of truth for
+    # "did the Alert Tracker specifically already post this."
+    try:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/alert_tracker_calls",
+            headers=_supabase_headers(), params={"slug": f"eq.{slug}", "select": "id", "limit": "1"},
+        )
+        res.raise_for_status()
+        return bool(res.json())
+    except httpx.HTTPError:
+        return False  # fail open - a lookup hiccup must never silently suppress a real alert
+
+
 async def _alert_tracker_record_call(client: httpx.AsyncClient, slug: str, floor: float | None, wallets: list[str]) -> None:
     # Narrowly scoped to the Alert Tracker itself (see alert_tracker_calls
     # in schema.sql) - deliberately separate from the NFT-Scope-wide
@@ -8787,7 +8812,7 @@ async def _nft_scope_maybe_post_tracked_convergence(client: httpx.AsyncClient, s
     distinct_addresses = {h["address"] for h in (tracked_wallet_hits or [])}
     if len(distinct_addresses) < _NFT_SCOPE_TRACKED_CONVERGENCE_ALERT_MIN_WALLETS:
         return False
-    if await _nft_scope_recently_posted(client, slug):
+    if await _alert_tracker_already_posted(client, slug):
         return False
     if not await _nft_scope_clears_wash_check(client, slug):
         return False
@@ -8817,13 +8842,22 @@ async def _nft_scope_maybe_post_tracked_convergence(client: httpx.AsyncClient, s
         components=_nft_scope_tracked_convergence_components(c),
     )
     if delivered:
-        await _nft_scope_mark_posted(client, slug, c.get("floor") or 0)
+        # Deliberately does NOT call _nft_scope_mark_posted - Alert Tracker
+        # and NFT Scope are two separate systems (see
+        # _alert_tracker_already_posted above), and setting the shared
+        # nft_scope_any_post flag here would suppress NFT Scope's OWN
+        # independent discovery/trending/momentum posts for this same
+        # slug, exactly the same cross-contamination bug this fix exists
+        # to remove, just in the other direction. alert_tracker_calls
+        # (written below) is this system's own, sufficient dedup record.
+        #
         # These wallets are already proven good elsewhere (staff's curated
         # list) - recording them here too means they also start feeding
         # this bot's OWN self-computed win-rate system
         # (nft_scope_call_buyers/nft_smart_wallets) if this collection
         # later proves out, the same free side-effect every other posting
-        # path already gets.
+        # path already gets. Purely additive data, not a gate, so sharing
+        # it stays fine even with the two systems otherwise decoupled.
         await _nft_scope_record_call_buyers(client, slug, c.get("floor"), {"buyer_addresses": list(distinct_addresses)})
         await _alert_tracker_record_call(client, slug, c.get("floor"), list(distinct_addresses))
     return delivered
