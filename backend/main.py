@@ -1041,6 +1041,70 @@ async def inspect_wallet(request: Request, address: str):
     }
 
 
+@app.get("/cron/recent-convergence-summary")
+async def recent_convergence_summary(request: Request, hours: int = 24, limit: int = 500):
+    # Answers "what happened to mints that only had 1 tracked wallet" with
+    # real data: groups recent nft_sale_events_log rows by slug, cross-
+    # references against smart_wallet_tags, and reports each slug's
+    # distinct-tracked-wallet count - 1 means it was correctly withheld by
+    # the 2-wallet convergence minimum (not a bug, not a miss), 2+ means
+    # it should have (or did) post, worth checking against the channel.
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    async with httpx.AsyncClient(timeout=20) as client:
+        events_res = await client.get(
+            f"{settings.supabase_url}/rest/v1/nft_sale_events_log",
+            headers=_supabase_headers(),
+            params={"event_at": f"gte.{since}", "seller": f"eq.{_TRACKED_WALLET_NULL_ADDRESS}", "select": "slug,buyer,event_at", "order": "event_at.desc", "limit": str(limit)},
+        )
+        events_res.raise_for_status()
+        events = events_res.json()
+        if not events:
+            return {"window_hours": hours, "slugs": []}
+
+        buyers_by_slug: dict[str, set[str]] = {}
+        for e in events:
+            buyers_by_slug.setdefault(e["slug"], set()).add(e["buyer"])
+        all_buyers = sorted({b for buyers in buyers_by_slug.values() for b in buyers})
+
+        tags_res = await client.get(
+            f"{settings.supabase_url}/rest/v1/smart_wallet_tags",
+            headers=_supabase_headers(),
+            params={"address": f"in.({','.join(all_buyers)})", "select": "address"},
+        )
+        tags_res.raise_for_status()
+        tracked = {row["address"] for row in tags_res.json()}
+
+        posted_res = await client.get(
+            f"{settings.supabase_url}/rest/v1/nft_alert_state",
+            headers=_supabase_headers(),
+            params={"slug": f"in.({','.join(buyers_by_slug.keys())})", "alert_type": "eq.nft_scope_any_post", "select": "slug"},
+        )
+        posted_slugs = {row["slug"] for row in posted_res.json()} if posted_res.status_code == 200 else set()
+
+    slugs = []
+    for slug, buyers in buyers_by_slug.items():
+        tracked_buyers = sorted(buyers & tracked)
+        slugs.append({
+            "slug": slug,
+            "tracked_wallets_minting": len(tracked_buyers),
+            "tracked_addresses": tracked_buyers,
+            "cleared_convergence_minimum": len(tracked_buyers) >= _NFT_SCOPE_TRACKED_CONVERGENCE_ALERT_MIN_WALLETS,
+            "known_posted_this_cycle_window": slug in posted_slugs,
+        })
+    slugs.sort(key=lambda s: -s["tracked_wallets_minting"])
+    return {
+        "window_hours": hours,
+        "total_slugs_with_tracked_activity": len(slugs),
+        "withheld_single_wallet_only": [s["slug"] for s in slugs if s["tracked_wallets_minting"] == 1],
+        "cleared_2plus": [s for s in slugs if s["tracked_wallets_minting"] >= 2],
+        "slugs": slugs,
+    }
+
+
 @app.get("/cron/trigger-wallet-watch")
 async def trigger_wallet_watch(request: Request):
     # Manually fires _tracked_wallet_watch_sweep right now instead of
