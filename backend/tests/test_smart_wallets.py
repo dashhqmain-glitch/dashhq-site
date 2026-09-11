@@ -614,16 +614,44 @@ def _good_score(**overrides):
     return data
 
 
-async def test_maybe_post_convergence_skips_below_minimum_wallets():
+async def test_maybe_post_convergence_skips_with_zero_tracked_wallets():
+    # Floor lowered from a 2+ convergence requirement to 1 by direct
+    # request, now that the tracked list has grown large enough that a
+    # single wallet's mint is itself a meaningful signal - but zero
+    # tracked wallets is still correctly a no-op.
     async def fail_if_called(*a, **k):
-        raise AssertionError("should never post below the minimum")
+        raise AssertionError("should never post with no tracked wallets at all")
 
     with patch.object(main, "_post_channel_message", new=fail_if_called):
         result = await main._nft_scope_maybe_post_tracked_convergence(
-            main.httpx.AsyncClient(), "slug", _fake_collection(),
-            [{"address": "0xa", "tag": "REALCOIN", "rank": None, "pnl": None}], _good_score(),
+            main.httpx.AsyncClient(), "slug", _fake_collection(), [], _good_score(),
         )
     assert result is False
+
+
+async def test_maybe_post_convergence_posts_with_a_single_tracked_wallet():
+    hits = [{"address": "0xa", "tag": "REALCOIN", "rank": None, "pnl": None}]
+
+    async def fake_recently_posted(client, slug):
+        return False
+
+    async def fake_clears_wash(client, slug):
+        return True
+
+    async def fake_post(client, channel_id, embed, content=None, components=None):
+        return True
+
+    async def noop(*a, **k):
+        pass
+
+    with patch.object(main, "_nft_scope_recently_posted", new=fake_recently_posted), \
+         patch.object(main, "_nft_scope_clears_wash_check", new=fake_clears_wash), \
+         patch.object(main, "_post_channel_message", new=fake_post), \
+         patch.object(main, "_nft_scope_mark_posted", new=noop), \
+         patch.object(main, "_nft_scope_record_call_buyers", new=noop), \
+         patch.object(main, "_alert_tracker_record_call", new=noop):
+        result = await main._nft_scope_maybe_post_tracked_convergence(main.httpx.AsyncClient(), "slug", _fake_collection(), hits, _good_score())
+    assert result is True
 
 
 async def test_maybe_post_convergence_skips_if_recently_posted():

@@ -1059,12 +1059,14 @@ async def inspect_wallet(request: Request, address: str):
 
 @app.get("/cron/recent-convergence-summary")
 async def recent_convergence_summary(request: Request, hours: int = 24, limit: int = 500):
-    # Answers "what happened to mints that only had 1 tracked wallet" with
-    # real data: groups recent nft_sale_events_log rows by slug, cross-
-    # references against smart_wallet_tags, and reports each slug's
-    # distinct-tracked-wallet count - 1 means it was correctly withheld by
-    # the 2-wallet convergence minimum (not a bug, not a miss), 2+ means
-    # it should have (or did) post, worth checking against the channel.
+    # Answers "what happened to mints that had tracked wallets in them"
+    # with real data: groups recent nft_sale_events_log rows by slug,
+    # cross-references against smart_wallet_tags, and reports each slug's
+    # distinct-tracked-wallet count against the current posting minimum
+    # (_NFT_SCOPE_TRACKED_CONVERGENCE_ALERT_MIN_WALLETS) - anything below
+    # it was correctly withheld (not a bug, not a miss), anything at or
+    # above it should have (or did) post, worth checking against the
+    # channel.
     expected = f"Bearer {settings.cron_secret}"
     if not settings.cron_secret or request.headers.get("authorization") != expected:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -1084,12 +1086,18 @@ async def recent_convergence_summary(request: Request, hours: int = 24, limit: i
         buyers_by_slug: dict[str, set[str]] = {}
         for e in events:
             buyers_by_slug.setdefault(e["slug"], set()).add(e["buyer"])
-        all_buyers = sorted({b for buyers in buyers_by_slug.values() for b in buyers})
 
+        # Fetch the whole tracked list and intersect in Python, rather than
+        # an address=in.(...) filter built from this window's buyers - real
+        # bug, confirmed live: a wide window (or just a large tracked list,
+        # ~873 wallets now) can pull enough distinct buyers to overflow
+        # PostgREST's URL length limit and 400. Same fix already applied
+        # elsewhere in this file (_alchemy_webhook_tracked_addresses,
+        # post_latest_tracked_mint) for the identical reason.
         tags_res = await client.get(
             f"{settings.supabase_url}/rest/v1/smart_wallet_tags",
             headers=_supabase_headers(),
-            params={"address": f"in.({','.join(all_buyers)})", "select": "address"},
+            params={"select": "address"},
         )
         tags_res.raise_for_status()
         tracked = {row["address"] for row in tags_res.json()}
@@ -8156,15 +8164,20 @@ def _nft_scope_tracked_wallet_points(tracked_hits: list[dict] | None) -> tuple[i
 # to NFT Scope's normal scoring - it can never post on its own. That's
 # deliberate for the score itself, but it means the tracked list had no way
 # to proactively surface anything the way NFT Intel used to (just far too
-# indiscriminately). This is the deliberately narrow exception: when 2+
-# SEPARATE, staff-curated tracked wallets converge on the same collection
-# at once, that convergence is rare and high-signal enough to post on its
-# own, independent of whether the collection clears any other NFT Scope
-# gate. Shares the same "posted to NFT Scope at all" cooldown as every
-# other pass (_nft_scope_recently_posted/_nft_scope_mark_posted), so this
-# and a normal tiered post for the same slug in the same cycle can never
-# both fire.
-_NFT_SCOPE_TRACKED_CONVERGENCE_ALERT_MIN_WALLETS = 2
+# indiscriminately). This is the deliberately narrow exception: any
+# staff-curated tracked wallet minting is worth surfacing on its own,
+# independent of whether the collection clears any other NFT Scope gate -
+# lowered from a 2+ convergence requirement to 1 by direct request, now
+# that the tracked list has grown large enough that a single wallet's
+# mint is itself a meaningful signal worth seeing. When 2+ DO converge,
+# that's still shown as a stronger signal (the win-rate/conviction-badge/
+# convergence-window fields in the embed all still apply and get more
+# convincing with more wallets) - this constant only controls the FLOOR.
+# Shares the same "posted to NFT Scope at all" cooldown as every other
+# pass (_nft_scope_recently_posted/_nft_scope_mark_posted), so this and a
+# normal tiered post for the same slug in the same cycle can never both
+# fire.
+_NFT_SCOPE_TRACKED_CONVERGENCE_ALERT_MIN_WALLETS = 1
 _NFT_SCOPE_TRACKED_ALERT_COLOR = 0x1B42FF  # Dash HQ blue (matches EMBED_COLOR) - was violet (NFT Intel's old color), changed to carry the brand instead
 
 

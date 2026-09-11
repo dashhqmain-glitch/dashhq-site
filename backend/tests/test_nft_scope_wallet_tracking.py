@@ -669,12 +669,14 @@ async def test_tracked_wallet_watch_sweep_logs_a_resolved_mint_and_triggers_conv
 
 
 async def test_maybe_post_from_slug_direct_requires_the_convergence_minimum():
+    # Floor is 1 tracked wallet now (lowered from 2 by direct request), so
+    # zero tracked wallets is the only thing this minimum still withholds.
     class FakeClient:
         async def get(self, url, headers=None, params=None):
             if "nft_sale_events_log" in url:
-                return FakeRes(200, [{"buyer": "0xonly"}])
+                return FakeRes(200, [{"buyer": "0xuntracked"}])
             if "smart_wallet_tags" in url:
-                return FakeRes(200, [{"address": "0xonly", "tag": "T", "rank": None, "pnl": None, "category": None}])
+                return FakeRes(200, [])  # 0xuntracked isn't a tracked wallet at all
             return FakeRes(200, [])
 
     async def fail_if_called(*a, **k):
