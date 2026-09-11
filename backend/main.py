@@ -1157,6 +1157,53 @@ async def trigger_webhook_sync(request: Request):
     return result
 
 
+@app.get("/cron/inspect-channel-around")
+async def inspect_channel_around(request: Request, timestamp: str, channel_id: str | None = None, limit: int = 10):
+    # The one truly authoritative check: Discord's own message history for
+    # the actual channel, at the actual moment - not this app's own state
+    # tables, not a human's client-side search (which is known to not
+    # reliably index text inside bot EMBEDS - titles/descriptions - the
+    # way it indexes plain typed message content, so a real embed post can
+    # legitimately not turn up in a UI search while still existing).
+    # timestamp -> a synthetic Discord snowflake for Discord's own
+    # `around` parameter, per Discord's documented snowflake format
+    # (ms-since-Discord-epoch << 22) - no message ID needed, any moment in
+    # time works.
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not settings.discord_bot_token:
+        return {"error": "discord_bot_token not configured"}
+    channel_id = channel_id or settings.discord_nft_scope_channel_id
+    if not channel_id:
+        return {"error": "no channel_id given and discord_nft_scope_channel_id not configured"}
+    try:
+        dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="timestamp must be ISO 8601")
+    discord_epoch_ms = 1420070400000
+    ms = int(dt.timestamp() * 1000)
+    snowflake = (ms - discord_epoch_ms) << 22
+    async with httpx.AsyncClient(timeout=15) as client:
+        res = await client.get(
+            f"{DISCORD_API}/channels/{channel_id}/messages",
+            headers={"Authorization": f"Bot {settings.discord_bot_token}"},
+            params={"around": str(snowflake), "limit": str(limit)},
+        )
+        res.raise_for_status()
+        messages = res.json()
+    return {
+        "channel_id": channel_id, "queried_around": timestamp,
+        "messages": [
+            {
+                "id": m["id"], "timestamp": m.get("timestamp"), "content": m.get("content") or None,
+                "embed_titles": [e.get("title") for e in (m.get("embeds") or [])],
+            }
+            for m in messages
+        ],
+    }
+
+
 @app.get("/cron/inspect-alert-state")
 async def inspect_alert_state(request: Request, slug: str):
     # Raw, unfiltered dump of every nft_alert_state row for a slug - no
