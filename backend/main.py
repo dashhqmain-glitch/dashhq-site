@@ -1157,6 +1157,29 @@ async def trigger_webhook_sync(request: Request):
     return result
 
 
+@app.get("/cron/check-alert-tracker-post")
+async def check_alert_tracker_post(request: Request, slug: str):
+    # Answers "did THIS specific slug actually get an Alert Tracker post"
+    # with certainty - nft_scope_any_post (what _nft_scope_recently_posted
+    # checks) is shared by EVERY NFT Scope posting pass, not just the
+    # Alert Tracker, so it can't tell the two apart. alert_tracker_calls
+    # is written ONLY by _nft_scope_maybe_post_tracked_convergence, right
+    # after a real, delivered Alert Tracker post - so a row here is
+    # unambiguous proof, and no row means no Alert Tracker post happened,
+    # regardless of what the generic posted-flag says.
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    async with httpx.AsyncClient(timeout=15) as client:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/alert_tracker_calls",
+            headers=_supabase_headers(), params={"slug": f"eq.{slug}", "select": "*"},
+        )
+        res.raise_for_status()
+        rows = res.json()
+    return {"slug": slug, "alert_tracker_posted": bool(rows), "rows": rows}
+
+
 @app.get("/cron/diagnose-slug-posting")
 async def diagnose_slug_posting(request: Request, slug: str):
     # Answers "why didn't this real, already-logged slug post" with real
