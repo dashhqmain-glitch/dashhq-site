@@ -441,6 +441,14 @@ alter table aco_drops add column if not exists discord_staff_message_id text;
 -- reading the embed, not a balance the bot tracks or moves itself.
 alter table aco_drops add column if not exists fund_required text;
 
+-- Project pfp shown as the drop embed's thumbnail (top-right corner),
+-- resolved once from OpenSea at creation time (via checker_url's collection
+-- slug, falling back to contract_address) and persisted here - not
+-- re-fetched on every render, same reasoning as every other cached OpenSea
+-- shape in this codebase. Null just means no thumbnail renders; a failed
+-- lookup never blocks drop creation.
+alter table aco_drops add column if not exists image_url text;
+
 create index if not exists aco_drops_status_idx on aco_drops (status);
 
 alter table aco_drops enable row level security;

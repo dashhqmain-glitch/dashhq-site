@@ -2039,6 +2039,28 @@ def _aco_deadline_countdown(deadline_iso: str | None) -> str:
 _ACO_EMBED_SPACER = {"name": "​", "value": "​", "inline": False}
 
 
+async def _aco_resolve_project_image(client: httpx.AsyncClient, checker_url: str | None, contract_address: str | None) -> str | None:
+    # Best-effort only, called once at drop-creation time (see
+    # _handle_aco_create_step2_submit) - a failed or slow OpenSea lookup
+    # must never block a drop from posting. Same priority order as
+    # _pnl_render_core: an OpenSea collection URL in the Checker field is
+    # authoritative when present, contract address is the fallback for
+    # anything without one (or on an unrecognized checker link).
+    slug = _extract_opensea_slug(checker_url or "")
+    if slug:
+        try:
+            c = await _nft_collection_core(slug)
+        except HTTPException:
+            c = None
+        if c and c.get("image"):
+            return c["image"]
+    if contract_address and _EVM_ADDRESS_RE.match(contract_address.strip()):
+        c = await _nft_resolve_by_contract(client, contract_address.strip())
+        if c and c.get("image"):
+            return c["image"]
+    return None
+
+
 def _aco_drop_embed(drop: dict, ticket_count: int, member_count: int, *, show_wallets: bool = True) -> dict:
     status = drop.get("status", "open")
     # "Closed" appears in both non-open labels on purpose (direct staff
@@ -2098,6 +2120,7 @@ def _aco_drop_embed(drop: dict, ticket_count: int, member_count: int, *, show_wa
         "title": drop["title"],
         "color": _ACO_BLUE,
         "fields": fields,
+        "thumbnail": {"url": drop["image_url"]} if drop.get("image_url") else None,
         "footer": {"text": f"DASH ACO · Drop ID: {drop['id']}"},
     }
 
@@ -2365,6 +2388,7 @@ async def _handle_aco_create_step2_submit(payload: dict) -> dict:
     await _discord_deferred_ack(interaction_id, token, ephemeral=True)
 
     async with httpx.AsyncClient(timeout=20) as client:
+        row["image_url"] = await _aco_resolve_project_image(client, row["checker_url"], row["contract_address"])
         res = await client.post(f"{settings.supabase_url}/rest/v1/aco_drops", headers=_supabase_headers(), json=row)
         res.raise_for_status()
         drop = res.json()[0]

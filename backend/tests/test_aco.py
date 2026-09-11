@@ -187,6 +187,55 @@ def test_embed_carries_dash_aco_branding():
     assert "DASH ACO" in embed["footer"]["text"]
 
 
+def test_embed_shows_project_pfp_as_thumbnail_when_resolved():
+    embed = main._aco_drop_embed(_drop(image_url="https://cdn.example/pfp.png"), 0, 0)
+    assert embed["thumbnail"] == {"url": "https://cdn.example/pfp.png"}
+
+
+def test_embed_has_no_thumbnail_when_image_was_never_resolved():
+    embed = main._aco_drop_embed(_drop(image_url=None), 0, 0)
+    assert embed["thumbnail"] is None
+
+
+# ── _aco_resolve_project_image ────────────────────────────────────────────
+
+async def test_resolve_project_image_prefers_checker_url_collection_slug():
+    async def fake_collection_core(slug):
+        assert slug == "trust-us-nft"
+        return {"image": "https://opensea-img/trust-us-nft.png"}
+
+    with patch("main._nft_collection_core", new=fake_collection_core):
+        image = await main._aco_resolve_project_image(None, "https://opensea.io/collection/trust-us-nft/overview", "0xca94e274d769f988f74e2a73cc87d333ee2a3249")
+    assert image == "https://opensea-img/trust-us-nft.png"
+
+
+async def test_resolve_project_image_falls_back_to_contract_when_no_checker_slug():
+    async def fake_resolve_by_contract(client, address):
+        assert address == "0xca94e274d769f988f74e2a73cc87d333ee2a3249"
+        return {"image": "https://opensea-img/by-contract.png"}
+
+    with patch("main._nft_resolve_by_contract", new=fake_resolve_by_contract):
+        image = await main._aco_resolve_project_image(None, "https://example.com/not-opensea", "0xca94e274d769f988f74e2a73cc87d333ee2a3249")
+    assert image == "https://opensea-img/by-contract.png"
+
+
+async def test_resolve_project_image_returns_none_without_checker_or_contract():
+    image = await main._aco_resolve_project_image(None, None, None)
+    assert image is None
+
+
+async def test_resolve_project_image_survives_a_failed_opensea_lookup():
+    # Best-effort only - a 404/lookup miss must come back as None, never
+    # raise, so a bad or unrecognized Checker link can never block a drop
+    # from posting.
+    async def raises_not_found(slug):
+        raise main.HTTPException(status_code=404, detail="Collection not found")
+
+    with patch("main._nft_collection_core", new=raises_not_found):
+        image = await main._aco_resolve_project_image(None, "https://opensea.io/collection/does-not-exist", None)
+    assert image is None
+
+
 def test_embed_omits_optional_fields_when_absent():
     d = _drop(profit_note=None, contract_address=None, checker_url=None)
     embed = main._aco_drop_embed(d, 0, 0)
@@ -617,6 +666,44 @@ async def test_aco_create_step2_submit_leaves_optional_fields_none_when_left_bla
     assert inserted["contract_address"] == "0xabc"
     assert inserted["checker_url"] is None
     assert inserted["fund_required"] is None
+
+
+async def test_aco_create_step2_submit_stores_the_resolved_project_image():
+    # The actual feature: the drop embed's thumbnail (top-right pfp) comes
+    # from resolving the Checker/Contract fields against OpenSea once at
+    # creation time, not fetched on every render - see _aco_drop_embed and
+    # _aco_resolve_project_image.
+    settings.discord_aco_staff_role_id = "role123"
+    settings.discord_aco_channel_id = "chan1"
+    settings.discord_bot_token = "tok"
+    inserted = {}
+
+    class FakeClient:
+        async def post(self, url, headers=None, json=None):
+            if "aco_drops" in url:
+                inserted.update(json)
+                return FakeRes(200, [{"id": "drop1", "title": "Test Drop", "chain": "Ethereum", "status": "open",
+                                       "deadline": "2026-12-25T18:00:00+00:00"}])
+            if "/messages" in url:
+                return FakeRes(200, {"id": "msg1"})
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, params=None, json=None):
+            return FakeRes(200, {})
+
+    async def fake_resolve_image(client, checker_url, contract_address):
+        assert checker_url == "https://opensea.io/collection/trust-us-nft"
+        assert contract_address == "0xca94e274d769f988f74e2a73cc87d333ee2a3249"
+        return "https://opensea-img/trust-us-nft.png"
+
+    with patch("main.httpx.AsyncClient") as MockClient, \
+         patch("main._aco_resolve_project_image", new=fake_resolve_image):
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        components = _step2_components(contract="0xca94e274d769f988f74e2a73cc87d333ee2a3249", checker="https://opensea.io/collection/trust-us-nft")
+        payload = _payload(permissions="32", roles=[], components=components)
+        await main._handle_aco_create_step2_submit(payload)
+
+    assert inserted["image_url"] == "https://opensea-img/trust-us-nft.png"
 
 
 async def test_aco_create_step2_submit_reports_real_failure_when_channel_post_fails():
