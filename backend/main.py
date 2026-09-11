@@ -4090,6 +4090,15 @@ async def _smart_wallets_import_run(token: str, file_url: str) -> None:
                 json=chunk,
             )
             res.raise_for_status()
+        # Sync the Alchemy webhooks right now instead of waiting for the
+        # next scheduled /cron/nft-poll tick (up to 5 min away) - a batch
+        # import is exactly the moment a member most wants freshly-added
+        # wallets covered immediately, not on the next cycle. Best-effort:
+        # a failed sync here still self-heals on the next regular cycle.
+        try:
+            await _alchemy_webhook_sync_addresses(client)
+        except httpx.HTTPError:
+            logger.exception("Immediate webhook sync failed after smart-wallets import")
         summary = f"✅ Imported {len(rows)} row(s) across {len(distinct_tags)} tag(s) for {len(distinct_addresses)} distinct wallet(s)."
         if skipped:
             summary += f" ⚠️ {skipped} line(s) couldn't be parsed and were skipped."
@@ -6075,7 +6084,6 @@ _NFT_MONITOR_EVENTS = [
     {"label": "Supply Cut / Burns", "value": "supply_cut", "emoji": "✂️", "description": "Alert when total supply decreases"},
     {"label": "Mint Progress", "value": "mint_progress", "emoji": "🌱", "description": "Alert when total supply increases"},
     {"label": "Sweep Detected", "value": "sweep", "emoji": "🧹", "description": "Alert on concentrated buying"},
-    {"label": "Volume Spike", "value": "volume_spike", "emoji": "📊", "description": "Alert when 24h volume spikes"},
 ]
 _NFT_MONITOR_LABELS = {e["value"]: e["label"] for e in _NFT_MONITOR_EVENTS}
 
@@ -6476,7 +6484,7 @@ async def _nft_poll_watchlist_alerts(client: httpx.AsyncClient) -> list[str]:
                                 alerted.append(f"{slug}:{direction_event}")
 
                 baseline = [h["volume_1d"] for h in history if h.get("volume_1d") is not None]
-                if baseline and c.get("vol1d") is not None:
+                if settings.nft_volume_spike_enabled and baseline and c.get("vol1d") is not None:
                     avg = sum(baseline) / len(baseline)
                     if avg > 0 and c["vol1d"] >= avg * 2.5:
                         state = await _nft_alert_state_get(client, slug, "volume_spike")
@@ -9921,7 +9929,6 @@ def _nft_channel_explainer_embed() -> dict:
             "anything on anyone's `/watchlist`:\n\n"
             "✂️ **Supply Cut** — total supply just went down (burn, reveal, etc).\n"
             "📈 **Floor Change** — floor price moved meaningfully, up or down.\n"
-            "📊 **Volume Spike** — 24h volume is running well above its recent average.\n"
             "🧹 **Possible Sweep** — several sales in a short window, concentrated in very few wallets.\n"
             "Don't see a collection here? Add it with `/watchlist add`.\n\n"
             "Nothing here is financial advice — these are automated, on-chain signals only."

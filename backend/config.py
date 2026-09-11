@@ -36,6 +36,13 @@ class Settings(BaseSettings):
     discord_nft_scope_channel_id: str = ""
     nft_scope_enabled: bool = True
 
+    # Watchlist "Volume Spike" alert: disabled by direct request - it fired
+    # on pure ratio (24h volume >= 2.5x a recent average) with no absolute
+    # floor, so a dead collection going from 0.00 to 0.02 ETH counted as a
+    # "spike" just as much as a real one. Off by default rather than
+    # deleted, in case a real minimum-volume version is wanted later.
+    nft_volume_spike_enabled: bool = False
+
     # Standalone Smart Wallet Convergence alerts (2+ separately-tracked
     # wallets buying into the same collection at once - see
     # _nft_scope_maybe_post_tracked_convergence in main.py) go to this

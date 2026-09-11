@@ -5,6 +5,7 @@ import time
 from unittest.mock import patch
 
 import main
+from config import settings
 
 
 def sale(buyer, seller, token_id="1"):
@@ -114,7 +115,7 @@ async def test_volume_spike_suppressed_when_wash_tainted():
     assert not any("volume_spike" in a for a in alerted)
 
 
-async def test_volume_spike_fires_when_organic():
+async def test_volume_spike_fires_when_organic_and_enabled():
     async def fake_clean_events(client, path, params=None):
         return {"asset_events": [sale(f"b{i}", f"s{i}", str(i)) for i in range(10)]}
 
@@ -128,6 +129,37 @@ async def test_volume_spike_fires_when_organic():
     patchers = [patch.object(main, name, new=fn) for name, fn in mocks.items()]
     for p in patchers:
         p.start()
+    settings.nft_volume_spike_enabled = True
+    try:
+        async with main.httpx.AsyncClient() as client:
+            alerted = await main._nft_poll_watchlist_alerts(client)
+    finally:
+        settings.nft_volume_spike_enabled = False
+        for p in patchers:
+            p.stop()
+
+    assert any("Volume Spike" in t for t in posted)
+    assert any("volume_spike" in a for a in alerted)
+
+
+async def test_volume_spike_disabled_by_default():
+    # Direct request: too many tiny "spikes" (e.g. 0.00 -> 0.02 ETH) fired
+    # on pure ratio with no absolute-volume floor. Disabled rather than
+    # deleted, in case a real minimum-volume version is wanted later.
+    async def fake_clean_events(client, path, params=None):
+        return {"asset_events": [sale(f"b{i}", f"s{i}", str(i)) for i in range(10)]}
+
+    posted = []
+    async def fake_post_nft_alert(client, channel_id, embed):
+        posted.append(embed["title"])
+        return True
+
+    mocks = _watchlist_alert_mocks(fake_clean_events)
+    mocks["_post_nft_alert"] = fake_post_nft_alert
+    patchers = [patch.object(main, name, new=fn) for name, fn in mocks.items()]
+    for p in patchers:
+        p.start()
+    assert settings.nft_volume_spike_enabled is False  # confirms the real default, not just this test's setup
     try:
         async with main.httpx.AsyncClient() as client:
             alerted = await main._nft_poll_watchlist_alerts(client)
@@ -135,5 +167,5 @@ async def test_volume_spike_fires_when_organic():
         for p in patchers:
             p.stop()
 
-    assert any("Volume Spike" in t for t in posted)
-    assert any("volume_spike" in a for a in alerted)
+    assert not any("Volume Spike" in t for t in posted)
+    assert not any("volume_spike" in a for a in alerted)

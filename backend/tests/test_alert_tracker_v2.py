@@ -6,11 +6,32 @@ embed, and the Alert Tracker's own self-audited track record
 import hashlib
 import hmac
 import json
+import os
+import re
 import time
 from unittest.mock import patch
 
 import main
 from config import settings
+
+
+def test_vercel_json_actually_routes_the_webhook_path_to_the_api():
+    # Real bug, confirmed live: the FastAPI route for
+    # /webhooks/alchemy-address-activity/{chain} existed and worked
+    # perfectly in every test, but nothing in vercel.json forwarded that
+    # URL prefix to /api/index.py - so in production Vercel's own static
+    # router 404'd every single delivery before Python ever saw it, and
+    # every test here (which calls the handler function directly) had no
+    # way to catch that. This is the one guard against that class of bug
+    # ever silently recurring for this route.
+    repo_root = os.path.join(os.path.dirname(__file__), "..", "..")
+    with open(os.path.join(repo_root, "vercel.json")) as f:
+        config = json.load(f)
+    routes = config["routes"]
+    sample_path = "/webhooks/alchemy-address-activity/ethereum"
+    matched = next((r for r in routes if re.fullmatch(r["src"], sample_path)), None)
+    assert matched is not None, "no vercel.json route matches a real webhook URL at all"
+    assert matched["dest"] == "/api/index.py", f"webhook path routes to {matched['dest']!r}, not the Python API"
 
 
 class FakeRes:
