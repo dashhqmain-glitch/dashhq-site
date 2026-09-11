@@ -1157,6 +1157,33 @@ async def trigger_webhook_sync(request: Request):
     return result
 
 
+@app.get("/cron/inspect-alert-state")
+async def inspect_alert_state(request: Request, slug: str):
+    # Raw, unfiltered dump of every nft_alert_state row for a slug - no
+    # interpretation, no inference. Exists specifically so a claim like
+    # "NFT Scope posted about X" can be checked against the exact
+    # alert_type and timestamp that was actually written, instead of
+    # asserted from code-reading alone. nft_scope_trending_post/
+    # nft_scope_momentum/nft_scope_holdings_scan etc. are only ever
+    # written right after a real, delivered Discord post (see the
+    # surrounding code at each _nft_scope_mark_posted call site) - if a
+    # row for one of those exists, that pass posted for real; if only
+    # nft_scope_any_post/nft_scope_*_scan rows exist with no matching
+    # specific-pass row, something wrote the shared flag through a path
+    # this hasn't found yet, worth escalating rather than assuming.
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    async with httpx.AsyncClient(timeout=15) as client:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/nft_alert_state",
+            headers=_supabase_headers(), params={"slug": f"eq.{slug}", "select": "*"},
+        )
+        res.raise_for_status()
+        rows = res.json()
+    return {"slug": slug, "rows": rows}
+
+
 @app.get("/cron/check-alert-tracker-post")
 async def check_alert_tracker_post(request: Request, slug: str):
     # Answers "did THIS specific slug actually get an Alert Tracker post"
