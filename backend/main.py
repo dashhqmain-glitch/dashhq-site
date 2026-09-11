@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -738,7 +739,22 @@ async def test_smart_wallet_convergence(request: Request):
         {"address": "0x1111111111111111111111111111111111111a", "tag": "Top 6 REALCOIN", "rank": 6, "pnl": 10.19, "category": "KOL"},
         {"address": "0x2222222222222222222222222222222222222b", "tag": "Rank 1 RH MACHINES", "rank": 1, "pnl": None, "category": "Degen"},
     ]
-    embed = _nft_scope_tracked_convergence_embed(sample_collection, sample_hits)
+    # Sample win-rate/conviction/convergence-window/record-stat data too -
+    # this endpoint's whole point is showing the REAL production embed
+    # shape, and those are new fields on it now (see
+    # _nft_scope_tracked_convergence_embed) - leaving them out would show
+    # an outdated preview.
+    sample_track_records = {
+        "0x1111111111111111111111111111111111111a": {"address": "0x1111111111111111111111111111111111111a", "sample": 14, "wins": 9, "win_rate": 0.643, "best_pct": 6.2},
+        "0x2222222222222222222222222222222222222b": {"address": "0x2222222222222222222222222222222222222b", "sample": 6, "wins": 3, "win_rate": 0.5, "best_pct": 2.1},
+    }
+    now = time.time()
+    sample_event_times = {"0x1111111111111111111111111111111111111a": now - 300, "0x2222222222222222222222222222222222222b": now}
+    sample_record_stats = {"checked_calls": 27, "proved_calls": 16, "hit_rate": 0.593, "median_multiple": 3.4, "best_multiple": 11.2}
+    embed = _nft_scope_tracked_convergence_embed(
+        sample_collection, sample_hits, track_records=sample_track_records,
+        event_times=sample_event_times, record_stats=sample_record_stats,
+    )
     embed["footer"] = {"text": f"{embed['footer']['text']} · TEST POST with sample data, not a real signal"}
     async with httpx.AsyncClient(timeout=10) as client:
         posted = await _post_channel_message(
@@ -1745,6 +1761,8 @@ async def _dispatch_interaction(payload: dict, itype) -> dict:
             return await _handle_smart_wallets_command(payload)
         if cmd_name == "wallet-submit":
             return await _handle_wallet_submit_command(payload)
+        if cmd_name == "alert-tracker-record":
+            return await _handle_alert_tracker_record_command(payload)
         return await _handle_toolkit_command(payload)
 
     if itype == 4:  # APPLICATION_COMMAND_AUTOCOMPLETE
@@ -7926,27 +7944,27 @@ async def _nft_scope_realized_pnl_track_records(client: httpx.AsyncClient, in_fi
     return hits
 
 
-async def _nft_scope_smart_wallet_hits(client: httpx.AsyncClient, rapid_activity: dict | None) -> list[dict]:
-    # Only ever called when rapid_activity actually has buyer addresses to
-    # check (the caller gates on this), so this costs nothing on the far
-    # more common candidate with no burst at all. Merges two complementary
-    # sources into one normalized shape: nft_smart_wallets (bought early
-    # into a collection NFT Scope itself called out, which later proved
-    # out) and nft_wallet_pnl_stats (realized profit on ANY trade this bot
-    # has observed resolve, regardless of whether NFT Scope called it) -
-    # the second is broader and starts accumulating signal from day one,
-    # the first is a tighter, NFT-Scope-specific track record. Both
-    # queries run concurrently, not sequentially - same total request
-    # count, but only the slower of the two adds to wall-clock latency.
-    # The win-rate/sample-size bar is enforced server-side in both
-    # queries, not after the fact in Python - a wallet that doesn't clear
-    # it was never a hit in the first place. A wallet present in both
-    # sources is de-duplicated, keeping whichever shows the stronger win
-    # rate.
-    buyer_addresses = (rapid_activity or {}).get("buyer_addresses") or []
-    if not buyer_addresses:
-        return []
-    in_filter = f"in.({','.join(buyer_addresses)})"
+async def _nft_scope_merged_track_records(client: httpx.AsyncClient, addresses: list[str]) -> dict[str, dict]:
+    # Shared by _nft_scope_smart_wallet_hits (general NFT Scope scoring)
+    # and the Alert Tracker embed's per-wallet win-rate line - same "best
+    # combined track record across both self-computed sources" lookup for
+    # a set of addresses, just keyed by address instead of flattened to a
+    # list. Merges two complementary sources into one normalized shape:
+    # nft_smart_wallets (bought early into a collection NFT Scope itself
+    # called out, which later proved out) and nft_wallet_pnl_stats
+    # (realized profit on ANY trade this bot has observed resolve,
+    # regardless of whether NFT Scope called it) - the second is broader
+    # and starts accumulating signal from day one, the first is a
+    # tighter, NFT-Scope-specific track record. Both queries run
+    # concurrently, not sequentially - same total request count, but only
+    # the slower of the two adds to wall-clock latency. The win-rate/
+    # sample-size bar is enforced server-side in both queries, not after
+    # the fact in Python - an address that doesn't clear it was never a
+    # hit in the first place. An address present in both sources is
+    # de-duplicated, keeping whichever shows the stronger win rate.
+    if not addresses:
+        return {}
+    in_filter = f"in.({','.join(addresses)})"
     call_hits, pnl_hits = await asyncio.gather(
         _nft_scope_call_buyer_track_records(client, in_filter),
         _nft_scope_realized_pnl_track_records(client, in_filter),
@@ -7956,6 +7974,17 @@ async def _nft_scope_smart_wallet_hits(client: httpx.AsyncClient, rapid_activity
         existing = hits.get(address)
         if not existing or candidate["win_rate"] > existing["win_rate"]:
             hits[address] = candidate
+    return hits
+
+
+async def _nft_scope_smart_wallet_hits(client: httpx.AsyncClient, rapid_activity: dict | None) -> list[dict]:
+    # Only ever called when rapid_activity actually has buyer addresses to
+    # check (the caller gates on this), so this costs nothing on the far
+    # more common candidate with no burst at all.
+    buyer_addresses = (rapid_activity or {}).get("buyer_addresses") or []
+    if not buyer_addresses:
+        return []
+    hits = await _nft_scope_merged_track_records(client, buyer_addresses)
     return list(hits.values())
 
 
@@ -8279,7 +8308,70 @@ async def _estimate_wallet_categories(client: httpx.AsyncClient, addresses: list
     return estimates
 
 
-def _nft_scope_tracked_convergence_embed(c: dict, tracked_hits: list[dict], estimated: dict[str, str] | None = None, scam_warning: str | None = None) -> dict:
+def _format_convergence_window(seconds: float) -> str:
+    seconds = max(0.0, seconds)
+    if seconds < 120:
+        return f"{int(seconds)}s"
+    minutes = int(seconds // 60)
+    if minutes < 120:
+        return f"{minutes} min"
+    hours = minutes // 60
+    if hours < 48:
+        return f"{hours}h"
+    return f"{hours // 24}d"
+
+
+async def _nft_scope_tracked_convergence_event_times(client: httpx.AsyncClient, slug: str, addresses: list[str]) -> dict[str, float]:
+    # _nft_scope_tracked_wallet_hits is a straight read of smart_wallet_tags
+    # (tag/rank/pnl/category) - it has no idea WHEN each wallet actually
+    # minted THIS slug, so the convergence-window line needs its own
+    # slug-scoped lookup against the same nft_sale_events_log every
+    # detection path already writes to. Epoch floats (via the existing
+    # _parse_event_at), not raw string comparison - matches
+    # _estimate_wallet_categories' established pattern for the same reason.
+    if not addresses or not slug:
+        return {}
+    try:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/nft_sale_events_log",
+            headers=_supabase_headers(),
+            params={"slug": f"eq.{slug}", "buyer": f"in.({','.join(addresses)})", "select": "buyer,event_at"},
+        )
+        res.raise_for_status()
+    except httpx.HTTPError:
+        return {}
+    earliest: dict[str, float] = {}
+    for row in res.json():
+        try:
+            ts = _parse_event_at(row["event_at"])
+        except (ValueError, KeyError, TypeError):
+            continue
+        addr = row["buyer"]
+        if addr not in earliest or ts < earliest[addr]:
+            earliest[addr] = ts
+    return earliest
+
+
+_ALERT_TRACKER_STATS_MIN_SAMPLE = 5  # below this, a hit rate is just noise from a handful of calls
+
+
+def _alert_tracker_footer_text(stats: dict | None) -> str:
+    # Passive credibility line, on by default on every future post rather
+    # than buried behind a command nobody runs - the whole point of
+    # self-auditing is that it's visible without having to go looking for
+    # it. Silently omitted below the minimum sample so a thin record never
+    # reads as an inflated claim.
+    base = "Smart Wallet Convergence · NFA"
+    if not stats or (stats.get("checked_calls") or 0) < _ALERT_TRACKER_STATS_MIN_SAMPLE or stats.get("hit_rate") is None:
+        return base
+    return f"{base} · Alert Tracker record: {stats['hit_rate'] * 100:.0f}% up on floor ({stats['checked_calls']} calls)"
+
+
+def _nft_scope_tracked_convergence_embed(
+    c: dict, tracked_hits: list[dict], estimated: dict[str, str] | None = None, scam_warning: str | None = None,
+    track_records: dict[str, dict] | None = None, event_times: dict[str, float] | None = None,
+    record_stats: dict | None = None,
+) -> dict:
     # A category badge and a shortened linked address, one line per
     # wallet - this list is externally curated, not proprietary internal
     # scoring, so naming which wallet matched (and letting staff click
@@ -8291,6 +8383,8 @@ def _nft_scope_tracked_convergence_embed(c: dict, tracked_hits: list[dict], esti
     # it read as if it were somehow about THIS mint.
     by_address = _nft_scope_tracked_convergence_wallet_rows(tracked_hits)
     estimated = estimated or {}
+    track_records = track_records or {}
+    event_times = event_times or {}
     lines = []
     for addr, info in list(by_address.items())[:_SWT_CONVERGENCE_MAX_WALLET_ROWS]:
         short = f"{addr[:6]}…{addr[-4:]}"
@@ -8307,12 +8401,28 @@ def _nft_scope_tracked_convergence_embed(c: dict, tracked_hits: list[dict], esti
             badge = f"`{info['category']}` - "
         else:
             badge = f"`~{estimated.get(addr, 'Degen')}` - "
+        # Real, resolved win rate - not this embed's own claim, this
+        # wallet's actual track record across every call it's been part
+        # of (_nft_scope_merged_track_records, same source /xray and NFT
+        # Scope's own scoring already trust). Only ever present here once
+        # it's already cleared the same sample-size/win-rate bar those
+        # other surfaces require, so showing it at all IS the credibility
+        # signal - no separate threshold to duplicate here.
+        record = track_records.get(addr)
+        record_suffix = f" · **{record['win_rate'] * 100:.0f}%** ({record['sample']} calls)" if record else ""
         # [category]-[wallet]-[project being minted] - self-contained per
         # row, so a single line still makes sense on its own (screenshot,
         # copy-paste) without needing the embed's title for context.
-        lines.append(f"{badge}[{short}](https://opensea.io/{addr}) - **{c['name']}**")
+        lines.append(f"{badge}[{short}](https://opensea.io/{addr}) - **{c['name']}**{record_suffix}")
     if len(by_address) > _SWT_CONVERGENCE_MAX_WALLET_ROWS:
         lines.append(f"+{len(by_address) - _SWT_CONVERGENCE_MAX_WALLET_ROWS} more")
+    # Display-only, never a gate - a tight/wide convergence window is
+    # useful context, but treating it as a hard requirement risks
+    # silently dropping a real alert (direct instruction: "we cant afford
+    # to miss out on anything").
+    times = [t for t in (event_times.get(a) for a in by_address) if t is not None]
+    if len(times) >= 2:
+        lines.append(f"⏱️ Converged within {_format_convergence_window(max(times) - min(times))}")
     opensea_url = c.get("openseaUrl")
     external_site = c.get("website")
     # Check OpenSea first: its own listing is a link THIS bot built
@@ -8337,9 +8447,23 @@ def _nft_scope_tracked_convergence_embed(c: dict, tracked_hits: list[dict], esti
     if scam_warning:
         lines.append(f"\n{scam_warning}")
     chain_display = _CHAIN_DISPLAY_NAMES.get(c.get("chain") or "", (c.get("chain") or "Unknown").title())
+    # Conviction badge, swapped in for the leading emoji - strictly tied to
+    # REAL resolved track records (never staff-set category alone, which
+    # is a claim this bot can't verify), so it can never overstate the
+    # signal. Any wallet present in track_records already cleared
+    # _NFT_SCOPE_SMART_WALLET_MIN_SAMPLE/_MIN_WIN_RATE server-side, so
+    # "how many converging wallets have one" is itself the honest bar -
+    # no separate threshold to invent and get wrong.
+    proven_converging = sum(1 for a in by_address if a in track_records)
+    if proven_converging >= 2:
+        emoji = "🔥"
+    elif proven_converging == 1:
+        emoji = "⚡"
+    else:
+        emoji = "🌱"
     return {
         "author": {"name": "🔔 Alert Tracker"},
-        "title": f"🌱 {len(by_address)} Wallet Minting {c['name']}",
+        "title": f"{emoji} {len(by_address)} Wallet Minting {c['name']}",
         "url": opensea_url,
         "description": "\n".join(lines),
         "color": _NFT_SCOPE_TRACKED_ALERT_COLOR,
@@ -8348,7 +8472,7 @@ def _nft_scope_tracked_convergence_embed(c: dict, tracked_hits: list[dict], esti
         # covers several chains at once (see _NFT_SCOPE_CHAINS), and which
         # one a mint is actually on is easy to miss otherwise.
         "fields": [{"name": "⛓️ Chain", "value": chain_display, "inline": True}],
-        "footer": {"text": "Smart Wallet Convergence · NFA"},
+        "footer": {"text": _alert_tracker_footer_text(record_stats)},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
@@ -8371,6 +8495,181 @@ def _nft_scope_tracked_convergence_components(c: dict) -> list:
     return [{"type": 1, "components": buttons}]
 
 
+async def _alert_tracker_stats(client: httpx.AsyncClient) -> dict | None:
+    try:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/alert_tracker_stats",
+            headers=_supabase_headers(),
+            params={"select": "checked_calls,proved_calls,hit_rate,median_multiple,best_multiple"},
+        )
+        res.raise_for_status()
+        rows = res.json()
+        return rows[0] if rows else None
+    except httpx.HTTPError:
+        return None
+
+
+_ALERT_TRACKER_MATURITY_SECONDS = 24 * 3600  # how old a call must be before checking whether it proved out
+_ALERT_TRACKER_PROVE_MAX_CHECKS_PER_CYCLE = 10  # bounds the extra OpenSea spend this adds per poll cycle
+
+
+async def _alert_tracker_due_calls(client: httpx.AsyncClient) -> list[dict]:
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=_ALERT_TRACKER_MATURITY_SECONDS)).isoformat()
+    try:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/alert_tracker_calls",
+            headers=_supabase_headers(),
+            params={
+                "checked_at": "is.null", "called_at": f"lte.{cutoff}",
+                "select": "id,slug,floor_at_call", "limit": str(_ALERT_TRACKER_PROVE_MAX_CHECKS_PER_CYCLE),
+            },
+        )
+        res.raise_for_status()
+        return res.json()
+    except httpx.HTTPError:
+        return []
+
+
+async def _alert_tracker_prove_due_calls(client: httpx.AsyncClient) -> dict:
+    # Revisits calls old enough to have had a real chance to prove out
+    # (see alert_tracker_calls in schema.sql) against each slug's CURRENT
+    # floor - a direct, live OpenSea lookup per checked slug rather than
+    # trying to correlate against nft_snapshot_history, which only covers
+    # slugs NFT Scope is still actively re-scanning and can have gaps for
+    # anything past its cooldown window. Bounded per cycle
+    # (_ALERT_TRACKER_PROVE_MAX_CHECKS_PER_CYCLE), same reasoning as every
+    # other capped per-cycle phase in this poller.
+    due = await _alert_tracker_due_calls(client)
+    checked = proved = 0
+    for row in due:
+        floor_then = row.get("floor_at_call")
+        floor_now = None
+        try:
+            c = await _nft_collection_core(row["slug"])
+            floor_now = c.get("floor")
+        except HTTPException:
+            pass
+        multiple = (floor_now / floor_then) if floor_then and floor_now else None
+        is_proved = bool(multiple and multiple >= _NFT_SCOPE_PROVED_MULTIPLE_THRESHOLD)
+        try:
+            await client.patch(
+                f"{settings.supabase_url}/rest/v1/alert_tracker_calls",
+                headers=_supabase_headers(prefer="return=minimal"),
+                params={"id": f"eq.{row['id']}"},
+                json={"checked_at": datetime.now(timezone.utc).isoformat(), "multiple": multiple, "proved": is_proved},
+            )
+            checked += 1
+            proved += int(is_proved)
+        except httpx.HTTPError:
+            logger.exception("Failed to mark alert_tracker_calls row %s checked", row["id"])
+    return {"checked": checked, "proved": proved}
+
+
+async def _alert_tracker_record_call(client: httpx.AsyncClient, slug: str, floor: float | None, wallets: list[str]) -> None:
+    # Narrowly scoped to the Alert Tracker itself (see alert_tracker_calls
+    # in schema.sql) - deliberately separate from the NFT-Scope-wide
+    # nft_scope_call_buyers/nft_scope_proved_slugs below, which mix in
+    # every scan pass and so can't honestly answer "how good is the Alert
+    # Tracker specifically." Best-effort: a failed insert here must never
+    # block or fail the post it's recording.
+    try:
+        await client.post(
+            f"{settings.supabase_url}/rest/v1/alert_tracker_calls",
+            headers=_supabase_headers(prefer="return=minimal"),
+            json={"slug": slug, "wallets": sorted(wallets), "floor_at_call": floor},
+        )
+    except httpx.HTTPError:
+        logger.exception("Failed to record alert_tracker_calls row for %s", slug)
+
+
+def _alert_tracker_record_embed(stats: dict | None) -> dict:
+    checked = (stats or {}).get("checked_calls") or 0
+    if checked < _ALERT_TRACKER_STATS_MIN_SAMPLE:
+        description = (
+            f"Not enough resolved calls yet to show a real hit rate ({checked}/{_ALERT_TRACKER_STATS_MIN_SAMPLE} minimum) - "
+            "check back once more Alert Tracker posts have had a full day to mature."
+        )
+    else:
+        lines = [
+            f"**{(stats['hit_rate'] or 0) * 100:.0f}%** of resolved calls went on to multiply "
+            f"**{_NFT_SCOPE_PROVED_MULTIPLE_THRESHOLD}x+** off the floor at the time of the call.",
+            f"📊 {stats['checked_calls']} calls resolved, {stats['proved_calls']} proved out",
+        ]
+        if stats.get("median_multiple"):
+            lines.append(f"📈 Median multiple on a proved call: **{stats['median_multiple']:.1f}x**")
+        if stats.get("best_multiple"):
+            lines.append(f"🏆 Best call so far: **{stats['best_multiple']:.1f}x**")
+        description = "\n".join(lines)
+    return {
+        "author": {"name": "🔔 Alert Tracker"},
+        "title": "Alert Tracker Record",
+        "description": description,
+        "color": _NFT_SCOPE_TRACKED_ALERT_COLOR,
+        "footer": {"text": "Self-audited - every convergence call, win or lose · NFA"},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def _handle_alert_tracker_record_command(payload: dict) -> dict:
+    async with httpx.AsyncClient(timeout=15) as client:
+        stats = await _alert_tracker_stats(client)
+    return {"type": 4, "data": {"embeds": [_alert_tracker_record_embed(stats)]}}
+
+
+_ALERT_TRACKER_DIGEST_SLUG = "__alert_tracker_digest__"  # pseudo-slug: this isn't about any one collection
+_ALERT_TRACKER_DIGEST_COOLDOWN_SECONDS = 7 * 24 * 3600
+
+
+async def _alert_tracker_top_proved_calls(client: httpx.AsyncClient, limit: int = 3) -> list[dict]:
+    try:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/alert_tracker_calls",
+            headers=_supabase_headers(),
+            params={"proved": "eq.true", "order": "multiple.desc", "limit": str(limit), "select": "slug,multiple"},
+        )
+        res.raise_for_status()
+        return res.json()
+    except httpx.HTTPError:
+        return []
+
+
+def _alert_tracker_digest_embed(stats: dict, top_calls: list[dict]) -> dict:
+    lines = [f"**{(stats['hit_rate'] or 0) * 100:.0f}%** hit rate across **{stats['checked_calls']}** resolved calls so far."]
+    if top_calls:
+        lines.append("")
+        lines.append("**Top calls:**")
+        lines.extend(f"• **{c['slug']}** — {c['multiple']:.1f}x off the floor at the call" for c in top_calls)
+    return {
+        "author": {"name": "🔔 Alert Tracker"},
+        "title": "📅 Weekly Recap",
+        "description": "\n".join(lines),
+        "color": _NFT_SCOPE_TRACKED_ALERT_COLOR,
+        "footer": {"text": "Self-audited - every convergence call, win or lose · NFA"},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+async def _alert_tracker_maybe_post_digest(client: httpx.AsyncClient) -> bool:
+    # Re-engagement for members not watching the channel constantly -
+    # reuses the generic nft_alert_state cooldown mechanism (the same one
+    # __alchemy__/__opensea__ rate-limit backoff already uses) rather than
+    # new schema, keyed by a pseudo-slug since this recap isn't about any
+    # one collection.
+    if not settings.discord_smart_wallet_channel_id:
+        return False
+    state = await _nft_alert_state_get(client, _ALERT_TRACKER_DIGEST_SLUG, "posted")
+    if not _nft_alert_cooled_down(state, cooldown_seconds=_ALERT_TRACKER_DIGEST_COOLDOWN_SECONDS):
+        return False
+    stats = await _alert_tracker_stats(client)
+    if not stats or (stats.get("checked_calls") or 0) < _ALERT_TRACKER_STATS_MIN_SAMPLE:
+        return False  # nothing worth recapping yet - a near-empty digest would undercut the credibility it's meant to build
+    top_calls = await _alert_tracker_top_proved_calls(client)
+    delivered = await _post_channel_message(client, settings.discord_smart_wallet_channel_id, _alert_tracker_digest_embed(stats, top_calls))
+    if delivered:
+        await _nft_alert_state_set(client, _ALERT_TRACKER_DIGEST_SLUG, "posted", 0)
+    return delivered
+
+
 async def _nft_scope_maybe_post_tracked_convergence(client: httpx.AsyncClient, slug: str, c: dict, tracked_wallet_hits: list[dict] | None, score: dict) -> bool:
     distinct_addresses = {h["address"] for h in (tracked_wallet_hits or [])}
     if len(distinct_addresses) < _NFT_SCOPE_TRACKED_CONVERGENCE_ALERT_MIN_WALLETS:
@@ -8391,11 +8690,16 @@ async def _nft_scope_maybe_post_tracked_convergence(client: httpx.AsyncClient, s
         return False
     ping = f"<@&{settings.discord_minting_now_role_id}>" if settings.discord_minting_now_role_id else None
     uncategorized = [h["address"] for h in tracked_wallet_hits if not h.get("category")]
-    estimated = await _estimate_wallet_categories(client, uncategorized)
+    estimated, track_records, event_times, record_stats = await asyncio.gather(
+        _estimate_wallet_categories(client, uncategorized),
+        _nft_scope_merged_track_records(client, sorted(distinct_addresses)),
+        _nft_scope_tracked_convergence_event_times(client, slug, sorted(distinct_addresses)),
+        _alert_tracker_stats(client),
+    )
     scam_warning = await _mint_link_scam_warning(client, c.get("website") or c.get("openseaUrl"))
     delivered = await _post_channel_message(
         client, settings.discord_smart_wallet_channel_id,
-        _nft_scope_tracked_convergence_embed(c, tracked_wallet_hits, estimated, scam_warning),
+        _nft_scope_tracked_convergence_embed(c, tracked_wallet_hits, estimated, scam_warning, track_records, event_times, record_stats),
         content=ping,
         components=_nft_scope_tracked_convergence_components(c),
     )
@@ -8408,6 +8712,7 @@ async def _nft_scope_maybe_post_tracked_convergence(client: httpx.AsyncClient, s
         # later proves out, the same free side-effect every other posting
         # path already gets.
         await _nft_scope_record_call_buyers(client, slug, c.get("floor"), {"buyer_addresses": list(distinct_addresses)})
+        await _alert_tracker_record_call(client, slug, c.get("floor"), list(distinct_addresses))
     return delivered
 
 
@@ -8482,7 +8787,18 @@ _TRACKED_WALLET_ALCHEMY_CHAINS = {
 }
 _TRACKED_WALLET_NULL_ADDRESS = "0x0000000000000000000000000000000000000000"
 _TRACKED_WALLET_EVENTS_PER_WALLET = 10
-_TRACKED_WALLET_POLL_BUCKETS = 5  # spreads full coverage of the tracked list across ~5 cron cycles instead of polling every wallet every tick
+# 288 buckets x the 5-minute cron cadence = once per wallet per ~24h. Was 5
+# (once per ~25 min) before Address Activity webhooks (below) took over as
+# the PRIMARY detection path - this sweep is now only a safety net against
+# a missed webhook delivery, so it no longer needs to be fast, just
+# eventually-consistent. Directly answers the cost concern that motivated
+# this whole change: at the old cadence, N tracked wallets cost roughly
+# N x 1.8M Alchemy compute units/month (7 chains x 150 CU/call, every 25
+# min) - enough to blow the free 30M CU/month tier past ~16 wallets. This
+# cadence cuts that by ~57x on its own, on top of most real detection now
+# costing ~40 CU per actual event via the webhook instead of 1050 CU per
+# wallet-check regardless of outcome.
+_TRACKED_WALLET_POLL_BUCKETS = 288
 _TRACKED_WALLET_POLL_TIME_BUDGET_SECONDS = 50  # skip this phase outright once a cycle has already burned this much of Vercel's 60s cap
 
 
@@ -8554,6 +8870,213 @@ async def _alchemy_wallet_recent_mints(client: httpx.AsyncClient, address: str) 
             event_at = (transfer.get("metadata") or {}).get("blockTimestamp") or datetime.now(timezone.utc).isoformat()
             mints.append({"chain": chain, "contract": contract.lower(), "token_id": token_id, "event_at": event_at})
     return mints
+
+
+# ── Alchemy Address Activity webhooks - push instead of poll ─────────────
+# The sweep above finds a mint by asking Alchemy "did anything happen?" on
+# a timer, for every tracked wallet, whether or not anything ever does -
+# confirmed the real cost of that above (_TRACKED_WALLET_POLL_BUCKETS).
+# Alchemy's Address Activity webhook flips this around: it PUSHES a
+# notification the instant a tracked address sends/receives a token, so
+# spend scales with actual on-chain activity instead of clock ticks or
+# tracked-list size (~40 CU per real event vs 150 CU per wallet-check
+# regardless of outcome). One webhook only ever covers ONE chain (confirmed
+# against Alchemy's docs) and the free tier caps at 5 webhooks/account, so
+# only these chains get instant push coverage - the rest still ride the
+# (now much cheaper) sweep above as their only detection path.
+_ALCHEMY_WEBHOOK_CHAINS = ["ethereum", "robinhood", "ink", "base", "polygon"]
+
+
+def _alchemy_webhook_signing_key(chain: str) -> str:
+    return getattr(settings, f"alchemy_webhook_signing_key_{chain}", "") or ""
+
+
+def _alchemy_webhook_id(chain: str) -> str:
+    return getattr(settings, f"alchemy_webhook_id_{chain}", "") or ""
+
+
+def _verify_alchemy_webhook_signature(chain: str, signature: str, body: bytes) -> bool:
+    # HMAC-SHA256 over the raw request body, hex-encoded, no prefix - each
+    # webhook has its OWN signing key (not the account-level Auth Token
+    # used for address management below), per Alchemy's documented scheme.
+    signing_key = _alchemy_webhook_signing_key(chain)
+    if not signing_key or not signature:
+        return False
+    expected = hmac.new(signing_key.encode(), body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(expected, signature)
+
+
+def _alchemy_webhook_activity_to_mint(activity: dict) -> dict | None:
+    # Same "is this a mint" test as the sweep's own parsing
+    # (_alchemy_wallet_recent_mints): fromAddress is the null address, and
+    # it's an NFT-category transfer - just against the webhook's payload
+    # shape instead of alchemy_getAssetTransfers' response shape, which
+    # names the same concepts differently (erc721TokenId/erc1155Metadata
+    # here vs a flat tokenId there).
+    if (activity.get("fromAddress") or "").lower() != _TRACKED_WALLET_NULL_ADDRESS:
+        return None
+    category = activity.get("category")
+    contract = ((activity.get("rawContract") or {}).get("address") or "").lower()
+    if not contract:
+        return None
+    raw_token_id = None
+    if category == "erc721":
+        raw_token_id = activity.get("erc721TokenId")
+    elif category == "erc1155":
+        metadata = activity.get("erc1155Metadata") or []
+        raw_token_id = metadata[0].get("tokenId") if metadata else None
+    if raw_token_id is None:
+        return None
+    try:
+        token_id = str(int(raw_token_id, 16)) if isinstance(raw_token_id, str) and raw_token_id.startswith("0x") else str(raw_token_id)
+    except ValueError:
+        return None
+    return {
+        "buyer": (activity.get("toAddress") or "").lower(),
+        "contract": contract, "token_id": token_id,
+        "event_at": datetime.now(timezone.utc).isoformat(),  # webhook delivery is near-real-time; no separate block timestamp needed
+    }
+
+
+@app.post("/webhooks/alchemy-address-activity/{chain}")
+async def alchemy_address_activity_webhook(chain: str, request: Request):
+    # Not gated by CRON_SECRET/Discord's signature scheme like every other
+    # endpoint here - Alchemy calls this directly, so the HMAC check below
+    # IS the authentication. 401 on a bad/missing signature rather than a
+    # generic error, so a misconfigured signing key is obvious immediately
+    # instead of silently dropping every real mint.
+    body = await request.body()
+    signature = request.headers.get("x-alchemy-signature", "")
+    if chain not in _ALCHEMY_WEBHOOK_CHAINS or not _verify_alchemy_webhook_signature(chain, signature, body):
+        raise HTTPException(status_code=401, detail="Invalid signature")
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    activity = ((payload.get("event") or {}).get("activity")) or []
+    mints = [m for a in activity if a.get("category") in ("erc721", "erc1155") and (m := _alchemy_webhook_activity_to_mint(a))]
+    if not mints:
+        return {"ok": True, "mints_logged": 0, "posted": 0}
+
+    affected_slugs: set[str] = set()
+    async with httpx.AsyncClient(timeout=20) as client:
+        for mint in mints:
+            c = await _nft_resolve_by_contract(client, mint["contract"])
+            if not c or not c.get("slug"):
+                continue
+            try:
+                await client.post(
+                    f"{settings.supabase_url}/rest/v1/nft_sale_events_log",
+                    headers=_supabase_headers(prefer="resolution=merge-duplicates,return=minimal"),
+                    json={
+                        "slug": c["slug"], "token_id": mint["token_id"], "buyer": mint["buyer"],
+                        "seller": _TRACKED_WALLET_NULL_ADDRESS, "price": None, "symbol": c.get("symbol"),
+                        "event_at": mint["event_at"],
+                    },
+                )
+            except httpx.HTTPError:
+                continue
+            affected_slugs.add(c["slug"])
+
+        posted = 0
+        for slug in affected_slugs:
+            try:
+                if await _nft_scope_maybe_post_from_slug_direct(client, slug):
+                    posted += 1
+            except (httpx.HTTPError, HTTPException):
+                continue
+
+    return {"ok": True, "mints_logged": len(mints), "slugs_touched": sorted(affected_slugs), "posted": posted}
+
+
+async def _alchemy_webhook_tracked_addresses(client: httpx.AsyncClient) -> list[str]:
+    tags_res = await client.get(
+        f"{settings.supabase_url}/rest/v1/smart_wallet_tags",
+        headers=_supabase_headers(), params={"select": "address"},
+    )
+    tags_res.raise_for_status()
+    return sorted({row["address"] for row in tags_res.json()})
+
+
+async def _alchemy_webhook_current_addresses(client: httpx.AsyncClient, webhook_id: str) -> set[str] | None:
+    # Returns None (not an empty set) on any failure, so the caller never
+    # mistakes "couldn't reach Alchemy" for "this webhook genuinely tracks
+    # zero addresses" and floods it with an add-everything call.
+    # Paginated (confirmed via Alchemy's docs) - the tracked list already
+    # runs into the hundreds in production, comfortably past a single
+    # page's default limit, so this has to follow pagination.cursors.after
+    # or it would see a partial list and spuriously "remove" everything
+    # sitting on a later page every single cycle.
+    if not settings.alchemy_webhook_auth_token:
+        return None
+    addresses: set[str] = set()
+    cursor: str | None = None
+    try:
+        for _ in range(50):  # hard cap - never loop forever on a malformed/never-ending cursor
+            params = {"webhook_id": webhook_id, "limit": 100}
+            if cursor:
+                params["after"] = cursor
+            res = await client.get(
+                "https://dashboard.alchemy.com/api/webhook-addresses",
+                headers={"X-Alchemy-Token": settings.alchemy_webhook_auth_token},
+                params=params,
+            )
+            res.raise_for_status()
+            data = res.json()
+            addresses.update(a.lower() for a in (data.get("data") or []))
+            cursor = (data.get("pagination") or {}).get("cursors", {}).get("after")
+            if not cursor:
+                break
+        return addresses
+    except httpx.HTTPError:
+        logger.exception("Failed to fetch current addresses for Alchemy webhook %s", webhook_id)
+        return None
+
+
+async def _alchemy_webhook_update_addresses(client: httpx.AsyncClient, webhook_id: str, add: list[str], remove: list[str]) -> None:
+    try:
+        res = await client.patch(
+            "https://dashboard.alchemy.com/api/update-webhook-addresses",
+            headers={"X-Alchemy-Token": settings.alchemy_webhook_auth_token, "Content-Type": "application/json"},
+            json={"webhook_id": webhook_id, "addresses_to_add": add, "addresses_to_remove": remove},
+        )
+        res.raise_for_status()
+    except httpx.HTTPError:
+        logger.exception("Failed to update addresses for Alchemy webhook %s", webhook_id)
+
+
+async def _alchemy_webhook_sync_addresses(client: httpx.AsyncClient) -> dict:
+    # Reconciles each of the 5 chain webhooks' tracked-address lists
+    # against smart_wallet_tags - piggybacked on the existing 5-minute
+    # poll cycle rather than hooking every place a wallet enters/leaves
+    # that table (staff import, set-category, an approved /wallet-submit,
+    # co-minter auto-discovery). Self-healing: a missed insert site can
+    # never leave a wallet permanently unwatched, just briefly stale until
+    # the next cycle catches it. A full diff-and-set every cycle is cheap
+    # (one GET + at most one PATCH per configured webhook, no chain reads
+    # at all), unlike the tracked-wallet checks this whole change exists
+    # to cut down on.
+    if not settings.alchemy_webhook_auth_token:
+        return {"skipped": "alchemy_webhook_auth_token not configured"}
+    desired = set(await _alchemy_webhook_tracked_addresses(client))
+    results = {}
+    for chain in _ALCHEMY_WEBHOOK_CHAINS:
+        webhook_id = _alchemy_webhook_id(chain)
+        if not webhook_id:
+            continue
+        current = await _alchemy_webhook_current_addresses(client, webhook_id)
+        if current is None:
+            results[chain] = "skipped - could not fetch current addresses"
+            continue
+        to_add = sorted(desired - current)
+        to_remove = sorted(current - desired)
+        if not to_add and not to_remove:
+            results[chain] = "in_sync"
+            continue
+        await _alchemy_webhook_update_addresses(client, webhook_id, to_add, to_remove)
+        results[chain] = f"added {len(to_add)}, removed {len(to_remove)}"
+    return results
 
 
 async def _nft_scope_maybe_post_from_slug_direct(client: httpx.AsyncClient, slug: str) -> bool:
@@ -9505,13 +10028,31 @@ async def nft_poll(request: Request):
                 errors.append(f"tracked_wallet_watch: {e}")
         else:
             errors.append("tracked_wallet_watch: skipped - cycle already past its time budget")
+        try:
+            await _alchemy_webhook_sync_addresses(client)
+        except (httpx.HTTPError, KeyError) as e:
+            logger.exception("nft-poll: Alchemy webhook address sync failed")
+            errors.append(f"alchemy_webhook_sync: {e}")
+        try:
+            alert_tracker_proving = await _alert_tracker_prove_due_calls(client)
+        except (httpx.HTTPError, KeyError) as e:
+            logger.exception("nft-poll: Alert Tracker proving phase failed")
+            alert_tracker_proving = {"checked": 0, "proved": 0}
+            errors.append(f"alert_tracker_proving: {e}")
+        try:
+            alert_tracker_digest_posted = await _alert_tracker_maybe_post_digest(client)
+        except (httpx.HTTPError, KeyError) as e:
+            logger.exception("nft-poll: Alert Tracker digest phase failed")
+            alert_tracker_digest_posted = False
+            errors.append(f"alert_tracker_digest: {e}")
         pruned = await _prune_old_snapshots(client)
         pruned_sale_events = await _prune_old_sale_events(client)
         pruned_call_buyers = await _prune_old_call_buyers(client)
 
     return {
         "watchlist_alerts": alerted, "nft_scope_posts": scoped, "nft_scope_followups": followups,
-        "tracked_wallet_watch": wallet_watch,
+        "tracked_wallet_watch": wallet_watch, "alert_tracker_proving": alert_tracker_proving,
+        "alert_tracker_digest_posted": alert_tracker_digest_posted,
         "pruned_old_snapshots": pruned, "pruned_old_sale_events": pruned_sale_events,
         "pruned_old_call_buyers": pruned_call_buyers, "errors": errors,
     }
@@ -10397,6 +10938,12 @@ TOOLKIT_TOOLS = {
         "short": "Propose one or several wallets for the tracked smart-wallet list - opens a short form, staff reviews each before it counts toward any alert",
         "usage": "/wallet-submit",
         "example": "/wallet-submit",
+    },
+    "alert-tracker-record": {
+        "emoji": "📜", "label": "Alert Tracker Record",
+        "short": "See the Alert Tracker's own real hit rate - every convergence call it's posted, self-audited, win or lose",
+        "usage": "/alert-tracker-record",
+        "example": "/alert-tracker-record",
     },
 }
 

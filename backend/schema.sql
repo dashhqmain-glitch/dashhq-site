@@ -656,3 +656,54 @@ create index if not exists smart_wallet_submissions_status_idx on smart_wallet_s
 create index if not exists smart_wallet_submissions_address_idx on smart_wallet_submissions (address);
 
 alter table smart_wallet_submissions enable row level security;
+
+-- ── Alert Tracker's own track record ──────────────────────────────────────
+-- nft_scope_call_buyers/nft_scope_proved_slugs above are NFT-Scope-wide -
+-- every scan pass feeds them, not just the standalone Alert Tracker
+-- convergence post (_nft_scope_maybe_post_tracked_convergence). This is a
+-- narrowly-scoped twin: one row per Alert Tracker post, written only from
+-- that one function, so "how good is the Alert Tracker specifically" can
+-- be answered honestly instead of borrowing a broader number that
+-- includes calls it had nothing to do with.
+create table if not exists alert_tracker_calls (
+  id            bigint generated always as identity primary key,
+  slug          text not null,
+  wallets       text[] not null,  -- the tracked addresses that converged
+  floor_at_call numeric,
+  called_at     timestamptz not null default now(),
+  -- Set once the follow-up check (piggybacked on the normal poll cycle -
+  -- see _alert_tracker_prove_due_calls in main.py) revisits this call past
+  -- its maturity window against the slug's live current floor. Null means
+  -- "not checked yet", not "failed" - proved defaults to false only once
+  -- an actual check has run.
+  checked_at    timestamptz,
+  multiple      numeric,
+  proved        boolean not null default false
+);
+
+create index if not exists alert_tracker_calls_slug_idx on alert_tracker_calls (slug);
+-- Drives the follow-up job's "find calls old enough to check, not yet
+-- checked" query.
+create index if not exists alert_tracker_calls_unchecked_idx on alert_tracker_calls (called_at) where checked_at is null;
+
+alter table alert_tracker_calls enable row level security;
+
+-- Same shape/reasoning as nft_scope_proved_multiple_stats - a spread
+-- (p25/median/p75), not a point estimate, and only over calls the
+-- follow-up job has actually resolved (checked_at not null) so an
+-- unchecked call can't silently read as "not proved."
+create or replace view alert_tracker_stats
+  with (security_invoker = true) as
+select
+  count(*) filter (where checked_at is not null) as checked_calls,
+  count(*) filter (where proved) as proved_calls,
+  case when count(*) filter (where checked_at is not null) > 0
+    then round((count(*) filter (where proved))::numeric / count(*) filter (where checked_at is not null), 3)
+    else null end as hit_rate,
+  percentile_cont(0.5) within group (order by multiple) filter (where proved) as median_multiple,
+  -- Filtered to proved calls only, same as the median above - otherwise
+  -- the best unproven call (one that simply hasn't cleared the proved
+  -- threshold) could show up as the headline "best call," overstating a
+  -- call that was never actually confirmed to have paid off.
+  max(multiple) filter (where proved) as best_multiple
+from alert_tracker_calls;

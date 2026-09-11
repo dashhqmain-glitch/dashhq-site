@@ -149,6 +149,32 @@ class Settings(BaseSettings):
     # no-op, same as every other optional-feature key here.
     alchemy_api_key: str = ""
 
+    # Address Activity webhooks - push-based tracked-wallet mint detection
+    # (see alchemy_address_activity_webhook in main.py), replacing most of
+    # the old constant-polling sweep. Alchemy scopes one webhook per chain
+    # and each webhook gets its own HMAC-SHA256 signing key - explicit
+    # per-chain settings rather than one JSON blob, matching every other
+    # setting in this file (and letting each be set independently via
+    # `vercel env add`, same workflow already used for every secret here).
+    # Empty for a given chain just means that chain stays on the fallback
+    # poll only (_tracked_wallet_watch_sweep) - never a hard requirement.
+    alchemy_webhook_signing_key_ethereum: str = ""
+    alchemy_webhook_id_ethereum: str = ""
+    alchemy_webhook_signing_key_robinhood: str = ""
+    alchemy_webhook_id_robinhood: str = ""
+    alchemy_webhook_signing_key_ink: str = ""
+    alchemy_webhook_id_ink: str = ""
+    alchemy_webhook_signing_key_base: str = ""
+    alchemy_webhook_id_base: str = ""
+    alchemy_webhook_signing_key_polygon: str = ""
+    alchemy_webhook_id_polygon: str = ""
+
+    # Account-level Notify API auth token (distinct from any single
+    # webhook's signing key above) - used only to keep each webhook's
+    # tracked-address list in sync with smart_wallet_tags. Empty makes the
+    # sync step a safe no-op, same as every other optional key here.
+    alchemy_webhook_auth_token: str = ""
+
     model_config = {"env_file": ".env"}
 
 

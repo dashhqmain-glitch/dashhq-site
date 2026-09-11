@@ -211,6 +211,12 @@ COMMANDS = [
         # "Submit Wallet(s)" modal.
     },
     {
+        "name": "alert-tracker-record",
+        "description": "See the Alert Tracker's own real hit rate - every convergence call it's posted and how each one turned out",
+        # Deliberately no options - one honest number for everyone, not a
+        # per-collection lookup.
+    },
+    {
         "name": "history",
         "description": "Team only: browse every citizenship application and its verdict",
         # Hidden from regular members entirely - Discord only shows/allows a
