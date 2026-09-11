@@ -9048,16 +9048,48 @@ async def _alchemy_webhook_current_addresses(client: httpx.AsyncClient, webhook_
         return None
 
 
-async def _alchemy_webhook_update_addresses(client: httpx.AsyncClient, webhook_id: str, add: list[str], remove: list[str]) -> None:
-    try:
-        res = await client.patch(
-            "https://dashboard.alchemy.com/api/update-webhook-addresses",
-            headers={"X-Alchemy-Token": settings.alchemy_webhook_auth_token, "Content-Type": "application/json"},
-            json={"webhook_id": webhook_id, "addresses_to_add": add, "addresses_to_remove": remove},
-        )
-        res.raise_for_status()
-    except httpx.HTTPError:
-        logger.exception("Failed to update addresses for Alchemy webhook %s", webhook_id)
+_ALCHEMY_WEBHOOK_ADDRESSES_PER_CALL = 500  # Alchemy's own hard cap, confirmed live: a bigger single call 400s with "A maximum of 500 addresses can be added at once."
+
+
+def _chunked(items: list[str], size: int) -> list[list[str]]:
+    return [items[i:i + size] for i in range(0, len(items), size)]
+
+
+async def _alchemy_webhook_update_addresses(client: httpx.AsyncClient, webhook_id: str, add: list[str], remove: list[str]) -> bool:
+    # Returns whether every chunk actually succeeded - the caller reports
+    # this back, rather than assuming success just because the call was
+    # made (confirmed real bug: a >500-address batch 400s, and reporting
+    # "added N" regardless made a genuine failure look like a success).
+    # Chunked independently for add/remove since a real tracked list can
+    # comfortably exceed 500 on either side of the diff.
+    ok = True
+    # Add and remove chunked independently, each its own call (Alchemy's API
+    # accepts an add-only or remove-only body fine) - simpler than pairing
+    # them up, and correct either way since this is just a diff-and-set
+    # reconciliation, not an ordered transaction.
+    for chunk in _chunked(add, _ALCHEMY_WEBHOOK_ADDRESSES_PER_CALL) if add else []:
+        try:
+            res = await client.patch(
+                "https://dashboard.alchemy.com/api/update-webhook-addresses",
+                headers={"X-Alchemy-Token": settings.alchemy_webhook_auth_token, "Content-Type": "application/json"},
+                json={"webhook_id": webhook_id, "addresses_to_add": chunk, "addresses_to_remove": []},
+            )
+            res.raise_for_status()
+        except httpx.HTTPError:
+            logger.exception("Failed to add addresses to Alchemy webhook %s", webhook_id)
+            ok = False
+    for chunk in _chunked(remove, _ALCHEMY_WEBHOOK_ADDRESSES_PER_CALL) if remove else []:
+        try:
+            res = await client.patch(
+                "https://dashboard.alchemy.com/api/update-webhook-addresses",
+                headers={"X-Alchemy-Token": settings.alchemy_webhook_auth_token, "Content-Type": "application/json"},
+                json={"webhook_id": webhook_id, "addresses_to_add": [], "addresses_to_remove": chunk},
+            )
+            res.raise_for_status()
+        except httpx.HTTPError:
+            logger.exception("Failed to remove addresses from Alchemy webhook %s", webhook_id)
+            ok = False
+    return ok
 
 
 async def _alchemy_webhook_sync_addresses(client: httpx.AsyncClient) -> dict:
@@ -9088,8 +9120,9 @@ async def _alchemy_webhook_sync_addresses(client: httpx.AsyncClient) -> dict:
         if not to_add and not to_remove:
             results[chain] = "in_sync"
             continue
-        await _alchemy_webhook_update_addresses(client, webhook_id, to_add, to_remove)
-        results[chain] = f"added {len(to_add)}, removed {len(to_remove)}"
+        succeeded = await _alchemy_webhook_update_addresses(client, webhook_id, to_add, to_remove)
+        verb = "added" if succeeded else "FAILED to add"
+        results[chain] = f"{verb} {len(to_add)}, removed {len(to_remove)}"
     return results
 
 

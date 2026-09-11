@@ -228,6 +228,9 @@ def _clear_webhook_sync_settings():
 
 
 async def test_webhook_sync_adds_and_removes_to_match_tracked_list():
+    # Add and remove go out as SEPARATE calls (not one combined body) -
+    # both work fine independently against Alchemy's real API, and
+    # keeping them separate is what makes per-side chunking below simple.
     _set_webhook_sync_settings()
     updates = []
 
@@ -248,7 +251,65 @@ async def test_webhook_sync_adds_and_removes_to_match_tracked_list():
     finally:
         _clear_webhook_sync_settings()
     assert result["ethereum"] == "added 1, removed 1"
-    assert updates == [{"webhook_id": "wh_eth", "addresses_to_add": ["0xa"], "addresses_to_remove": ["0xc"]}]
+    assert updates == [
+        {"webhook_id": "wh_eth", "addresses_to_add": ["0xa"], "addresses_to_remove": []},
+        {"webhook_id": "wh_eth", "addresses_to_add": [], "addresses_to_remove": ["0xc"]},
+    ]
+
+
+async def test_webhook_sync_chunks_a_batch_over_alchemys_500_address_cap():
+    # Real bug, confirmed live against Alchemy's actual API: a single call
+    # with more than 500 addresses gets a 400 ("A maximum of 500 addresses
+    # can be added at once"). This must split into multiple calls, not
+    # send one oversized request.
+    _set_webhook_sync_settings()
+    tracked = [f"0x{i:040x}" for i in range(600)]
+    calls = []
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "smart_wallet_tags" in url:
+                return FakeRes(200, [{"address": a} for a in tracked])
+            if "webhook-addresses" in url:
+                return FakeRes(200, {"data": [], "pagination": {"cursors": {}}})
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, json=None):
+            calls.append(json)
+            return FakeRes(200, {})
+
+    try:
+        result = await main._alchemy_webhook_sync_addresses(FakeClient())
+    finally:
+        _clear_webhook_sync_settings()
+    assert result["ethereum"] == "added 600, removed 0"
+    assert len(calls) == 2  # 500 + 100, not one 600-address call
+    assert len(calls[0]["addresses_to_add"]) == 500
+    assert len(calls[1]["addresses_to_add"]) == 100
+
+
+async def test_webhook_sync_reports_a_real_failure_instead_of_a_false_success():
+    # The actual fix: _alchemy_webhook_update_addresses used to swallow a
+    # failed PATCH (e.g. that same 500-cap 400) and the caller reported
+    # "added N" regardless of whether it actually landed. Must now say so.
+    _set_webhook_sync_settings()
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "smart_wallet_tags" in url:
+                return FakeRes(200, [{"address": "0xa"}])
+            if "webhook-addresses" in url:
+                return FakeRes(200, {"data": [], "pagination": {"cursors": {}}})
+            return FakeRes(200, {})
+
+        async def patch(self, url, headers=None, json=None):
+            return FakeRes(400, {"message": "A maximum of 500 addresses can be added at once.", "name": "ValidationError"})
+
+    try:
+        result = await main._alchemy_webhook_sync_addresses(FakeClient())
+    finally:
+        _clear_webhook_sync_settings()
+    assert result["ethereum"] == "FAILED to add 1, removed 0"
 
 
 async def test_webhook_sync_reports_in_sync_when_lists_match():
