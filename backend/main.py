@@ -1135,6 +1135,20 @@ async def trigger_wallet_watch(request: Request):
     return result
 
 
+@app.get("/cron/trigger-webhook-sync")
+async def trigger_webhook_sync(request: Request):
+    # Manually fires _alchemy_webhook_sync_addresses right now instead of
+    # waiting for the next scheduled /cron/nft-poll tick - for verifying a
+    # freshly-configured webhook actually picks up the full tracked-wallet
+    # list without a real 5-minute wait.
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    async with httpx.AsyncClient(timeout=55) as client:
+        result = await _alchemy_webhook_sync_addresses(client)
+    return result
+
+
 @app.get("/cron/test-alchemy")
 async def test_alchemy(request: Request, address: str, chain: str = "ethereum"):
     # Raw, unswallowed diagnostic - _alchemy_rpc deliberately returns None
