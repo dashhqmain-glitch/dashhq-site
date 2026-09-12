@@ -5471,10 +5471,27 @@ _EVM_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 _NFT_CONTRACT_LOOKUP_CHAINS = ["ethereum", "robinhood", "ink", "base", "matic", "arbitrum", "optimism", "avalanche"]
 
 
-async def _nft_resolve_by_contract(client: httpx.AsyncClient, address: str) -> dict | None:
+async def _nft_resolve_by_contract(client: httpx.AsyncClient, address: str, known_chain: str | None = None) -> dict | None:
     # OpenSea's contract endpoint is chain-scoped and there's no
-    # "search all chains" variant, so try the candidates in parallel and
-    # keep whichever one actually maps to a real collection.
+    # "search all chains" variant. A caller that already knows which chain
+    # the contract lives on - the Alchemy webhook receiver (chain is the
+    # URL path itself) and the wallet-watch sweep (tagged onto every mint
+    # by _alchemy_wallet_recent_mints) - should never have to guess: pass
+    # known_chain and this does exactly one fetch instead of racing every
+    # configured chain in parallel and discarding the losers. Falls back to
+    # the full guess-list if that direct fetch comes up empty (OpenSea and
+    # Alchemy's chain identifiers could in principle drift apart) or if no
+    # chain is known at all - a member searching by a bare contract address
+    # has no chain context to give.
+    if known_chain:
+        direct = await _opensea_get(client, f"/chain/{known_chain}/contract/{address}")
+        if direct and direct.get("collection"):
+            slug = direct["collection"]
+            info = await _opensea_get(client, f"/collections/{slug}")
+            if info:
+                stats = await _opensea_get(client, f"/collections/{slug}/stats")
+                return _nft_collection_shape(info, stats)
+
     contract_tasks = [_opensea_get(client, f"/chain/{chain}/contract/{address}") for chain in _NFT_CONTRACT_LOOKUP_CHAINS]
     contract_results = await asyncio.gather(*contract_tasks, return_exceptions=True)
     slug = None
@@ -5701,7 +5718,7 @@ _NFT_FLOOR_CHANGE_THRESHOLD_PCT = 8.0  # minimum floor move (either direction) w
 # independently verified before adding it here - confirm live after
 # deploy that it's actually returning collections, not silently
 # no-op'ing forever.
-_NFT_SCOPE_CHAINS = ["ethereum", "base", "polygon", "robinhood", "arbitrum", "optimism", "avalanche", "ink", "hyperevm"]
+_NFT_SCOPE_CHAINS = ["ethereum", "robinhood", "ink"]  # scoped to the 3 chains actually tracked, by direct request - was 9
 
 # Address -> block-explorer URL per chain, used only to build the link list
 # on the member wallet-submission form's moderator review embed (not scan coverage - that's
@@ -9481,9 +9498,21 @@ async def alchemy_address_activity_webhook(chain: str, request: Request):
         return {"ok": True, "mints_logged": 0, "posted": 0}
 
     affected_slugs: set[str] = set()
+    resolved_by_slug: dict[str, dict] = {}
+    # A batch delivery can carry several mint events for the same contract
+    # (multiple buyers minting the same collection within one webhook) -
+    # confirmed live: the same collection's /collections and /stats
+    # endpoints each fired 4 times within a single invocation. Cached per
+    # contract address so re-resolving it costs nothing past the first hit.
+    resolved_by_contract: dict[str, dict | None] = {}
     async with httpx.AsyncClient(timeout=20) as client:
         for mint in mints:
-            c = await _nft_resolve_by_contract(client, mint["contract"])
+            contract = mint["contract"]
+            if contract not in resolved_by_contract:
+                # `chain` is the webhook's own URL path - already known,
+                # never guessed (see _nft_resolve_by_contract's known_chain).
+                resolved_by_contract[contract] = await _nft_resolve_by_contract(client, contract, known_chain=chain)
+            c = resolved_by_contract[contract]
             if not c or not c.get("slug"):
                 continue
             try:
@@ -9499,11 +9528,12 @@ async def alchemy_address_activity_webhook(chain: str, request: Request):
             except httpx.HTTPError:
                 continue
             affected_slugs.add(c["slug"])
+            resolved_by_slug[c["slug"]] = c
 
         posted = 0
         for slug in affected_slugs:
             try:
-                if await _nft_scope_maybe_post_from_slug_direct(client, slug):
+                if await _nft_scope_maybe_post_from_slug_direct(client, slug, known_collection=resolved_by_slug.get(slug)):
                     posted += 1
             except Exception:
                 # Deliberately broad, not just httpx.HTTPError/HTTPException -
@@ -9692,11 +9722,21 @@ async def _alchemy_webhook_sync_addresses(client: httpx.AsyncClient, force: bool
     return results
 
 
-async def _nft_scope_maybe_post_from_slug_direct(client: httpx.AsyncClient, slug: str) -> bool:
+async def _nft_scope_maybe_post_from_slug_direct(client: httpx.AsyncClient, slug: str, known_collection: dict | None = None) -> bool:
     # Same convergence + quality-gate pipeline every other detection path
     # already goes through - only exists to trigger it for a slug this
     # sweep just logged activity for, since it may never appear in Pass
     # 1's "30 newest per chain" scan window at all.
+    #
+    # known_collection: the webhook receiver and wallet-watch sweep both
+    # already resolved this exact slug's collection data moments earlier
+    # (via _nft_resolve_by_contract, to get the slug in the first place) -
+    # passing it through here instead of silently re-fetching removes a
+    # confirmed real duplicate: the SAME collection+stats endpoints were
+    # observed firing 4 times each for one slug within a single webhook
+    # invocation. The recheck watchdog has no such head start (it only
+    # ever has a slug, discovered from historical event rows), so it
+    # leaves this None and gets the original fresh-fetch behavior.
     buyers_res = await client.get(
         f"{settings.supabase_url}/rest/v1/nft_sale_events_log",
         headers=_supabase_headers(), params={"slug": f"eq.{slug}", "select": "buyer"},
@@ -9718,7 +9758,7 @@ async def _nft_scope_maybe_post_from_slug_direct(client: httpx.AsyncClient, slug
     if len({h["address"] for h in tracked_wallet_hits}) < _NFT_SCOPE_TRACKED_CONVERGENCE_ALERT_MIN_WALLETS:
         return False
 
-    c = await _nft_collection_core(slug)
+    c = known_collection if known_collection is not None else await _nft_collection_core(slug)
     top_offer_amount = await _nft_scope_top_offer_amount(client, slug, c)
     history, first_snapshot = await _nft_scope_snapshot_signals(client, slug)
     wash_analysis = await _nft_scope_wash_analysis(client, slug) if _nft_scope_turnover_elevated(c) else None
@@ -9758,12 +9798,20 @@ async def _tracked_wallet_watch_sweep(client: httpx.AsyncClient, deadline: float
 
     checked = mints_found = posted = 0
     affected_slugs: set[str] = set()
+    resolved_by_slug: dict[str, dict] = {}
+    resolved_by_contract: dict[str, dict | None] = {}
     for address in batch:
         if time.time() >= deadline:
             break
         checked += 1
         for mint in await _alchemy_wallet_recent_mints(client, address):
-            c = await _nft_resolve_by_contract(client, mint["contract"])
+            contract = mint["contract"]
+            if contract not in resolved_by_contract:
+                # mint["chain"] is already known (tagged on by
+                # _alchemy_wallet_recent_mints, which fetches per-chain) -
+                # never guessed, same reasoning as the webhook receiver.
+                resolved_by_contract[contract] = await _nft_resolve_by_contract(client, contract, known_chain=mint["chain"])
+            c = resolved_by_contract[contract]
             if not c or not c.get("slug"):
                 continue
             mints_found += 1
@@ -9780,12 +9828,13 @@ async def _tracked_wallet_watch_sweep(client: httpx.AsyncClient, deadline: float
             except httpx.HTTPError:
                 continue
             affected_slugs.add(c["slug"])
+            resolved_by_slug[c["slug"]] = c
 
     for slug in affected_slugs:
         if time.time() >= deadline:
             break
         try:
-            if await _nft_scope_maybe_post_from_slug_direct(client, slug):
+            if await _nft_scope_maybe_post_from_slug_direct(client, slug, known_collection=resolved_by_slug.get(slug)):
                 posted += 1
         except Exception:
             # Same reasoning as the webhook receiver's identical guard -
@@ -9981,12 +10030,23 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
     # gets re-evaluated (and likely re-capped) every single cycle without
     # ever making progress through the full candidate list.
     fresh_posted: list[str] = []
-    for chain in _NFT_SCOPE_CHAINS:
+    # One request per chain, run concurrently instead of one after another -
+    # each chain's "newest collections" listing is read-only and completely
+    # independent of every other chain's, so there's nothing to wait on
+    # sequentially here. Real measured effect: this step used to be N
+    # chains' worth of round-trips added together; now it's roughly the
+    # slowest single one. The per-candidate processing below (writes,
+    # scoring, posting) stays sequential exactly as before - only the
+    # initial discovery fetch changed.
+    async def _fetch_chain_collections(chain: str) -> list[dict]:
         try:
             data = await _opensea_get(client, "/collections", {"order_by": "created_date", "limit": per_chain_limit, "chain": chain})
         except httpx.HTTPError:
-            continue
-        collections = (data or {}).get("collections") or []
+            return []
+        return (data or {}).get("collections") or []
+
+    per_chain_results = await asyncio.gather(*(_fetch_chain_collections(chain) for chain in _NFT_SCOPE_CHAINS))
+    for collections in per_chain_results:
         for raw in collections:
             slug = raw.get("collection")
             if not slug:

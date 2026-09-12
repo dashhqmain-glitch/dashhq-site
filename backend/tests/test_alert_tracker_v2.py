@@ -157,6 +157,77 @@ def test_activity_to_mint_recognizes_an_erc721_mint_tagged_category_token():
     assert mint["contract"] == "0xcontract"
 
 
+# ── _nft_resolve_by_contract: known_chain ─────────────────────────────────
+# The webhook receiver and wallet-watch sweep both already know exactly
+# which chain a mint happened on before they ever call this - passing it
+# through should mean one direct fetch, not a guess across every
+# configured chain in parallel.
+
+async def test_resolve_by_contract_with_known_chain_makes_exactly_one_call():
+    calls = []
+
+    async def fake_opensea_get(client, path, params=None):
+        calls.append(path)
+        if path == "/chain/robinhood/contract/0xabc":
+            return {"collection": "known-collection"}
+        if path == "/collections/known-collection":
+            return {"name": "Known Collection"}
+        if path == "/collections/known-collection/stats":
+            return {"total": {}}
+        raise AssertionError(f"should not call {path} when the chain is already known")
+
+    with patch.object(main, "_opensea_get", new=fake_opensea_get):
+        result = await main._nft_resolve_by_contract(main.httpx.AsyncClient(), "0xabc", known_chain="robinhood")
+
+    assert result is not None
+    assert calls == ["/chain/robinhood/contract/0xabc", "/collections/known-collection", "/collections/known-collection/stats"]
+
+
+async def test_resolve_by_contract_falls_back_to_the_full_guess_list_if_known_chain_misses():
+    # Defensive fallback, not the common case - OpenSea and Alchemy's chain
+    # identifiers could in principle drift apart, so a known_chain miss
+    # must not mean "unresolvable," just "fall back to the old behavior."
+    chain_calls = []
+
+    async def fake_opensea_get(client, path, params=None):
+        if path.startswith("/chain/"):
+            chain_calls.append(path)
+            if path == "/chain/ink/contract/0xabc":
+                return {"collection": "found-on-ink"}
+            return None
+        if path == "/collections/found-on-ink":
+            return {"name": "Found On Ink"}
+        if path == "/collections/found-on-ink/stats":
+            return {"total": {}}
+        return None
+
+    with patch.object(main, "_opensea_get", new=fake_opensea_get):
+        result = await main._nft_resolve_by_contract(main.httpx.AsyncClient(), "0xabc", known_chain="robinhood")
+
+    assert result is not None
+    # One known_chain probe (misses) + the full guess list (which finds it
+    # on ink) - the full list re-tries robinhood too, since the fallback
+    # doesn't bother excluding what the probe already ruled out.
+    assert chain_calls[0] == "/chain/robinhood/contract/0xabc"
+    assert len(chain_calls) == 1 + len(main._NFT_CONTRACT_LOOKUP_CHAINS)
+
+
+async def test_resolve_by_contract_without_known_chain_behaves_as_before():
+    tried = []
+
+    async def fake_opensea_get(client, path, params=None):
+        if path.startswith("/chain/"):
+            tried.append(path)
+            return None
+        return None
+
+    with patch.object(main, "_opensea_get", new=fake_opensea_get):
+        result = await main._nft_resolve_by_contract(main.httpx.AsyncClient(), "0xabc")
+
+    assert result is None
+    assert len(tried) == len(main._NFT_CONTRACT_LOOKUP_CHAINS)
+
+
 # ── /webhooks/alchemy-address-activity/{chain} ────────────────────────────
 
 def _signed_body(chain: str, payload: dict) -> tuple[bytes, str]:
@@ -199,12 +270,14 @@ async def test_webhook_logs_mint_and_triggers_convergence_check():
     body, sig = _signed_body("ethereum", payload)
     logged = []
 
-    async def fake_resolve(client, contract):
+    async def fake_resolve(client, contract, known_chain=None):
         assert contract == "0xcontract"
+        assert known_chain == "ethereum"  # the webhook's own path, never guessed
         return {"slug": "test-slug"}
 
-    async def fake_maybe_post(client, slug):
+    async def fake_maybe_post(client, slug, known_collection=None):
         assert slug == "test-slug"
+        assert known_collection == {"slug": "test-slug"}  # reused, not re-fetched
         return True
 
     class FakeClient:
@@ -234,6 +307,53 @@ async def test_webhook_no_op_when_no_mints_in_payload():
     body, sig = _signed_body("ethereum", payload)
     result = await main.alchemy_address_activity_webhook("ethereum", FakeRequest(body, sig))
     assert result == {"ok": True, "mints_logged": 0, "posted": 0}
+
+
+async def test_webhook_resolves_a_repeated_contract_only_once_per_batch():
+    # Real duplicate, confirmed live in production logs: a batch delivery
+    # with several mint events for the SAME contract (multiple buyers
+    # minting the same collection at once) re-resolved that contract from
+    # scratch every time - the same /collections and /stats endpoints
+    # fired 4 times each for one slug within a single invocation.
+    settings.alchemy_webhook_signing_key_ethereum = "key"
+    payload = {
+        "event": {
+            "activity": [
+                {
+                    "fromAddress": main._TRACKED_WALLET_NULL_ADDRESS, "toAddress": "0xBUYER1",
+                    "category": "erc721", "erc721TokenId": "0x1",
+                    "rawContract": {"address": "0xCONTRACT"},
+                },
+                {
+                    "fromAddress": main._TRACKED_WALLET_NULL_ADDRESS, "toAddress": "0xBUYER2",
+                    "category": "erc721", "erc721TokenId": "0x2",
+                    "rawContract": {"address": "0xCONTRACT"},
+                },
+            ]
+        }
+    }
+    body, sig = _signed_body("ethereum", payload)
+    resolve_calls = []
+
+    async def fake_resolve(client, contract, known_chain=None):
+        resolve_calls.append(contract)
+        return {"slug": "test-slug"}
+
+    async def fake_maybe_post(client, slug, known_collection=None):
+        return True
+
+    class FakeClient:
+        async def post(self, url, headers=None, json=None):
+            return FakeRes(200)
+
+    with patch.object(main, "_nft_resolve_by_contract", new=fake_resolve), \
+         patch.object(main, "_nft_scope_maybe_post_from_slug_direct", new=fake_maybe_post), \
+         patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        result = await main.alchemy_address_activity_webhook("ethereum", FakeRequest(body, sig))
+
+    assert result["mints_logged"] == 2
+    assert len(resolve_calls) == 1  # resolved once, reused for the second mint event
 
 
 # ── _alchemy_webhook_sync_addresses ───────────────────────────────────────

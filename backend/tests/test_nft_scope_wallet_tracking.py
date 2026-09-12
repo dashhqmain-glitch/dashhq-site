@@ -637,10 +637,12 @@ async def test_tracked_wallet_watch_sweep_logs_a_resolved_mint_and_triggers_conv
     async def fake_recent_mints(client, address):
         return [{"chain": "robinhood", "contract": "0xcontract", "token_id": "1", "event_at": "2026-01-01T00:00:00Z"}] if address == "0xwallet1" else []
 
-    async def fake_resolve(client, contract):
+    async def fake_resolve(client, contract, known_chain=None):
+        assert known_chain == "robinhood"  # tagged onto the mint by _alchemy_wallet_recent_mints, never guessed
         return {"slug": "some-collection", "name": "Some Collection", "symbol": "ETH"}
 
-    async def fake_maybe_post_direct(client, slug):
+    async def fake_maybe_post_direct(client, slug, known_collection=None):
+        assert known_collection == {"slug": "some-collection", "name": "Some Collection", "symbol": "ETH"}
         convergence_calls.append(slug)
         return True
 
