@@ -1,0 +1,15 @@
+name: Temporary diagnose ponxz
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Diagnose ponxz-miners-rigs
+        run: |
+          curl -s -w "\nHTTP_CODE=%{http_code}\n" \
+            -G "https://www.dashhq.site/cron/diagnose-slug-posting" \
+            --data-urlencode "slug=ponxz-miners-rigs" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
