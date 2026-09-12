@@ -1,0 +1,29 @@
+name: Temporary verify fixes
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check if pistacio-nft has now posted
+        run: |
+          curl -s -w "\nHTTP_CODE=%{http_code}\n" \
+            -G "https://www.dashhq.site/cron/check-alert-tracker-post" \
+            --data-urlencode "slug=pistacio-nft" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
+
+      - name: Re-diagnose pistacio-nft with the fix live
+        run: |
+          curl -s -w "\nHTTP_CODE=%{http_code}\n" \
+            -G "https://www.dashhq.site/cron/diagnose-slug-posting" \
+            --data-urlencode "slug=pistacio-nft" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
+
+      - name: Time a real nft-poll cycle post-throttle-fix
+        run: |
+          curl -s -o response.json -w "\nHTTP_CODE=%{http_code}\nTIME_TOTAL=%{time_total}\n" \
+            -X GET "https://www.dashhq.site/cron/nft-poll" \
+            -H "Authorization: Bearer ${{ secrets.NFT_CRON_SECRET }}"
+          cat response.json
