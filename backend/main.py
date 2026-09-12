@@ -10538,6 +10538,7 @@ async def nft_poll(request: Request):
         "alert_tracker_recheck": alert_tracker_recheck,
         "pruned_old_snapshots": pruned, "pruned_old_sale_events": pruned_sale_events,
         "pruned_old_call_buyers": pruned_call_buyers, "errors": errors,
+        "took_seconds": round(time.time() - start, 2),
     }
 
 
