@@ -132,7 +132,7 @@ async def test_check_webhook_status_reactivates_and_alerts_when_a_webhook_goes_i
         async def post(self, url, headers=None, json=None):
             return FakeRes(200, {})
 
-        async def patch(self, url, headers=None, json=None):
+        async def put(self, url, headers=None, json=None):
             patched.append(json)
             return FakeRes(200, {})
 
@@ -177,7 +177,7 @@ async def test_check_webhook_status_alerts_loudly_when_reactivation_fails():
         async def post(self, url, headers=None, json=None):
             return FakeRes(200, {})
 
-        async def patch(self, url, headers=None, json=None):
+        async def put(self, url, headers=None, json=None):
             return FakeRes(500, {})  # reactivation attempt itself fails
 
     async def fake_post_channel_message(client, channel_id, embed):
@@ -219,7 +219,7 @@ async def test_check_webhook_status_does_not_spam_within_alert_cooldown():
         async def post(self, url, headers=None, json=None):
             return FakeRes(200, {})
 
-        async def patch(self, url, headers=None, json=None):
+        async def put(self, url, headers=None, json=None):
             return FakeRes(200, {})
 
     async def fake_post_channel_message(client, channel_id, embed):
@@ -251,7 +251,7 @@ async def test_check_webhook_status_handles_no_ops_channel_configured():
                 return FakeRes(200, {"data": [{"id": "wh_rh", "is_active": False, "network": "ROBINHOOD_MAINNET"}]})
             return FakeRes(200, [])
 
-        async def patch(self, url, headers=None, json=None):
+        async def put(self, url, headers=None, json=None):
             return FakeRes(200, {})
 
     try:

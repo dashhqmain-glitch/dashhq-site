@@ -1339,8 +1339,11 @@ _ALCHEMY_WEBHOOK_STATUS_ALERT_COOLDOWN_SECONDS = 7200  # don't re-alert every ch
 
 
 async def _alchemy_webhook_set_active(client: httpx.AsyncClient, webhook_id: str, is_active: bool) -> bool:
+    # PUT, not PATCH - confirmed against Alchemy's own docs for this
+    # endpoint (update-webhook-addresses elsewhere in this file is PATCH,
+    # but this is a genuinely different endpoint with its own method).
     try:
-        res = await client.patch(
+        res = await client.put(
             "https://dashboard.alchemy.com/api/update-webhook",
             headers={"X-Alchemy-Token": settings.alchemy_webhook_auth_token, "Content-Type": "application/json"},
             json={"webhook_id": webhook_id, "is_active": is_active},
