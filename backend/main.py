@@ -1376,7 +1376,7 @@ async def diagnose_slug_posting(request: Request, slug: str):
             wash_analysis=wash_analysis, smart_wallet_hits=smart_wallet_hits, activity_spike_hits=activity_spike_hits,
             tracked_wallet_hits=tracked_wallet_hits,
         )
-        worth_posting = _nft_scope_worth_posting(score)
+        worth_posting = _nft_scope_worth_posting(score, ignore_negligible_value=True)
         return {
             "slug": slug, "tracked_wallets": len(distinct),
             "gate_failed": None if worth_posting else "worth_posting",
@@ -7753,11 +7753,31 @@ def _nft_scope_score(
     # scored 95/100 on a collection worth an average of ~$0.03/sale -
     # every OTHER check here is ratio-based and every one of them can
     # look healthy on a near-worthless base).
-    blocked = (
-        fake_offer_reason is not None or turnover_blocks or blue_chip_reason is not None
-        or traded_out_reason is not None or declining_trend_reason is not None
-        or negligible_value_reason is not None
-    )
+    # Tracked as a set of WHICH reasons fired, not just whether any did -
+    # a tracked-wallet convergence (_nft_scope_maybe_post_tracked_convergence)
+    # needs to exempt negligible_value specifically (see
+    # _nft_scope_worth_posting's ignore_negligible_value param) while still
+    # honoring every other block untouched. Confirmed live: a $0.027-average
+    # collection got 12 separately-tracked wallets (several with a 100% call
+    # hit rate) converging on it, sales accelerating within the last 5
+    # minutes - and this gate, designed for a lone percentage illusion with
+    # NO other signal at all, blocked it anyway. Trusted wallets buying in
+    # at a low price is exactly the kind of edge those wallets are tracked
+    # for, not proof the buy is worthless.
+    block_reasons = set()
+    if fake_offer_reason is not None:
+        block_reasons.add("fake_offer")
+    if turnover_blocks:
+        block_reasons.add("turnover")
+    if blue_chip_reason is not None:
+        block_reasons.add("blue_chip")
+    if traded_out_reason is not None:
+        block_reasons.add("traded_out")
+    if declining_trend_reason is not None:
+        block_reasons.add("declining_trend")
+    if negligible_value_reason is not None:
+        block_reasons.add("negligible_value")
+    blocked = bool(block_reasons)
 
     # A description, social links, a category, even a listed floor price
     # cost a scammer nothing to fake and don't require a single other
@@ -7803,14 +7823,35 @@ def _nft_scope_score(
         # uncapped `points` above, so this display cap changes nothing
         # about which tier anything lands in.
         "score": min(points, _NFT_SCOPE_DISPLAY_SCORE_CAP), "reasons": reasons, "red_flags": red_flags, "risk_tier": risk_tier,
-        "tier": tier, "blocked": blocked, "has_real_activity": has_real_activity, "floor_multiple": floor_multiple,
-        "has_timeliness_signal": has_timeliness_signal,
+        "tier": tier, "blocked": blocked, "block_reasons": block_reasons, "has_real_activity": has_real_activity,
+        "floor_multiple": floor_multiple, "has_timeliness_signal": has_timeliness_signal,
     }
 
 
-def _nft_scope_worth_posting(score: dict) -> bool:
+def _nft_scope_worth_posting(score: dict, ignore_negligible_value: bool = False) -> bool:
+    # ignore_negligible_value: for a tracked-wallet convergence, where the
+    # wallets' own buy-in is already independent proof the price is worth
+    # acting on - see the call site in
+    # _nft_scope_maybe_post_tracked_convergence and the reasoning on
+    # block_reasons in _nft_scope_score above. Every OTHER block (fake
+    # offer, wash-tainted turnover, blue chip, already traded out, a real
+    # declining-price trend) still applies untouched - only the "too cheap
+    # to matter" read gets set aside, and only for this one caller.
+    #
+    # Falls back to the plain `blocked` flag when block_reasons isn't
+    # present at all (a hand-built score dict, e.g. in tests, rather than
+    # a real _nft_scope_score() output) - ignore_negligible_value simply
+    # can't apply to a caller that never said WHY it's blocked, so the
+    # coarse flag is trusted as-is rather than silently treated as clear.
+    block_reasons = score.get("block_reasons")
+    if block_reasons is not None and ignore_negligible_value:
+        blocked = bool(block_reasons - {"negligible_value"})
+    elif block_reasons is not None:
+        blocked = bool(block_reasons)
+    else:
+        blocked = score.get("blocked", False)
     return (
-        score["tier"] in ("green", "yellow", "red") and not score["blocked"]
+        score["tier"] in ("green", "yellow", "red") and not blocked
         and score["has_real_activity"] and score["has_timeliness_signal"]
     )
 
@@ -9139,7 +9180,16 @@ async def _nft_scope_maybe_post_tracked_convergence(client: httpx.AsyncClient, s
     # independent signal on its own, so this only exists to filter out
     # genuinely bad projects (dead, manipulated, no real activity), not to
     # require the same evidence a from-nothing discovery post needs.
-    if not _nft_scope_worth_posting(score):
+    #
+    # ignore_negligible_value=True for the same reason: that gate exists
+    # for a percentage illusion on a near-zero base with NO other signal
+    # (confirmed live against "ROBINHOOD PIXEL WASTE") - it was never
+    # meant to override real, independently-tracked wallets already
+    # choosing to buy in. Confirmed live: 12 separately tracked wallets
+    # (several with a proven track record) converged on a $0.027-average
+    # collection, sales still accelerating within the last 5 minutes, and
+    # this exact gate blocked it anyway before this fix.
+    if not _nft_scope_worth_posting(score, ignore_negligible_value=True):
         return False
     ping = f"<@&{settings.discord_minting_now_role_id}>" if settings.discord_minting_now_role_id else None
     uncategorized = [h["address"] for h in tracked_wallet_hits if not h.get("category")]

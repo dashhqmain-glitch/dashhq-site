@@ -585,6 +585,44 @@ def test_score_blocks_negligible_dollar_value_even_with_a_huge_percent_move():
     assert any("worthless in real dollar terms" in f for f in score["red_flags"])
 
 
+# ── ignore_negligible_value - a tracked-wallet convergence exemption ─────
+# Real false positive, confirmed live: a $0.027-average collection got 12
+# separately-tracked wallets (several with a proven track record)
+# converging on it, sales still accelerating within the last 5 minutes -
+# and this gate (designed for a lone percentage illusion with NO other
+# signal, see above) blocked it anyway. Trusted wallets buying in at a low
+# price is exactly the edge they're tracked for, not proof it's worthless.
+
+def test_worth_posting_ignores_negligible_value_when_asked():
+    c = strong_collection(
+        owners=1487, totalSupply=7777, salesTotal=8321, sales24h=380, vol1d=0.132,
+        floor=0.00045, listingUsdRate=1900.0, volTotal=0.1431,
+    )
+    burst = {"count": 5, "unique_buyers": 5, "unique_sellers": 5, "window_minutes": 30}
+    score = main._nft_scope_score(c, None, rapid_activity=burst)
+    assert score["blocked"] is True  # still true - block_reasons still records it happened
+    assert not main._nft_scope_worth_posting(score)  # default caller still blocked
+    assert main._nft_scope_worth_posting(score, ignore_negligible_value=True)  # convergence caller is not
+
+
+def test_worth_posting_still_blocks_a_real_other_red_flag_even_when_ignoring_negligible_value():
+    # The exemption is narrowly scoped to negligible_value alone - a
+    # collection that's ALSO an established blue chip (or wash-tainted,
+    # already traded out, on a real declining-price trend) must stay
+    # blocked regardless, since those are genuine red flags a convergence
+    # doesn't excuse.
+    old_date = (main.datetime.now(main.timezone.utc) - main.timedelta(days=400)).isoformat()
+    c = strong_collection(
+        owners=3000, totalSupply=7777, salesTotal=8321, sales24h=380, vol1d=0.132,
+        floor=0.00045, listingUsdRate=1900.0, volTotal=0.1431, createdDate=old_date,
+    )
+    burst = {"count": 5, "unique_buyers": 5, "unique_sellers": 5, "window_minutes": 30}
+    score = main._nft_scope_score(c, None, rapid_activity=burst)
+    assert "blue_chip" in score["block_reasons"]
+    assert "negligible_value" in score["block_reasons"]
+    assert not main._nft_scope_worth_posting(score, ignore_negligible_value=True)
+
+
 def test_score_blocks_declining_price_trend_even_with_a_live_burst():
     # The real false positive, reproduced end to end: a live rapid-
     # activity burst with a price surge inside it should not be enough
