@@ -1,0 +1,15 @@
+name: Temporary diagnose-slug-posting check
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Diagnose the-bull-club-296238752
+        run: |
+          curl -s -w "\nHTTP_CODE=%{http_code}\n" \
+            -G "https://www.dashhq.site/cron/diagnose-slug-posting" \
+            --data-urlencode "slug=the-bull-club-296238752" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
