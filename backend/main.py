@@ -1334,13 +1334,22 @@ async def check_tracked_wallets(request: Request, addresses: str):
     return {"checked": len(wanted), "tracked": rows}
 
 
+_ALCHEMY_WEBHOOK_STATUS_ALERT_SLUG = "__alchemy_webhook_status__"  # pseudo-slug: not about any one collection
+_ALCHEMY_WEBHOOK_STATUS_ALERT_COOLDOWN_SECONDS = 7200  # don't re-alert every checker tick during one ongoing pause
+
+
 @app.get("/cron/check-webhook-status")
 async def check_webhook_status(request: Request):
     # Answers "are our webhooks actually active right now" with certainty -
     # confirmed real precedent this session: Alchemy auto-paused all 3
     # webhooks after TOO_MANY_ERRORS, and that was only caught because a
     # human happened to check the dashboard directly. This makes that
-    # check self-serve instead of relying on someone noticing.
+    # check self-serve AND proactive: called on its own schedule (see
+    # nft-poll-heartbeat.yml), it now alerts the ops channel the moment a
+    # webhook actually goes inactive, instead of waiting for someone to
+    # look. deactivation_reason is a sticky historical field on Alchemy's
+    # side (it doesn't clear on reactivation) - only is_active reflects
+    # the real current state, so that's the only thing alerted on.
     expected = f"Bearer {settings.cron_secret}"
     if not settings.cron_secret or request.headers.get("authorization") != expected:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -1354,16 +1363,36 @@ async def check_webhook_status(request: Request):
         )
         res.raise_for_status()
         data = res.json()
-    webhooks = data.get("data") or []
-    results = {}
-    for wh in webhooks:
-        wh_id = wh.get("id")
-        if wh_id in configured_ids:
-            results[configured_ids[wh_id]] = {
-                "webhook_id": wh_id, "is_active": wh.get("is_active"),
-                "deactivation_reason": wh.get("deactivation_reason"), "network": wh.get("network"),
-            }
-    return {"checked": True, "webhooks": results}
+        webhooks = data.get("data") or []
+        results = {}
+        for wh in webhooks:
+            wh_id = wh.get("id")
+            if wh_id in configured_ids:
+                results[configured_ids[wh_id]] = {
+                    "webhook_id": wh_id, "is_active": wh.get("is_active"),
+                    "deactivation_reason": wh.get("deactivation_reason"), "network": wh.get("network"),
+                }
+
+        inactive = [chain for chain, info in results.items() if info.get("is_active") is False]
+        alerted = False
+        if inactive and settings.discord_ops_alert_channel_id:
+            alert_state = await _nft_alert_state_get(client, _ALCHEMY_WEBHOOK_STATUS_ALERT_SLUG, "alerted")
+            if _nft_alert_cooled_down(alert_state, cooldown_seconds=_ALCHEMY_WEBHOOK_STATUS_ALERT_COOLDOWN_SECONDS):
+                embed = {
+                    "title": "🚨 CI/Ops Alert",
+                    "description": (
+                        f"Alchemy webhook(s) paused: {', '.join(inactive)}. Real mints on "
+                        f"{'this chain' if len(inactive) == 1 else 'these chains'} will not be detected until "
+                        "reactivated - check the Notify section of the Alchemy dashboard."
+                    ),
+                    "color": EMBED_COLOR_BAD,
+                    "footer": {"text": "Dash HQ Toolkit · CI/CD"},
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                }
+                alerted = await _post_channel_message(client, settings.discord_ops_alert_channel_id, embed)
+                if alerted:
+                    await _nft_alert_state_set(client, _ALCHEMY_WEBHOOK_STATUS_ALERT_SLUG, "alerted", 0)
+    return {"checked": True, "webhooks": results, "inactive": inactive, "alerted": alerted}
 
 
 @app.get("/cron/check-webhook-address")
@@ -9627,15 +9656,15 @@ async def alchemy_address_activity_webhook(chain: str, request: Request):
     resolved_by_contract: dict[str, dict | None] = {}
     async with httpx.AsyncClient(timeout=20) as client:
         for mint in mints:
-            contract = mint["contract"]
-            if contract not in resolved_by_contract:
-                # `chain` is the webhook's own URL path - already known,
-                # never guessed (see _nft_resolve_by_contract's known_chain).
-                resolved_by_contract[contract] = await _nft_resolve_by_contract(client, contract, known_chain=chain)
-            c = resolved_by_contract[contract]
-            if not c or not c.get("slug"):
-                continue
             try:
+                contract = mint["contract"]
+                if contract not in resolved_by_contract:
+                    # `chain` is the webhook's own URL path - already known,
+                    # never guessed (see _nft_resolve_by_contract's known_chain).
+                    resolved_by_contract[contract] = await _nft_resolve_by_contract(client, contract, known_chain=chain)
+                c = resolved_by_contract[contract]
+                if not c or not c.get("slug"):
+                    continue
                 await client.post(
                     f"{settings.supabase_url}/rest/v1/nft_sale_events_log",
                     headers=_supabase_headers(prefer="resolution=merge-duplicates,return=minimal"),
@@ -9645,7 +9674,16 @@ async def alchemy_address_activity_webhook(chain: str, request: Request):
                         "event_at": mint["event_at"],
                     },
                 )
-            except httpx.HTTPError:
+            except Exception:
+                # Deliberately broad, not just httpx.HTTPError - a real gap
+                # confirmed here: contract resolution or the log write could
+                # throw something unexpected (malformed API response, a bad
+                # mint dict) and, unguarded, crash this ENTIRE delivery with
+                # a 500 - the exact failure mode most likely behind Alchemy
+                # auto-pausing all 3 webhooks with TOO_MANY_ERRORS earlier
+                # this session. One bad mint must never cost every OTHER
+                # mint in the same batch, or risk the webhook itself.
+                logger.exception("Failed to resolve/log webhook mint for contract %s", mint.get("contract"))
                 continue
             affected_slugs.add(c["slug"])
             resolved_by_slug[c["slug"]] = c
@@ -9925,17 +9963,17 @@ async def _tracked_wallet_watch_sweep(client: httpx.AsyncClient, deadline: float
             break
         checked += 1
         for mint in await _alchemy_wallet_recent_mints(client, address):
-            contract = mint["contract"]
-            if contract not in resolved_by_contract:
-                # mint["chain"] is already known (tagged on by
-                # _alchemy_wallet_recent_mints, which fetches per-chain) -
-                # never guessed, same reasoning as the webhook receiver.
-                resolved_by_contract[contract] = await _nft_resolve_by_contract(client, contract, known_chain=mint["chain"])
-            c = resolved_by_contract[contract]
-            if not c or not c.get("slug"):
-                continue
-            mints_found += 1
             try:
+                contract = mint["contract"]
+                if contract not in resolved_by_contract:
+                    # mint["chain"] is already known (tagged on by
+                    # _alchemy_wallet_recent_mints, which fetches per-chain) -
+                    # never guessed, same reasoning as the webhook receiver.
+                    resolved_by_contract[contract] = await _nft_resolve_by_contract(client, contract, known_chain=mint["chain"])
+                c = resolved_by_contract[contract]
+                if not c or not c.get("slug"):
+                    continue
+                mints_found += 1
                 await client.post(
                     f"{settings.supabase_url}/rest/v1/nft_sale_events_log",
                     headers=_supabase_headers(prefer="resolution=merge-duplicates,return=minimal"),
@@ -9945,7 +9983,15 @@ async def _tracked_wallet_watch_sweep(client: httpx.AsyncClient, deadline: float
                         "event_at": mint["event_at"],
                     },
                 )
-            except httpx.HTTPError:
+            except Exception:
+                # Deliberately broad, not just httpx.HTTPError - same real
+                # gap as the webhook receiver's identical fix: an unguarded
+                # exception here (a bad mint dict, a malformed API response)
+                # would crash this ENTIRE sweep, and _tracked_wallet_watch_sweep
+                # is only caught by /cron/nft-poll's narrower
+                # (httpx.HTTPError, KeyError) guard - anything else would
+                # have taken the whole poll cycle down with it.
+                logger.exception("Failed to resolve/log sweep-detected mint for contract %s", mint.get("contract"))
                 continue
             affected_slugs.add(c["slug"])
             resolved_by_slug[c["slug"]] = c

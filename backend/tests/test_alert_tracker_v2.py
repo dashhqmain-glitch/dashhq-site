@@ -356,6 +356,59 @@ async def test_webhook_resolves_a_repeated_contract_only_once_per_batch():
     assert len(resolve_calls) == 1  # resolved once, reused for the second mint event
 
 
+async def test_webhook_survives_an_unexpected_error_resolving_one_mint():
+    # Real gap found in an infrastructure audit: the mint-resolution loop
+    # only caught httpx.HTTPError, not a broader failure (a malformed
+    # contract dict, an unexpected exception from _nft_resolve_by_contract
+    # itself). Unguarded, that would crash the ENTIRE delivery with a
+    # 500 - very likely the actual mechanism behind Alchemy auto-pausing
+    # all 3 webhooks with TOO_MANY_ERRORS earlier this session. One bad
+    # mint must never cost every other mint in the same batch.
+    settings.alchemy_webhook_signing_key_ethereum = "key"
+    payload = {
+        "event": {
+            "activity": [
+                {
+                    "fromAddress": main._TRACKED_WALLET_NULL_ADDRESS, "toAddress": "0xBUYER1",
+                    "category": "erc721", "erc721TokenId": "0x1",
+                    "rawContract": {"address": "0xBROKEN"},
+                },
+                {
+                    "fromAddress": main._TRACKED_WALLET_NULL_ADDRESS, "toAddress": "0xBUYER2",
+                    "category": "erc721", "erc721TokenId": "0x2",
+                    "rawContract": {"address": "0xFINE"},
+                },
+            ]
+        }
+    }
+    body, sig = _signed_body("ethereum", payload)
+
+    async def fake_resolve(client, contract, known_chain=None):
+        if contract == "0xbroken":
+            raise KeyError("unexpected shape")
+        return {"slug": "fine-slug"}
+
+    async def fake_maybe_post(client, slug, known_collection=None):
+        return True
+
+    class FakeClient:
+        async def post(self, url, headers=None, json=None):
+            return FakeRes(200)
+
+    with patch.object(main, "_nft_resolve_by_contract", new=fake_resolve), \
+         patch.object(main, "_nft_scope_maybe_post_from_slug_direct", new=fake_maybe_post), \
+         patch("main.httpx.AsyncClient") as MockClient:
+        MockClient.return_value.__aenter__.return_value = FakeClient()
+        result = await main.alchemy_address_activity_webhook("ethereum", FakeRequest(body, sig))
+
+    # The broken mint is silently dropped; the fine one still gets through
+    # and the whole request still returns 200 (implicit - no exception
+    # escaped this call at all).
+    assert result["mints_logged"] == 2
+    assert result["slugs_touched"] == ["fine-slug"]
+    assert result["posted"] == 1
+
+
 # ── _alchemy_webhook_sync_addresses ───────────────────────────────────────
 
 async def test_webhook_sync_skips_without_auth_token():

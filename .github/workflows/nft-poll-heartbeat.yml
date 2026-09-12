@@ -8,13 +8,19 @@ name: NFT Poll Heartbeat Check
 # scheduled check against /cron/check-poll-heartbeat, which alerts the ops
 # channel directly if the real poll loop has gone stale.
 #
+# Also checks Alchemy's own webhook status on the same schedule - real
+# precedent this session: all 3 webhooks were once auto-paused with
+# TOO_MANY_ERRORS, and that was only caught because a human happened to
+# check the Alchemy dashboard directly. /cron/check-webhook-status alerts
+# the ops channel itself the moment any configured webhook goes inactive.
+#
 # Runs on its own schedule rather than being part of nft-poll.yml itself -
 # if THAT job is the one that's dead, a check living inside it would be
 # dead too. GH Actions' short-interval schedule unreliability (see
-# nft-poll.yml's own notes) doesn't undermine this: the staleness
-# threshold is enforced server-side in /cron/check-poll-heartbeat, so even
-# a delayed run of this workflow still correctly detects and alerts on a
-# real outage, just possibly a bit later than the ideal 30-minute cadence.
+# nft-poll.yml's own notes) doesn't undermine this: both endpoints enforce
+# their own staleness/alerting server-side, so even a delayed run of this
+# workflow still correctly detects and alerts on a real outage, just
+# possibly a bit later than the ideal 30-minute cadence.
 
 on:
   schedule:
@@ -34,4 +40,15 @@ jobs:
           cat response.json
           if [ "$status" -ge 400 ]; then
             echo "::warning::Heartbeat check endpoint itself failed with HTTP $status - check manually."
+          fi
+
+      - name: Check Alchemy webhook status
+        run: |
+          status=$(curl -s -o response.json -w "%{http_code}" \
+            "https://www.dashhq.site/cron/check-webhook-status" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}")
+          echo "Webhook status check: HTTP $status"
+          cat response.json
+          if [ "$status" -ge 400 ]; then
+            echo "::warning::Webhook status check endpoint itself failed with HTTP $status - check manually."
           fi

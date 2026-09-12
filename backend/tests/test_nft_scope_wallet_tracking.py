@@ -670,6 +670,63 @@ async def test_tracked_wallet_watch_sweep_logs_a_resolved_mint_and_triggers_conv
     assert convergence_calls == ["some-collection"]
 
 
+async def test_tracked_wallet_watch_sweep_survives_an_unexpected_error_resolving_one_mint():
+    # Same real gap as the webhook receiver's identical fix: the
+    # mint-resolution loop only caught httpx.HTTPError, not a broader
+    # failure - unguarded, that would crash this ENTIRE sweep, and
+    # _tracked_wallet_watch_sweep is only caught by /cron/nft-poll's
+    # narrower (httpx.HTTPError, KeyError) guard, so anything else would
+    # have taken the whole poll cycle down with it.
+    settings.alchemy_api_key = "key123"
+    logged_events = []
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "smart_wallet_tags" in url:
+                return FakeRes(200, [{"address": "0xwallet1"}, {"address": "0xwallet2"}])
+            return FakeRes(200, [])
+
+        async def post(self, url, headers=None, json=None):
+            if "nft_sale_events_log" in url:
+                logged_events.append(json)
+            return FakeRes(200, {})
+
+    async def fake_recent_mints(client, address):
+        if address == "0xwallet1":
+            return [{"chain": "robinhood", "contract": "0xbroken", "token_id": "1", "event_at": "2026-01-01T00:00:00Z"}]
+        if address == "0xwallet2":
+            return [{"chain": "robinhood", "contract": "0xfine", "token_id": "2", "event_at": "2026-01-01T00:00:00Z"}]
+        return []
+
+    async def fake_resolve(client, contract, known_chain=None):
+        if contract == "0xbroken":
+            raise KeyError("unexpected shape")
+        return {"slug": "fine-slug", "symbol": "ETH"}
+
+    async def fake_maybe_post_direct(client, slug, known_collection=None):
+        return True
+
+    def all_buckets_match(address, num_buckets):
+        return int(main.time.time() // 300) % num_buckets
+
+    try:
+        with patch.object(main, "_alchemy_healthy", return_value=True), \
+             patch.object(main, "_wallet_poll_bucket", side_effect=all_buckets_match), \
+             patch.object(main, "_alchemy_wallet_recent_mints", new=fake_recent_mints), \
+             patch.object(main, "_nft_resolve_by_contract", new=fake_resolve), \
+             patch.object(main, "_nft_scope_maybe_post_from_slug_direct", new=fake_maybe_post_direct):
+            result = await main._tracked_wallet_watch_sweep(FakeClient(), deadline=main.time.time() + 30)
+    finally:
+        settings.alchemy_api_key = ""
+
+    # The broken mint is silently dropped; the fine one (a different
+    # wallet's mint in the same sweep) still gets through.
+    assert result["mints_found"] == 1
+    assert result["slugs_touched"] == ["fine-slug"]
+    assert len(logged_events) == 1
+    assert logged_events[0]["slug"] == "fine-slug"
+
+
 async def test_maybe_post_from_slug_direct_requires_the_convergence_minimum():
     # Floor is 1 tracked wallet now (lowered from 2 by direct request), so
     # zero tracked wallets is the only thing this minimum still withholds.
