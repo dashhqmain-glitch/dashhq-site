@@ -5737,7 +5737,7 @@ _CHAIN_EXPLORERS = {
     "bsc": "https://bscscan.com/address/{a}",
     "ink": "https://explorer.inkonchain.com/address/{a}",  # unverified
     "hyperevm": "https://hyperevmscan.io/address/{a}",  # unverified
-    "robinhood": "https://explorer.robinhood.com/address/{a}",  # unverified - Robinhood Chain explorer not confirmed live
+    "robinhood": "https://robinhoodchain.blockscout.com/address/{a}",  # confirmed live - explorer.robinhood.com (the old value here) doesn't exist; this is the real official Blockscout explorer
 }
 
 
