@@ -5378,11 +5378,17 @@ def _enrich_with_cached_meta(shaped: dict) -> dict:
 
 _EVM_ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 # Chains OpenSea's contract-lookup endpoint is tried against, in priority
-# order, when a member searches by contract address instead of a name.
-# ethereum/base/robinhood first (the chains this community actually mints
-# on, matching _NFT_SCOPE_CHAINS), then the rest of what OpenSea covers
-# as bonus reach.
-_NFT_CONTRACT_LOOKUP_CHAINS = ["ethereum", "base", "robinhood", "matic", "arbitrum", "optimism", "avalanche"]
+# order, when a member searches by contract address instead of a name, and
+# (critically) when the Alchemy Address Activity webhook receiver resolves
+# a freshly-detected mint's contract to an OpenSea slug before it can post.
+# ethereum/robinhood/ink first - the three chains actually prioritized for
+# push-based detection - then base, then the rest of what OpenSea covers as
+# bonus reach. "ink" was missing here despite being one of the three
+# explicit priority chains and already present in _NFT_SCOPE_CHAINS: every
+# real Ink mint's webhook fired and detected the mint correctly, then
+# silently failed to resolve a slug against every chain except the one it
+# actually happened on, so it could never post.
+_NFT_CONTRACT_LOOKUP_CHAINS = ["ethereum", "robinhood", "ink", "base", "matic", "arbitrum", "optimism", "avalanche"]
 
 
 async def _nft_resolve_by_contract(client: httpx.AsyncClient, address: str) -> dict | None:
