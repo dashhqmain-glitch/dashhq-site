@@ -8980,7 +8980,10 @@ _ALERT_TRACKER_RECHECK_TIME_BUDGET_SECONDS = 30  # skip this phase outright once
 _ALERT_TRACKER_RECHECK_EVENTS_LIMIT = 1000  # matches /cron/recent-convergence-summary's own default
 
 
-async def _alert_tracker_pending_convergence_slugs(client: httpx.AsyncClient, hours: int) -> list[str]:
+_ALERT_TRACKER_RECHECK_WATERMARK_TYPE = "recheck_checked"  # nft_alert_state alert_type storing each slug's high-watermark
+
+
+async def _alert_tracker_pending_convergence_slugs(client: httpx.AsyncClient, hours: int) -> dict[str, str]:
     # Same shape as /cron/recent-convergence-summary's own query (see
     # there for why this fetches the whole tracked list and intersects in
     # Python rather than an address=in.(...) filter - the identical
@@ -8990,23 +8993,41 @@ async def _alert_tracker_pending_convergence_slugs(client: httpx.AsyncClient, ho
     # most-recently-active first, so if there are more candidates than
     # _ALERT_TRACKER_RECHECK_MAX_PER_CYCLE allows checking in one cycle,
     # the freshest ones go first.
+    #
+    # Returns {slug: latest_event_at}, not just a list - the high-water
+    # mark below needs to know each slug's most recent qualifying event to
+    # both filter on it and record it once checked. Real problem this
+    # closes, confirmed live: before this, a slug that got checked and
+    # still didn't clear (wash-tainted, still too thin, whatever the
+    # reason) was NEVER excluded from this query - only a real post
+    # excluded it. That candidate then got rediscovered and reprocessed on
+    # every single cycle for up to `hours`, permanently occupying recheck
+    # budget a genuinely new candidate could have used instead. A slug is
+    # now skipped once checked, UNLESS a newer qualifying event has landed
+    # on it since - the standard high-watermark pattern for exactly this
+    # kind of "don't reprocess what hasn't changed" problem.
     since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
     events_res = await client.get(
         f"{settings.supabase_url}/rest/v1/nft_sale_events_log",
         headers=_supabase_headers(),
         params={
             "event_at": f"gte.{since}", "seller": f"eq.{_TRACKED_WALLET_NULL_ADDRESS}",
-            "select": "slug,buyer", "order": "event_at.desc", "limit": str(_ALERT_TRACKER_RECHECK_EVENTS_LIMIT),
+            "select": "slug,buyer,event_at", "order": "event_at.desc", "limit": str(_ALERT_TRACKER_RECHECK_EVENTS_LIMIT),
         },
     )
     events_res.raise_for_status()
     events = events_res.json()
     if not events:
-        return []
+        return {}
 
     buyers_by_slug: dict[str, set[str]] = {}
+    latest_event_at_by_slug: dict[str, str] = {}
     for e in events:
         buyers_by_slug.setdefault(e["slug"], set()).add(e["buyer"])
+        # events are event_at.desc, so the first one seen per slug is its
+        # most recent - setdefault keeps that first value on every
+        # subsequent (older) sighting of the same slug.
+        latest_event_at_by_slug.setdefault(e["slug"], e["event_at"])
 
     tags_res = await client.get(
         f"{settings.supabase_url}/rest/v1/smart_wallet_tags",
@@ -9017,7 +9038,7 @@ async def _alert_tracker_pending_convergence_slugs(client: httpx.AsyncClient, ho
 
     candidates = [slug for slug in buyers_by_slug if len(buyers_by_slug[slug] & tracked) >= _NFT_SCOPE_TRACKED_CONVERGENCE_ALERT_MIN_WALLETS]
     if not candidates:
-        return []
+        return {}
 
     posted_res = await client.get(
         f"{settings.supabase_url}/rest/v1/alert_tracker_calls",
@@ -9025,7 +9046,28 @@ async def _alert_tracker_pending_convergence_slugs(client: httpx.AsyncClient, ho
     )
     posted_res.raise_for_status()
     already_posted = {row["slug"] for row in posted_res.json()}
-    return [slug for slug in candidates if slug not in already_posted]
+    candidates = [slug for slug in candidates if slug not in already_posted]
+    if not candidates:
+        return {}
+
+    watermark_res = await client.get(
+        f"{settings.supabase_url}/rest/v1/nft_alert_state",
+        headers=_supabase_headers(),
+        params={"slug": f"in.({','.join(candidates)})", "alert_type": f"eq.{_ALERT_TRACKER_RECHECK_WATERMARK_TYPE}", "select": "slug,last_value"},
+    )
+    watermark_res.raise_for_status()
+    last_checked_epoch_by_slug = {row["slug"]: row["last_value"] for row in watermark_res.json() if row.get("last_value") is not None}
+
+    pending: dict[str, str] = {}
+    for slug in candidates:
+        latest_event_at = latest_event_at_by_slug[slug]
+        last_checked_epoch = last_checked_epoch_by_slug.get(slug)
+        if last_checked_epoch is not None:
+            latest_epoch = datetime.fromisoformat(latest_event_at.replace("Z", "+00:00")).timestamp()
+            if latest_epoch <= last_checked_epoch:
+                continue  # nothing new since the last time this was checked - don't re-churn it
+        pending[slug] = latest_event_at
+    return pending
 
 
 async def _alert_tracker_recheck_pending_convergences(client: httpx.AsyncClient, deadline: float) -> dict:
@@ -9035,17 +9077,31 @@ async def _alert_tracker_recheck_pending_convergences(client: httpx.AsyncClient,
         logger.exception("Failed to fetch pending Alert Tracker convergence slugs")
         return {"pending": 0, "checked": 0, "posted": 0}
     checked = posted = 0
-    for slug in pending[:_ALERT_TRACKER_RECHECK_MAX_PER_CYCLE]:
+    for slug, latest_event_at in list(pending.items())[:_ALERT_TRACKER_RECHECK_MAX_PER_CYCLE]:
         if time.time() >= deadline:
             break
         checked += 1
         try:
             if await _nft_scope_maybe_post_from_slug_direct(client, slug):
                 posted += 1
+            # Recorded either way, posted or not - a real, specific answer
+            # either way, and the whole point of the watermark is to not
+            # re-ask the identical question again next cycle when nothing
+            # about this slug has changed since. Best-effort: a failed
+            # write here just means this slug might get needlessly
+            # re-checked again next cycle, not a correctness problem.
+            try:
+                epoch = datetime.fromisoformat(latest_event_at.replace("Z", "+00:00")).timestamp()
+                await _nft_alert_state_set(client, slug, _ALERT_TRACKER_RECHECK_WATERMARK_TYPE, epoch)
+            except httpx.HTTPError:
+                logger.exception("Failed to record recheck watermark for %s", slug)
         except Exception:
             # Deliberately broad - one bad slug must never break the rest
             # of this cycle's rechecks, same reasoning as the webhook
-            # receiver and watch-sweep's identical guards.
+            # receiver and watch-sweep's identical guards. No watermark
+            # recorded here on purpose - an unexpected failure means we
+            # don't actually know the verdict, so leave it eligible for a
+            # genuine retry rather than marking it "checked."
             logger.exception("Failed to recheck pending Alert Tracker convergence slug %s", slug)
             continue
     return {"pending": len(pending), "checked": checked, "posted": posted}

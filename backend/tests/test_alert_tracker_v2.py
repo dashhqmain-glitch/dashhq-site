@@ -860,23 +860,31 @@ async def test_pending_convergence_slugs_finds_a_slug_past_the_minimum_not_yet_p
     class FakeClient:
         async def get(self, url, headers=None, params=None):
             if "nft_sale_events_log" in url:
-                return FakeRes(200, [{"slug": "pending-slug", "buyer": "0xa"}, {"slug": "pending-slug", "buyer": "0xb"}])
+                return FakeRes(200, [
+                    {"slug": "pending-slug", "buyer": "0xa", "event_at": "2026-01-01T00:05:00+00:00"},
+                    {"slug": "pending-slug", "buyer": "0xb", "event_at": "2026-01-01T00:00:00+00:00"},
+                ])
             if "smart_wallet_tags" in url:
                 return FakeRes(200, [{"address": "0xa"}, {"address": "0xb"}])
             if "alert_tracker_calls" in url:
                 assert params["slug"] == "in.(pending-slug)"
                 return FakeRes(200, [])  # never posted
+            if "nft_alert_state" in url:
+                return FakeRes(200, [])  # never checked before
             return FakeRes(200, [])
 
     result = await main._alert_tracker_pending_convergence_slugs(FakeClient(), hours=24)
-    assert result == ["pending-slug"]
+    assert result == {"pending-slug": "2026-01-01T00:05:00+00:00"}  # the newer (first-seen, event_at.desc) timestamp
 
 
 async def test_pending_convergence_slugs_excludes_ones_already_posted():
     class FakeClient:
         async def get(self, url, headers=None, params=None):
             if "nft_sale_events_log" in url:
-                return FakeRes(200, [{"slug": "already-posted", "buyer": "0xa"}, {"slug": "already-posted", "buyer": "0xb"}])
+                return FakeRes(200, [
+                    {"slug": "already-posted", "buyer": "0xa", "event_at": "2026-01-01T00:00:00+00:00"},
+                    {"slug": "already-posted", "buyer": "0xb", "event_at": "2026-01-01T00:00:00+00:00"},
+                ])
             if "smart_wallet_tags" in url:
                 return FakeRes(200, [{"address": "0xa"}, {"address": "0xb"}])
             if "alert_tracker_calls" in url:
@@ -884,21 +892,21 @@ async def test_pending_convergence_slugs_excludes_ones_already_posted():
             return FakeRes(200, [])
 
     result = await main._alert_tracker_pending_convergence_slugs(FakeClient(), hours=24)
-    assert result == []
+    assert result == {}
 
 
 async def test_pending_convergence_slugs_excludes_ones_below_the_minimum():
     class FakeClient:
         async def get(self, url, headers=None, params=None):
             if "nft_sale_events_log" in url:
-                return FakeRes(200, [{"slug": "single-wallet-slug", "buyer": "0xa"}])
+                return FakeRes(200, [{"slug": "single-wallet-slug", "buyer": "0xa", "event_at": "2026-01-01T00:00:00+00:00"}])
             if "smart_wallet_tags" in url:
                 return FakeRes(200, [{"address": "0xa"}])
             return FakeRes(200, [])
 
     with patch.object(main, "_NFT_SCOPE_TRACKED_CONVERGENCE_ALERT_MIN_WALLETS", 2):
         result = await main._alert_tracker_pending_convergence_slugs(FakeClient(), hours=24)
-    assert result == []
+    assert result == {}
 
 
 async def test_pending_convergence_slugs_returns_empty_with_no_recent_events():
@@ -907,26 +915,87 @@ async def test_pending_convergence_slugs_returns_empty_with_no_recent_events():
             return FakeRes(200, [])
 
     result = await main._alert_tracker_pending_convergence_slugs(FakeClient(), hours=24)
-    assert result == []
+    assert result == {}
+
+
+# ── High-watermark: don't re-churn a slug that hasn't changed ─────────────
+# Real problem, confirmed live: before this, a slug that got checked and
+# still didn't clear was never excluded from this query - only a real post
+# excluded it. It got rediscovered and reprocessed on every single cycle
+# for up to `hours`, permanently occupying recheck budget a genuinely new
+# candidate could have used instead.
+
+async def test_pending_convergence_slugs_excludes_one_with_no_new_event_since_last_check():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "nft_sale_events_log" in url:
+                return FakeRes(200, [
+                    {"slug": "already-checked", "buyer": "0xa", "event_at": "2026-01-01T00:00:00+00:00"},
+                    {"slug": "already-checked", "buyer": "0xb", "event_at": "2026-01-01T00:00:00+00:00"},
+                ])
+            if "smart_wallet_tags" in url:
+                return FakeRes(200, [{"address": "0xa"}, {"address": "0xb"}])
+            if "alert_tracker_calls" in url:
+                return FakeRes(200, [])
+            if "nft_alert_state" in url:
+                assert params["alert_type"] == "eq.recheck_checked"
+                checked_at = main.datetime.fromisoformat("2026-01-01T00:00:00+00:00").timestamp()
+                return FakeRes(200, [{"slug": "already-checked", "last_value": checked_at}])
+            return FakeRes(200, [])
+
+    result = await main._alert_tracker_pending_convergence_slugs(FakeClient(), hours=24)
+    assert result == {}  # same event as last checked - nothing new, skip it
+
+
+async def test_pending_convergence_slugs_includes_one_with_a_newer_event_since_last_check():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "nft_sale_events_log" in url:
+                return FakeRes(200, [
+                    {"slug": "new-activity", "buyer": "0xa", "event_at": "2026-01-01T01:00:00+00:00"},
+                    {"slug": "new-activity", "buyer": "0xb", "event_at": "2026-01-01T00:00:00+00:00"},
+                ])
+            if "smart_wallet_tags" in url:
+                return FakeRes(200, [{"address": "0xa"}, {"address": "0xb"}])
+            if "alert_tracker_calls" in url:
+                return FakeRes(200, [])
+            if "nft_alert_state" in url:
+                checked_at = main.datetime.fromisoformat("2026-01-01T00:00:00+00:00").timestamp()
+                return FakeRes(200, [{"slug": "new-activity", "last_value": checked_at}])
+            return FakeRes(200, [])
+
+    result = await main._alert_tracker_pending_convergence_slugs(FakeClient(), hours=24)
+    # A genuinely newer event (0xa's, an hour later) landed since the last
+    # check - eligible again, with the fresh timestamp.
+    assert result == {"new-activity": "2026-01-01T01:00:00+00:00"}
 
 
 async def test_recheck_pending_convergences_calls_the_real_posting_path_and_counts_results():
     async def fake_pending(client, hours):
-        return ["will-post", "will-not-post"]
+        return {"will-post": "2026-01-01T00:00:00+00:00", "will-not-post": "2026-01-01T00:00:00+00:00"}
 
     async def fake_maybe_post(client, slug):
         return slug == "will-post"
 
+    watermarks_set = []
+
+    async def fake_state_set(client, slug, alert_type, value):
+        watermarks_set.append((slug, alert_type))
+
     with patch.object(main, "_alert_tracker_pending_convergence_slugs", new=fake_pending), \
-         patch.object(main, "_nft_scope_maybe_post_from_slug_direct", new=fake_maybe_post):
+         patch.object(main, "_nft_scope_maybe_post_from_slug_direct", new=fake_maybe_post), \
+         patch.object(main, "_nft_alert_state_set", new=fake_state_set):
         result = await main._alert_tracker_recheck_pending_convergences(main.httpx.AsyncClient(), deadline=time.time() + 30)
 
     assert result == {"pending": 2, "checked": 2, "posted": 1}
+    # Watermark recorded for BOTH - posted or not, we now have a real,
+    # specific answer for this slug's current latest event either way.
+    assert watermarks_set == [("will-post", "recheck_checked"), ("will-not-post", "recheck_checked")]
 
 
 async def test_recheck_pending_convergences_stops_at_the_deadline():
     async def fake_pending(client, hours):
-        return ["a", "b", "c"]
+        return {"a": "2026-01-01T00:00:00+00:00", "b": "2026-01-01T00:00:00+00:00", "c": "2026-01-01T00:00:00+00:00"}
 
     calls = []
 
@@ -943,7 +1012,7 @@ async def test_recheck_pending_convergences_stops_at_the_deadline():
 
 
 async def test_recheck_pending_convergences_caps_checks_per_cycle():
-    slugs = [f"slug-{i}" for i in range(main._ALERT_TRACKER_RECHECK_MAX_PER_CYCLE + 5)]
+    slugs = {f"slug-{i}": "2026-01-01T00:00:00+00:00" for i in range(main._ALERT_TRACKER_RECHECK_MAX_PER_CYCLE + 5)}
 
     async def fake_pending(client, hours):
         return slugs
@@ -951,8 +1020,12 @@ async def test_recheck_pending_convergences_caps_checks_per_cycle():
     async def fake_maybe_post(client, slug):
         return False
 
+    async def fake_state_set(client, slug, alert_type, value):
+        pass
+
     with patch.object(main, "_alert_tracker_pending_convergence_slugs", new=fake_pending), \
-         patch.object(main, "_nft_scope_maybe_post_from_slug_direct", new=fake_maybe_post):
+         patch.object(main, "_nft_scope_maybe_post_from_slug_direct", new=fake_maybe_post), \
+         patch.object(main, "_nft_alert_state_set", new=fake_state_set):
         result = await main._alert_tracker_recheck_pending_convergences(main.httpx.AsyncClient(), deadline=time.time() + 30)
 
     assert result["pending"] == len(slugs)
@@ -961,18 +1034,44 @@ async def test_recheck_pending_convergences_caps_checks_per_cycle():
 
 async def test_recheck_pending_convergences_survives_one_bad_slug():
     async def fake_pending(client, hours):
-        return ["broken-slug", "fine-slug"]
+        return {"broken-slug": "2026-01-01T00:00:00+00:00", "fine-slug": "2026-01-01T00:00:00+00:00"}
 
     async def fake_maybe_post(client, slug):
         if slug == "broken-slug":
             raise KeyError("count")  # the exact real bug this same guard already fixed once
         return True
 
+    async def fake_state_set(client, slug, alert_type, value):
+        pass
+
     with patch.object(main, "_alert_tracker_pending_convergence_slugs", new=fake_pending), \
-         patch.object(main, "_nft_scope_maybe_post_from_slug_direct", new=fake_maybe_post):
+         patch.object(main, "_nft_scope_maybe_post_from_slug_direct", new=fake_maybe_post), \
+         patch.object(main, "_nft_alert_state_set", new=fake_state_set):
         result = await main._alert_tracker_recheck_pending_convergences(main.httpx.AsyncClient(), deadline=time.time() + 30)
 
     assert result == {"pending": 2, "checked": 2, "posted": 1}
+
+
+async def test_recheck_pending_convergences_does_not_record_a_watermark_on_failure():
+    # If the check itself blew up, we don't actually know the verdict -
+    # must stay eligible for a genuine retry, not get marked "checked."
+    async def fake_pending(client, hours):
+        return {"broken-slug": "2026-01-01T00:00:00+00:00"}
+
+    async def fake_maybe_post(client, slug):
+        raise KeyError("count")
+
+    watermarks_set = []
+
+    async def fake_state_set(client, slug, alert_type, value):
+        watermarks_set.append(slug)
+
+    with patch.object(main, "_alert_tracker_pending_convergence_slugs", new=fake_pending), \
+         patch.object(main, "_nft_scope_maybe_post_from_slug_direct", new=fake_maybe_post), \
+         patch.object(main, "_nft_alert_state_set", new=fake_state_set):
+        await main._alert_tracker_recheck_pending_convergences(main.httpx.AsyncClient(), deadline=time.time() + 30)
+
+    assert watermarks_set == []
 
 
 async def test_recheck_pending_convergences_fails_open_when_discovery_query_fails():
