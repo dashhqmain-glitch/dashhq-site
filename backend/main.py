@@ -6946,7 +6946,21 @@ def _nft_scope_turnover_elevated(c: dict) -> bool:
     return (turnover is not None and turnover >= 0.4) or (flips_per_owner is not None and flips_per_owner >= 5)
 
 
-def _detect_abnormal_turnover(c: dict, wash_analysis: dict | None = None) -> tuple[bool, str] | None:
+_NFT_SCOPE_TURNOVER_FLOOR_MULTIPLE_MIN = 2  # matches floor_multiple's own lowest qualifying tier - see _nft_scope_surge_points
+# Deliberately lower than _NFT_SCOPE_VELOCITY_MIN_PCT (15, the bar for a
+# scoring BONUS) - direct request: members need to see a real mint move
+# fast, and a project doesn't have to already be fully proven (a 2x+
+# floor_multiple can take hours to reach) before high turnover should
+# stop reading as an automatic red flag. Even a modest, fresh floor
+# move in just the last poll cycle counts here - the tradeoff is
+# explicit and intentional: a few false "not wash" clears are an
+# acceptable cost for not missing a real mint while it's still moving.
+_NFT_SCOPE_TURNOVER_VELOCITY_HINT_MIN_PCT = 5
+
+
+def _detect_abnormal_turnover(
+    c: dict, wash_analysis: dict | None = None, floor_multiple: float | None = None, velocity_pct: float | None = None,
+) -> tuple[bool, str] | None:
     # A large wallet-graph wash-trading operation (dozens+ of sybil
     # wallets, many different token IDs) can dodge the pairwise/cluster/
     # token-diversity checks in _analyze_wash_trading entirely, since
@@ -7026,20 +7040,62 @@ def _detect_abnormal_turnover(c: dict, wash_analysis: dict | None = None) -> tup
     sample_size = wash_analysis.get("sample_size") if wash_analysis else None
     min_buyers_required = max(_NFT_SCOPE_TURNOVER_CORROBORATION_MIN_BUYERS, int((sample_size or 0) * _NFT_SCOPE_TURNOVER_CORROBORATION_MIN_BUYER_RATIO))
     min_sellers_required = max(_NFT_SCOPE_TURNOVER_CORROBORATION_MIN_BUYERS, int((sample_size or 0) * _NFT_SCOPE_TURNOVER_CORROBORATION_MIN_SELLER_RATIO))
-    corroborated = (
+    corroborated_by_diversity = (
         wash_analysis is not None
         and not wash_analysis.get("suspicious")
         and bool(sample_size)
         and (wash_analysis.get("unique_buyers") or 0) >= min_buyers_required
         and (wash_analysis.get("unique_sellers") or 0) >= min_sellers_required
     )
+    # Second, independent corroboration path: real, sustained floor
+    # appreciation since NFT Scope's own first-ever recorded snapshot for
+    # this collection - persisted history across actual elapsed time
+    # (hours to days), not a same-day trade sample that can look thin
+    # simply because a real mover is still young. A wash-trading ring has
+    # no reason to keep paying itself a genuinely higher price than its
+    # own earliest recorded floor and holding that gain over real time -
+    # that costs real capital with no offsetting benefit for pure self-
+    # dealing, whereas a real hit mint's floor climbing is exactly what
+    # organic demand looks like. Confirmed live: hash-cats failed the
+    # buyer/seller diversity bar on a too-early, too-thin sample (still
+    # correctly conservative at the time), then its floor rose from
+    # ~$301 to $500+ over the following hours on real, sustained volume -
+    # the diversity check alone had no way to see that, since it only
+    # ever looks at one day's sample, never at the collection's own
+    # price trajectory.
+    corroborated_by_floor = floor_multiple is not None and floor_multiple >= _NFT_SCOPE_TURNOVER_FLOOR_MULTIPLE_MIN
+    # Third, fastest-triggering corroboration path: direct request to
+    # favor speed over waiting for full proof - members need to see a
+    # real, fast-moving mint while it's still moving, not hours later
+    # once floor_multiple has had time to clear a full 2x. Even a modest,
+    # fresh floor move in just the last poll cycle (a few minutes) is
+    # treated as a real hint of genuine demand rather than automatically
+    # reading high turnover as wash trading. Deliberately a lower bar
+    # than the other two paths - the accepted tradeoff, stated explicitly
+    # rather than left implicit, is a few false "not wash" clears in
+    # exchange for never sitting on a real, fast mover.
+    corroborated_by_velocity = velocity_pct is not None and velocity_pct >= _NFT_SCOPE_TURNOVER_VELOCITY_HINT_MIN_PCT
+    corroborated = corroborated_by_diversity or corroborated_by_floor or corroborated_by_velocity
     detail = f"{sales} sales" + (f" against {supply} total supply ({turnover:.0%} turnover)" if turnover is not None else "")
     if corroborated:
+        if corroborated_by_diversity:
+            basis = (
+                f"verified wash-clean across {wash_analysis['unique_buyers']} distinct buyer(s) and "
+                f"{wash_analysis['unique_sellers']} distinct seller(s) in a same-window sample"
+            )
+        elif corroborated_by_floor:
+            basis = (
+                f"the floor has genuinely risen {floor_multiple:.1f}x since NFT Scope first recorded it - "
+                "real, sustained price appreciation a wash-trading ring has no reason to pay for"
+            )
+        else:
+            basis = (
+                f"the floor is already up {velocity_pct:.0f}% since just the last poll cycle - "
+                "a real, fresh hint of genuine demand moving right now"
+            )
         return (
             False,
-            f"⚡ {detail} in 24h, verified wash-clean across {wash_analysis['unique_buyers']} distinct buyer(s) "
-            f"and {wash_analysis['unique_sellers']} distinct seller(s) in a same-window sample - high turnover "
-            "here is a real, broad-based sweep, not wash trading"
+            f"⚡ {detail} in 24h, {basis} - high turnover here is a real, broad-based sweep, not wash trading"
         )
     if turnover is not None and turnover >= 0.4:
         return (
@@ -7331,7 +7387,7 @@ _NFT_SCOPE_VELOCITY_POINTS = 10
 _NFT_SCOPE_MULTIPLE_TIERS = [(50, 25), (20, 20), (10, 15), (5, 10), (2, 5)]
 
 
-def _nft_scope_surge_points(c: dict, history: list[dict] | None, first_snapshot: dict | None) -> tuple[int, list[str], float | None]:
+def _nft_scope_surge_points(c: dict, history: list[dict] | None, first_snapshot: dict | None) -> tuple[int, list[str], float | None, float | None]:
     # Fast-triggering, and deliberately separate from _momentum_points
     # above - that one needs 6 snapshots (~30 min of history) before it'll
     # say anything at all, built for confirming a SUSTAINED trend. A real
@@ -7362,15 +7418,20 @@ def _nft_scope_surge_points(c: dict, history: list[dict] | None, first_snapshot:
                     )
                     break
 
+    # velocity_pct is returned regardless of whether it clears the bonus-
+    # points bar above - a caller like _detect_abnormal_turnover's
+    # corroboration wants ANY real, fresh hint of upward movement (a much
+    # lower bar than what earns scoring points), not just a strong one.
+    velocity_pct: float | None = None
     if history and floor is not None:
         prev_floor = (history[0] or {}).get("floor")  # history is newest-first; index 0 is the immediately-prior poll
         if prev_floor and prev_floor > 0:
-            pct = (floor - prev_floor) / prev_floor * 100
-            if pct >= _NFT_SCOPE_VELOCITY_MIN_PCT:
+            velocity_pct = (floor - prev_floor) / prev_floor * 100
+            if velocity_pct >= _NFT_SCOPE_VELOCITY_MIN_PCT:
                 points += _NFT_SCOPE_VELOCITY_POINTS
-                reasons.append(f"⚡ Floor jumped {pct:.0f}% since the last poll cycle just minutes ago - moving in real time")
+                reasons.append(f"⚡ Floor jumped {velocity_pct:.0f}% since the last poll cycle just minutes ago - moving in real time")
 
-    return points, reasons, floor_multiple
+    return points, reasons, floor_multiple, velocity_pct
 
 
 def _nft_scope_score(
@@ -7462,7 +7523,7 @@ def _nft_scope_score(
     # real early conviction looks like. This is what lets a verified,
     # wash-clean price/volume surge clear a high tier on its own merits
     # instead of needing blue-chip-style polish it hasn't had time to earn.
-    surge_points, surge_reasons, floor_multiple = _nft_scope_surge_points(c, history, first_snapshot)
+    surge_points, surge_reasons, floor_multiple, velocity_pct = _nft_scope_surge_points(c, history, first_snapshot)
     points += surge_points
     reasons.extend(surge_reasons)
 
@@ -7557,7 +7618,7 @@ def _nft_scope_score(
         momentum_points or accumulation_points or surge_points or smart_points or spike_points or rapid_activity
     )
 
-    turnover_result = _detect_abnormal_turnover(c, wash_analysis)
+    turnover_result = _detect_abnormal_turnover(c, wash_analysis, floor_multiple, velocity_pct)
     turnover_blocks = False
     if turnover_result:
         turnover_blocked, turnover_message = turnover_result
@@ -8750,6 +8811,101 @@ async def _alert_tracker_prove_due_calls(client: httpx.AsyncClient) -> dict:
         except httpx.HTTPError:
             logger.exception("Failed to mark alert_tracker_calls row %s checked", row["id"])
     return {"checked": checked, "proved": proved}
+
+
+# ── Alert Tracker watchdog: re-check convergences that didn't post yet ────
+# Direct request, backed by a real confirmed case: "hash-cats" had 4+
+# tracked wallets converge on it, but the wash-trading check correctly
+# withheld it at the time - the trade sample was too thin (too early) to
+# prove genuine buyer/seller diversity. Hours later, once real secondary
+# trading had actually built up, re-running the EXACT SAME check on the
+# exact same slug cleared it completely (the floor had also risen from
+# ~$301 to $500+ by then). Nothing was ever going to catch that on its
+# own: every detection path here is reactive, triggered only by a BRAND
+# NEW mint event for a slug - once a slug's tracked wallets stop minting
+# it, nothing ever asks "does this clear now?" again, no matter how much
+# real secondary activity accumulates afterward.
+#
+# This closes that gap by periodically re-asking the exact question for
+# any slug that (a) had enough tracked wallets converge on it recently and
+# (b) never actually got a real Alert Tracker post - reusing
+# _nft_scope_maybe_post_from_slug_direct as-is (same scoring, same gates,
+# same posting path already covered by its own tests), not new logic.
+_ALERT_TRACKER_RECHECK_WINDOW_HOURS = 24  # only reconsider slugs with tracked-wallet activity at least this recent
+_ALERT_TRACKER_RECHECK_MAX_PER_CYCLE = 10  # bounds the extra OpenSea/Supabase spend this adds per poll cycle
+_ALERT_TRACKER_RECHECK_TIME_BUDGET_SECONDS = 30  # skip this phase outright once a cycle has already burned this much of Vercel's 60s cap
+_ALERT_TRACKER_RECHECK_EVENTS_LIMIT = 1000  # matches /cron/recent-convergence-summary's own default
+
+
+async def _alert_tracker_pending_convergence_slugs(client: httpx.AsyncClient, hours: int) -> list[str]:
+    # Same shape as /cron/recent-convergence-summary's own query (see
+    # there for why this fetches the whole tracked list and intersects in
+    # Python rather than an address=in.(...) filter - the identical
+    # oversized-URL bug already fixed there), but scoped down to just the
+    # slugs actually worth a fresh look: already past the convergence
+    # minimum, and not already sitting in alert_tracker_calls. Ordered by
+    # most-recently-active first, so if there are more candidates than
+    # _ALERT_TRACKER_RECHECK_MAX_PER_CYCLE allows checking in one cycle,
+    # the freshest ones go first.
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    events_res = await client.get(
+        f"{settings.supabase_url}/rest/v1/nft_sale_events_log",
+        headers=_supabase_headers(),
+        params={
+            "event_at": f"gte.{since}", "seller": f"eq.{_TRACKED_WALLET_NULL_ADDRESS}",
+            "select": "slug,buyer", "order": "event_at.desc", "limit": str(_ALERT_TRACKER_RECHECK_EVENTS_LIMIT),
+        },
+    )
+    events_res.raise_for_status()
+    events = events_res.json()
+    if not events:
+        return []
+
+    buyers_by_slug: dict[str, set[str]] = {}
+    for e in events:
+        buyers_by_slug.setdefault(e["slug"], set()).add(e["buyer"])
+
+    tags_res = await client.get(
+        f"{settings.supabase_url}/rest/v1/smart_wallet_tags",
+        headers=_supabase_headers(), params={"select": "address"},
+    )
+    tags_res.raise_for_status()
+    tracked = {row["address"] for row in tags_res.json()}
+
+    candidates = [slug for slug in buyers_by_slug if len(buyers_by_slug[slug] & tracked) >= _NFT_SCOPE_TRACKED_CONVERGENCE_ALERT_MIN_WALLETS]
+    if not candidates:
+        return []
+
+    posted_res = await client.get(
+        f"{settings.supabase_url}/rest/v1/alert_tracker_calls",
+        headers=_supabase_headers(), params={"slug": f"in.({','.join(candidates)})", "select": "slug"},
+    )
+    posted_res.raise_for_status()
+    already_posted = {row["slug"] for row in posted_res.json()}
+    return [slug for slug in candidates if slug not in already_posted]
+
+
+async def _alert_tracker_recheck_pending_convergences(client: httpx.AsyncClient, deadline: float) -> dict:
+    try:
+        pending = await _alert_tracker_pending_convergence_slugs(client, _ALERT_TRACKER_RECHECK_WINDOW_HOURS)
+    except httpx.HTTPError:
+        logger.exception("Failed to fetch pending Alert Tracker convergence slugs")
+        return {"pending": 0, "checked": 0, "posted": 0}
+    checked = posted = 0
+    for slug in pending[:_ALERT_TRACKER_RECHECK_MAX_PER_CYCLE]:
+        if time.time() >= deadline:
+            break
+        checked += 1
+        try:
+            if await _nft_scope_maybe_post_from_slug_direct(client, slug):
+                posted += 1
+        except Exception:
+            # Deliberately broad - one bad slug must never break the rest
+            # of this cycle's rechecks, same reasoning as the webhook
+            # receiver and watch-sweep's identical guards.
+            logger.exception("Failed to recheck pending Alert Tracker convergence slug %s", slug)
+            continue
+    return {"pending": len(pending), "checked": checked, "posted": posted}
 
 
 async def _alert_tracker_already_posted(client: httpx.AsyncClient, slug: str) -> bool:
@@ -10360,6 +10516,17 @@ async def nft_poll(request: Request):
             logger.exception("nft-poll: Alert Tracker digest phase failed")
             alert_tracker_digest_posted = False
             errors.append(f"alert_tracker_digest: {e}")
+        alert_tracker_recheck = {"pending": 0, "checked": 0, "posted": 0}
+        if time.time() - start < _ALERT_TRACKER_RECHECK_TIME_BUDGET_SECONDS:
+            try:
+                alert_tracker_recheck = await _alert_tracker_recheck_pending_convergences(
+                    client, deadline=start + _ALERT_TRACKER_RECHECK_TIME_BUDGET_SECONDS,
+                )
+            except (httpx.HTTPError, KeyError) as e:
+                logger.exception("nft-poll: Alert Tracker recheck phase failed")
+                errors.append(f"alert_tracker_recheck: {e}")
+        else:
+            errors.append("alert_tracker_recheck: skipped - cycle already past its time budget")
         pruned = await _prune_old_snapshots(client)
         pruned_sale_events = await _prune_old_sale_events(client)
         pruned_call_buyers = await _prune_old_call_buyers(client)
@@ -10368,6 +10535,7 @@ async def nft_poll(request: Request):
         "watchlist_alerts": alerted, "nft_scope_posts": scoped, "nft_scope_followups": followups,
         "tracked_wallet_watch": wallet_watch, "alert_tracker_proving": alert_tracker_proving,
         "alert_tracker_digest_posted": alert_tracker_digest_posted,
+        "alert_tracker_recheck": alert_tracker_recheck,
         "pruned_old_snapshots": pruned, "pruned_old_sale_events": pruned_sale_events,
         "pruned_old_call_buyers": pruned_call_buyers, "errors": errors,
     }

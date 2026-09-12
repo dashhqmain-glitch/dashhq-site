@@ -290,6 +290,107 @@ def test_turnover_corroboration_requires_a_nonzero_sample_size():
     assert blocked is True
 
 
+# ── _detect_abnormal_turnover: floor-appreciation corroboration ─────────
+# Second, independent path alongside buyer/seller diversity - real
+# confirmed case: "hash-cats" failed the diversity bar on a too-early,
+# too-thin trade sample (correctly conservative at the time, not a bug),
+# then its floor rose from ~$301 to $500+ over the following hours on
+# real, sustained volume once enough genuine trading history existed. A
+# wash-trading ring has no reason to keep paying itself a genuinely
+# higher price than its own earliest recorded floor and holding that
+# gain over real, persisted time - that's what this path checks instead
+# of a same-day trade sample.
+
+def test_turnover_corroborated_by_floor_appreciation_even_with_no_wash_analysis():
+    c = {"totalSupply": 2597, "owners": 707, "sales24h": 4589}  # 177% turnover, hash-cats' real numbers
+    result = main._detect_abnormal_turnover(c, wash_analysis=None, floor_multiple=2.6)
+    assert result is not None
+    blocked, reason = result
+    assert blocked is False
+    assert "genuinely risen" in reason
+    assert "2.6x" in reason
+
+
+def test_turnover_corroborated_by_floor_appreciation_even_when_diversity_sample_is_thin():
+    # The diversity path and the floor path are independent - a thin,
+    # too-early trade sample must not veto a real, already-proven floor
+    # multiple.
+    c = {"totalSupply": 1128, "owners": 380, "sales24h": 1990}  # hash-cats' numbers from the too-early check
+    thin = {"suspicious": False, "unique_buyers": 10, "unique_sellers": 35, "sample_size": 50}
+    result = main._detect_abnormal_turnover(c, wash_analysis=thin, floor_multiple=2.0)
+    assert result is not None
+    blocked, reason = result
+    assert blocked is False
+
+
+def test_turnover_floor_appreciation_below_the_minimum_multiple_does_not_corroborate():
+    # floor_multiple is only ever non-None once it clears its own lowest
+    # tier (2x) in _nft_scope_surge_points, but this guards the boundary
+    # explicitly in case that ever changes - anything below the stated
+    # minimum here must not silently corroborate.
+    c = {"totalSupply": 500, "owners": 50, "sales24h": 200}
+    result = main._detect_abnormal_turnover(c, wash_analysis=None, floor_multiple=1.5)
+    assert result is not None
+    blocked, reason = result
+    assert blocked is True
+
+
+def test_turnover_no_floor_multiple_and_no_wash_analysis_stays_conservative():
+    # Neither corroboration path present - must stay exactly as
+    # conservative as before this change (no regression on the default,
+    # no-extra-evidence case).
+    c = {"totalSupply": 500, "owners": 50, "sales24h": 200}
+    result = main._detect_abnormal_turnover(c)
+    assert result is not None
+    blocked, reason = result
+    assert blocked is True
+
+
+# ── _detect_abnormal_turnover: same-cycle velocity-hint corroboration ────
+# Third, fastest path, deliberately with the lowest bar of the three -
+# direct request to favor speed over waiting for full proof, since
+# members need to see a real, fast-moving mint while it's still moving,
+# not after floor_multiple has had hours to clear a full 2x.
+
+def test_turnover_corroborated_by_a_modest_same_cycle_floor_hint():
+    c = {"totalSupply": 500, "owners": 50, "sales24h": 200}
+    result = main._detect_abnormal_turnover(c, wash_analysis=None, floor_multiple=None, velocity_pct=6.0)
+    assert result is not None
+    blocked, reason = result
+    assert blocked is False
+    assert "6%" in reason
+
+
+def test_turnover_velocity_hint_below_the_minimum_does_not_corroborate():
+    c = {"totalSupply": 500, "owners": 50, "sales24h": 200}
+    result = main._detect_abnormal_turnover(c, wash_analysis=None, floor_multiple=None, velocity_pct=2.0)
+    assert result is not None
+    blocked, reason = result
+    assert blocked is True
+
+
+def test_turnover_velocity_hint_is_independent_of_the_other_two_paths():
+    # A thin diversity sample and no floor_multiple yet must not veto a
+    # real, fresh same-cycle floor move.
+    c = {"totalSupply": 1128, "owners": 380, "sales24h": 1990}
+    thin = {"suspicious": False, "unique_buyers": 10, "unique_sellers": 35, "sample_size": 50}
+    result = main._detect_abnormal_turnover(c, wash_analysis=thin, floor_multiple=None, velocity_pct=8.0)
+    assert result is not None
+    blocked, reason = result
+    assert blocked is False
+    assert "fresh hint" in reason
+
+
+def test_turnover_negative_velocity_never_corroborates():
+    # A falling floor is the opposite of a demand signal - must never
+    # accidentally clear the flag.
+    c = {"totalSupply": 500, "owners": 50, "sales24h": 200}
+    result = main._detect_abnormal_turnover(c, wash_analysis=None, floor_multiple=None, velocity_pct=-20.0)
+    assert result is not None
+    blocked, reason = result
+    assert blocked is True
+
+
 # ── _detect_blue_chip (NFT Scope is for secondary plays, not majors) ────
 
 _OLD_CREATED_DATE = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
@@ -1154,16 +1255,17 @@ def test_pass_limits_scale_up_when_healthy_and_contract_when_not():
 # floor multiple at all before this existed.
 
 def test_surge_points_zero_with_no_signals():
-    points, reasons, multiple = main._nft_scope_surge_points(strong_collection(floor=0.05), None, None)
+    points, reasons, multiple, velocity = main._nft_scope_surge_points(strong_collection(floor=0.05), None, None)
     assert points == 0
     assert reasons == []
     assert multiple is None
+    assert velocity is None
 
 
 def test_surge_points_rewards_a_big_floor_multiple_since_first_seen():
     c = strong_collection(floor=0.5)  # 50x a 0.01 first-seen floor
     first_snapshot = {"floor": 0.01, "captured_at": "2026-08-01T00:00:00+00:00"}
-    points, reasons, multiple = main._nft_scope_surge_points(c, None, first_snapshot)
+    points, reasons, multiple, velocity = main._nft_scope_surge_points(c, None, first_snapshot)
     assert points == 25  # top tier: 50x+
     assert multiple == 50.0
     assert any("50.0x" in r and "2026-08-01" in r for r in reasons)
@@ -1171,8 +1273,8 @@ def test_surge_points_rewards_a_big_floor_multiple_since_first_seen():
 
 def test_surge_points_tiers_scale_with_multiple_size():
     first_snapshot = {"floor": 1.0, "captured_at": "2026-08-01"}
-    p_2x, _, m_2x = main._nft_scope_surge_points(strong_collection(floor=2.0), None, first_snapshot)
-    p_10x, _, m_10x = main._nft_scope_surge_points(strong_collection(floor=10.0), None, first_snapshot)
+    p_2x, _, m_2x, _ = main._nft_scope_surge_points(strong_collection(floor=2.0), None, first_snapshot)
+    p_10x, _, m_10x, _ = main._nft_scope_surge_points(strong_collection(floor=10.0), None, first_snapshot)
     assert 0 < p_2x < p_10x
     assert m_2x == 2.0 and m_10x == 10.0
 
@@ -1180,7 +1282,7 @@ def test_surge_points_tiers_scale_with_multiple_size():
 def test_surge_points_ignores_a_multiple_below_the_smallest_tier():
     c = strong_collection(floor=0.011)  # only 1.1x - real but not call-worthy on its own
     first_snapshot = {"floor": 0.01, "captured_at": "2026-08-01"}
-    points, reasons, multiple = main._nft_scope_surge_points(c, None, first_snapshot)
+    points, reasons, multiple, velocity = main._nft_scope_surge_points(c, None, first_snapshot)
     assert points == 0
     assert multiple is None
 
@@ -1188,28 +1290,34 @@ def test_surge_points_ignores_a_multiple_below_the_smallest_tier():
 def test_surge_points_rewards_a_sharp_jump_since_the_last_poll():
     c = strong_collection(floor=0.12)  # +20% vs the immediately-prior snapshot
     history = [{"floor": 0.10}, {"floor": 0.09}]  # newest-first
-    points, reasons, multiple = main._nft_scope_surge_points(c, history, None)
+    points, reasons, multiple, velocity = main._nft_scope_surge_points(c, history, None)
     assert points == main._NFT_SCOPE_VELOCITY_POINTS
     assert any("jumped" in r and "20%" in r for r in reasons)
     assert multiple is None  # velocity and multiple are independent signals
+    assert round(velocity, 4) == 20.0
 
 
 def test_surge_points_ignores_a_small_move_since_the_last_poll():
-    c = strong_collection(floor=0.101)  # +1% - noise, not a signal
+    c = strong_collection(floor=0.101)  # +1% - noise, not a bonus-worthy signal
     history = [{"floor": 0.10}]
-    points, reasons, multiple = main._nft_scope_surge_points(c, history, None)
+    points, reasons, multiple, velocity = main._nft_scope_surge_points(c, history, None)
     assert points == 0
     assert reasons == []
+    # velocity_pct is returned regardless of whether it clears the bonus-
+    # points bar - a caller like _detect_abnormal_turnover's corroboration
+    # wants ANY real, fresh hint, not just a strong one.
+    assert round(velocity, 4) == 1.0
 
 
 def test_surge_points_stack_multiple_and_velocity_together():
     c = strong_collection(floor=0.6)  # 60x first-seen AND +20% vs last poll
     first_snapshot = {"floor": 0.01, "captured_at": "2026-08-01"}
     history = [{"floor": 0.5}]
-    points, reasons, multiple = main._nft_scope_surge_points(c, history, first_snapshot)
+    points, reasons, multiple, velocity = main._nft_scope_surge_points(c, history, first_snapshot)
     assert points == 25 + main._NFT_SCOPE_VELOCITY_POINTS
     assert len(reasons) == 2
     assert multiple == 60.0
+    assert round(velocity, 4) == 20.0
 
 
 def test_nft_scope_score_surfaces_floor_multiple_and_boosts_score():

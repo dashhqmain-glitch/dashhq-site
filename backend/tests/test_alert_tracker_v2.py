@@ -691,6 +691,141 @@ async def test_prove_due_calls_handles_a_collection_lookup_failure_gracefully():
     assert client.patched["proved"] is False
 
 
+# ── Alert Tracker watchdog: re-check convergences that didn't post yet ────
+# Real confirmed case: "hash-cats" had 4+ tracked wallets converge on it,
+# withheld at the time on a too-thin trade sample, then genuinely cleared
+# hours later once real secondary trading built up - nothing was ever
+# going to re-ask that question on its own before this existed.
+
+async def test_pending_convergence_slugs_finds_a_slug_past_the_minimum_not_yet_posted():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "nft_sale_events_log" in url:
+                return FakeRes(200, [{"slug": "pending-slug", "buyer": "0xa"}, {"slug": "pending-slug", "buyer": "0xb"}])
+            if "smart_wallet_tags" in url:
+                return FakeRes(200, [{"address": "0xa"}, {"address": "0xb"}])
+            if "alert_tracker_calls" in url:
+                assert params["slug"] == "in.(pending-slug)"
+                return FakeRes(200, [])  # never posted
+            return FakeRes(200, [])
+
+    result = await main._alert_tracker_pending_convergence_slugs(FakeClient(), hours=24)
+    assert result == ["pending-slug"]
+
+
+async def test_pending_convergence_slugs_excludes_ones_already_posted():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "nft_sale_events_log" in url:
+                return FakeRes(200, [{"slug": "already-posted", "buyer": "0xa"}, {"slug": "already-posted", "buyer": "0xb"}])
+            if "smart_wallet_tags" in url:
+                return FakeRes(200, [{"address": "0xa"}, {"address": "0xb"}])
+            if "alert_tracker_calls" in url:
+                return FakeRes(200, [{"slug": "already-posted"}])
+            return FakeRes(200, [])
+
+    result = await main._alert_tracker_pending_convergence_slugs(FakeClient(), hours=24)
+    assert result == []
+
+
+async def test_pending_convergence_slugs_excludes_ones_below_the_minimum():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "nft_sale_events_log" in url:
+                return FakeRes(200, [{"slug": "single-wallet-slug", "buyer": "0xa"}])
+            if "smart_wallet_tags" in url:
+                return FakeRes(200, [{"address": "0xa"}])
+            return FakeRes(200, [])
+
+    with patch.object(main, "_NFT_SCOPE_TRACKED_CONVERGENCE_ALERT_MIN_WALLETS", 2):
+        result = await main._alert_tracker_pending_convergence_slugs(FakeClient(), hours=24)
+    assert result == []
+
+
+async def test_pending_convergence_slugs_returns_empty_with_no_recent_events():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, [])
+
+    result = await main._alert_tracker_pending_convergence_slugs(FakeClient(), hours=24)
+    assert result == []
+
+
+async def test_recheck_pending_convergences_calls_the_real_posting_path_and_counts_results():
+    async def fake_pending(client, hours):
+        return ["will-post", "will-not-post"]
+
+    async def fake_maybe_post(client, slug):
+        return slug == "will-post"
+
+    with patch.object(main, "_alert_tracker_pending_convergence_slugs", new=fake_pending), \
+         patch.object(main, "_nft_scope_maybe_post_from_slug_direct", new=fake_maybe_post):
+        result = await main._alert_tracker_recheck_pending_convergences(main.httpx.AsyncClient(), deadline=time.time() + 30)
+
+    assert result == {"pending": 2, "checked": 2, "posted": 1}
+
+
+async def test_recheck_pending_convergences_stops_at_the_deadline():
+    async def fake_pending(client, hours):
+        return ["a", "b", "c"]
+
+    calls = []
+
+    async def fake_maybe_post(client, slug):
+        calls.append(slug)
+        return False
+
+    with patch.object(main, "_alert_tracker_pending_convergence_slugs", new=fake_pending), \
+         patch.object(main, "_nft_scope_maybe_post_from_slug_direct", new=fake_maybe_post):
+        result = await main._alert_tracker_recheck_pending_convergences(main.httpx.AsyncClient(), deadline=time.time() - 1)
+
+    assert calls == []  # deadline already passed before the loop started
+    assert result == {"pending": 3, "checked": 0, "posted": 0}
+
+
+async def test_recheck_pending_convergences_caps_checks_per_cycle():
+    slugs = [f"slug-{i}" for i in range(main._ALERT_TRACKER_RECHECK_MAX_PER_CYCLE + 5)]
+
+    async def fake_pending(client, hours):
+        return slugs
+
+    async def fake_maybe_post(client, slug):
+        return False
+
+    with patch.object(main, "_alert_tracker_pending_convergence_slugs", new=fake_pending), \
+         patch.object(main, "_nft_scope_maybe_post_from_slug_direct", new=fake_maybe_post):
+        result = await main._alert_tracker_recheck_pending_convergences(main.httpx.AsyncClient(), deadline=time.time() + 30)
+
+    assert result["pending"] == len(slugs)
+    assert result["checked"] == main._ALERT_TRACKER_RECHECK_MAX_PER_CYCLE
+
+
+async def test_recheck_pending_convergences_survives_one_bad_slug():
+    async def fake_pending(client, hours):
+        return ["broken-slug", "fine-slug"]
+
+    async def fake_maybe_post(client, slug):
+        if slug == "broken-slug":
+            raise KeyError("count")  # the exact real bug this same guard already fixed once
+        return True
+
+    with patch.object(main, "_alert_tracker_pending_convergence_slugs", new=fake_pending), \
+         patch.object(main, "_nft_scope_maybe_post_from_slug_direct", new=fake_maybe_post):
+        result = await main._alert_tracker_recheck_pending_convergences(main.httpx.AsyncClient(), deadline=time.time() + 30)
+
+    assert result == {"pending": 2, "checked": 2, "posted": 1}
+
+
+async def test_recheck_pending_convergences_fails_open_when_discovery_query_fails():
+    async def fail_pending(client, hours):
+        raise main.httpx.HTTPStatusError("boom", request=None, response=FakeRes(500))
+
+    with patch.object(main, "_alert_tracker_pending_convergence_slugs", new=fail_pending):
+        result = await main._alert_tracker_recheck_pending_convergences(main.httpx.AsyncClient(), deadline=time.time() + 30)
+
+    assert result == {"pending": 0, "checked": 0, "posted": 0}
+
+
 # ── /alert-tracker-record ─────────────────────────────────────────────────
 
 def test_alert_tracker_record_embed_below_minimum_sample():
