@@ -90,11 +90,11 @@ async def test_selecting_events_does_not_touch_price_alerts():
     with patch("main.httpx.AsyncClient") as MockClient, \
          patch.object(main.settings, "discord_nft_monitor_channel_id", ""):
         MockClient.return_value.__aenter__.return_value = FakeClient()
-        result = await main._handle_monitor_select(_select_payload("azuki", ["floor_up"]))
+        result = await main._handle_monitor_select(_select_payload("azuki", ["supply_cut"]))
 
     assert not any(url.endswith("/nft_price_alerts") for url in calls)
     desc = result["data"]["embeds"][0]["description"]
-    assert "Floor Price Up" in desc
+    assert "Supply Cut / Burns" in desc
 
 
 async def test_price_alert_clear_failure_does_not_break_the_response():

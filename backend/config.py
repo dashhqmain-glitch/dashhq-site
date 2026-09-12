@@ -43,6 +43,15 @@ class Settings(BaseSettings):
     # deleted, in case a real minimum-volume version is wanted later.
     nft_volume_spike_enabled: bool = False
 
+    # Watchlist "Floor Up"/"Floor Down" alert: same problem, disabled the
+    # same way, by direct request. Pure percentage threshold with no floor
+    # on the absolute move - a penny-floor collection going from 0.0055 to
+    # 0.0109 ETH (a real move of ~0.005 ETH) reads as "+98.8%" and fires
+    # just as loud as a genuinely material move on an established
+    # collection. Off by default rather than deleted, same reasoning as
+    # nft_volume_spike_enabled above.
+    nft_floor_change_alerts_enabled: bool = False
+
     # Standalone Smart Wallet Convergence alerts (2+ separately-tracked
     # wallets buying into the same collection at once - see
     # _nft_scope_maybe_post_tracked_convergence in main.py) go to this

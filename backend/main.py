@@ -601,6 +601,62 @@ async def notify(request: Request, message: str = Query(..., min_length=1, max_l
     return {"configured": True, "posted": posted}
 
 
+# ── nft-poll dead-man's-switch ──────────────────────────────────────────
+# nft-poll.yml is a GH Actions job that loops on its own wall clock (sleep
+# 300 between calls) rather than relying on GH's schedule trigger for the
+# real cadence - see that file for why. It's restarted every 2 hours by a
+# coarse schedule GH does deliver on reliably, but if the loop itself ever
+# dies between restarts (a runner failure, that restart trigger getting
+# dropped), nothing would notice: the app-level bugs found and fixed
+# elsewhere this session all assumed the endpoint was at least being
+# CALLED. This closes that gap - a completely independent, separately
+# scheduled workflow (nft-poll-heartbeat.yml) hits this on its own cadence
+# and gets a real alert if the last real /cron/nft-poll invocation is
+# stale, instead of the silence that let past posting failures go
+# unnoticed until a member complained.
+_NFT_POLL_HEARTBEAT_SLUG = "__nft_poll_heartbeat__"
+_NFT_POLL_HEARTBEAT_STALE_SECONDS = 1500  # 25 min - real measured cadence is ~6.5 min; comfortable margin before treating it as dead
+_NFT_POLL_HEARTBEAT_ALERT_COOLDOWN_SECONDS = 7200  # don't re-alert every checker tick during one ongoing outage
+
+
+@app.get("/cron/check-poll-heartbeat")
+async def check_poll_heartbeat(request: Request):
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    async with httpx.AsyncClient(timeout=10) as client:
+        state = await _nft_alert_state_get(client, _NFT_POLL_HEARTBEAT_SLUG, "started")
+        if state and state.get("last_alerted_at"):
+            last = datetime.fromisoformat(state["last_alerted_at"].replace("Z", "+00:00"))
+            age_seconds = (datetime.now(timezone.utc) - last).total_seconds()
+        else:
+            age_seconds = None  # never recorded a single heartbeat - just as stale as an old one
+        stale = age_seconds is None or age_seconds > _NFT_POLL_HEARTBEAT_STALE_SECONDS
+        if not stale:
+            return {"stale": False, "age_seconds": round(age_seconds, 1)}
+        alert_state = await _nft_alert_state_get(client, _NFT_POLL_HEARTBEAT_SLUG, "alerted")
+        if not _nft_alert_cooled_down(alert_state, cooldown_seconds=_NFT_POLL_HEARTBEAT_ALERT_COOLDOWN_SECONDS):
+            return {"stale": True, "age_seconds": age_seconds, "alerted": False, "reason": "already alerted, within cooldown"}
+        age_desc = f"{age_seconds / 60:.0f} min" if age_seconds is not None else "never recorded"
+        embed = {
+            "title": "🚨 CI/Ops Alert",
+            "description": (
+                f"/cron/nft-poll hasn't run in {age_desc} (threshold: {_NFT_POLL_HEARTBEAT_STALE_SECONDS // 60} min). "
+                "The NFT Scope / Alert Tracker poll loop may be dead - check the 'NFT Poll' GitHub Actions workflow "
+                "(https://github.com/dashhqmain-glitch/dashhq-site/actions/workflows/nft-poll.yml) and re-run it if it's not in_progress."
+            ),
+            "color": EMBED_COLOR_BAD,
+            "footer": {"text": "Dash HQ Toolkit · CI/CD"},
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        posted = False
+        if settings.discord_ops_alert_channel_id:
+            posted = await _post_channel_message(client, settings.discord_ops_alert_channel_id, embed)
+            if posted:
+                await _nft_alert_state_set(client, _NFT_POLL_HEARTBEAT_SLUG, "alerted", 0)
+    return {"stale": True, "age_seconds": age_seconds, "alerted": posted}
+
+
 # How far ahead of the real ~29-day expiry the daily refresh cron starts
 # trying to mint a replacement OpenSea key. Wide on purpose: the anonymous
 # key-issuance endpoint is rate-limited per IP, so one calm scheduled
@@ -1153,7 +1209,7 @@ async def trigger_webhook_sync(request: Request):
     if not settings.cron_secret or request.headers.get("authorization") != expected:
         raise HTTPException(status_code=401, detail="Unauthorized")
     async with httpx.AsyncClient(timeout=55) as client:
-        result = await _alchemy_webhook_sync_addresses(client)
+        result = await _alchemy_webhook_sync_addresses(client, force=True)
     return result
 
 
@@ -4271,7 +4327,7 @@ async def _smart_wallets_import_run(token: str, file_url: str) -> None:
         # wallets covered immediately, not on the next cycle. Best-effort:
         # a failed sync here still self-heals on the next regular cycle.
         try:
-            await _alchemy_webhook_sync_addresses(client)
+            await _alchemy_webhook_sync_addresses(client, force=True)
         except httpx.HTTPError:
             logger.exception("Immediate webhook sync failed after smart-wallets import")
         summary = f"✅ Imported {len(rows)} row(s) across {len(distinct_tags)} tag(s) for {len(distinct_addresses)} distinct wallet(s)."
@@ -6261,8 +6317,6 @@ async def _dm_subscribers(client: httpx.AsyncClient, slug: str, event_type: str,
 
 # ── /monitor — personal per-collection, per-event DM subscriptions ─────────
 _NFT_MONITOR_EVENTS = [
-    {"label": "Floor Price Up", "value": "floor_up", "emoji": "📈", "description": f"Alert when floor rises ≥{_NFT_FLOOR_CHANGE_THRESHOLD_PCT:.0f}%"},
-    {"label": "Floor Price Down", "value": "floor_down", "emoji": "📉", "description": f"Alert when floor drops ≥{_NFT_FLOOR_CHANGE_THRESHOLD_PCT:.0f}%"},
     {"label": "Supply Cut / Burns", "value": "supply_cut", "emoji": "✂️", "description": "Alert when total supply decreases"},
     {"label": "Mint Progress", "value": "mint_progress", "emoji": "🌱", "description": "Alert when total supply increases"},
     {"label": "Sweep Detected", "value": "sweep", "emoji": "🧹", "description": "Alert on concentrated buying"},
@@ -6648,7 +6702,8 @@ async def _nft_poll_watchlist_alerts(client: httpx.AsyncClient) -> list[str]:
                             alerted.append(f"{slug}:mint_progress")
 
                 if (
-                    c.get("floor") is not None
+                    settings.nft_floor_change_alerts_enabled
+                    and c.get("floor") is not None
                     and prev.get("floor") is not None
                     and prev["floor"] > 0
                 ):
@@ -9529,40 +9584,61 @@ async def _alchemy_webhook_add_single_address(client: httpx.AsyncClient, address
             logger.exception("Immediate single-address webhook add failed for %s on %s", address, chain)
 
 
-async def _alchemy_webhook_sync_addresses(client: httpx.AsyncClient) -> dict:
+_ALCHEMY_WEBHOOK_SYNC_MIN_INTERVAL_SECONDS = 900  # 15 min - see reasoning below
+_ALCHEMY_WEBHOOK_SYNC_SLUG = "__alchemy_webhook_sync__"  # pseudo-slug: not about any one collection
+
+
+async def _alchemy_webhook_sync_addresses(client: httpx.AsyncClient, force: bool = False) -> dict:
     # Reconciles each of the 5 chain webhooks' tracked-address lists
-    # against smart_wallet_tags - piggybacked on the existing 5-minute
-    # poll cycle rather than hooking every place a wallet enters/leaves
-    # that table (staff import, set-category, an approved /wallet-submit,
-    # co-minter auto-discovery). Self-healing: a missed insert site can
-    # never leave a wallet permanently unwatched, just briefly stale until
-    # the next cycle catches it. A full diff-and-set every cycle is cheap
-    # (one GET + at most one PATCH per configured webhook, no chain reads
-    # at all), unlike the tracked-wallet checks this whole change exists
-    # to cut down on. The Approve button (see
-    # _alchemy_webhook_add_single_address above) additionally gets an
-    # immediate, much cheaper add the moment a wallet is approved, rather
-    # than waiting for this cycle at all.
+    # against smart_wallet_tags - piggybacked on the existing poll cycle as
+    # a SELF-HEALING SAFETY NET, not the primary sync path. Every real
+    # insertion site (staff /smart-wallets import, an approved
+    # /wallet-submit) already fires its own immediate sync right when the
+    # wallet is added - _alchemy_webhook_sync_addresses itself for a bulk
+    # import, the much cheaper _alchemy_webhook_add_single_address for the
+    # Approve button. So a missed insert site can never leave a wallet
+    # permanently unwatched, just briefly stale until this catches it - a
+    # real, measured cycle spent ~27 sequential paginated GETs here (3
+    # chains x up to 9 pages each against ~880 tracked wallets) fetching
+    # data that's already correct almost every time. Throttled to run at
+    # most every _ALCHEMY_WEBHOOK_SYNC_MIN_INTERVAL_SECONDS for that reason
+    # - this only weakens the RECOVERY case (a failed immediate sync now
+    # takes up to that long to self-heal instead of one cycle), not the
+    # normal "sync ASAP on add" path, which was never routed through here.
+    # force=True bypasses the cooldown entirely, for the two call sites
+    # that ARE a deliberate "sync right now" request - right after a bulk
+    # import, and the manual /cron/trigger-webhook-sync diagnostic - where
+    # skipping due to an unrelated recent cycle would silently defeat the
+    # whole point of calling this outside the cron path.
     if not settings.alchemy_webhook_auth_token:
         return {"skipped": "alchemy_webhook_auth_token not configured"}
+    if not force:
+        state = await _nft_alert_state_get(client, _ALCHEMY_WEBHOOK_SYNC_SLUG, "synced")
+        if not _nft_alert_cooled_down(state, cooldown_seconds=_ALCHEMY_WEBHOOK_SYNC_MIN_INTERVAL_SECONDS):
+            return {"skipped": "synced recently - next full reconciliation due later"}
     desired = set(await _alchemy_webhook_tracked_addresses(client))
-    results = {}
-    for chain in _ALCHEMY_WEBHOOK_CHAINS:
-        webhook_id = _alchemy_webhook_id(chain)
-        if not webhook_id:
-            continue
+
+    async def _sync_one_chain(chain: str, webhook_id: str) -> tuple[str, str]:
         current = await _alchemy_webhook_current_addresses(client, webhook_id)
         if current is None:
-            results[chain] = "skipped - could not fetch current addresses"
-            continue
+            return chain, "skipped - could not fetch current addresses"
         to_add = sorted(desired - current)
         to_remove = sorted(current - desired)
         if not to_add and not to_remove:
-            results[chain] = "in_sync"
-            continue
+            return chain, "in_sync"
         succeeded = await _alchemy_webhook_update_addresses(client, webhook_id, to_add, to_remove)
         verb = "added" if succeeded else "FAILED to add"
-        results[chain] = f"{verb} {len(to_add)}, removed {len(to_remove)}"
+        return chain, f"{verb} {len(to_add)}, removed {len(to_remove)}"
+
+    # Each chain's webhook is entirely independent (own webhook_id, own
+    # address list, own PATCH calls) - nothing here shares state across
+    # chains, so running them concurrently is safe and cuts wall-clock time
+    # roughly in proportion to how many chains are actually configured.
+    configured = [(chain, _alchemy_webhook_id(chain)) for chain in _ALCHEMY_WEBHOOK_CHAINS]
+    configured = [(chain, wid) for chain, wid in configured if wid]
+    pairs = await asyncio.gather(*(_sync_one_chain(chain, wid) for chain, wid in configured))
+    results = dict(pairs)
+    await _nft_alert_state_set(client, _ALCHEMY_WEBHOOK_SYNC_SLUG, "synced", 0)
     return results
 
 
@@ -10499,6 +10575,19 @@ async def nft_poll(request: Request):
     start = time.time()
     errors = []
     async with httpx.AsyncClient(timeout=20) as client:
+        # Dead-man's-switch heartbeat: proves this endpoint is still being
+        # invoked at all, independent of whether any phase below succeeds.
+        # The GH Actions self-looping job (nft-poll.yml) is only restarted
+        # every 2 hours by a coarse schedule - if the loop itself dies
+        # (a runner failure, GH's own restart trigger getting dropped) there
+        # was nothing that would ever notice or say so. Checked by the
+        # separate nft-poll-heartbeat.yml workflow against
+        # /cron/check-poll-heartbeat. Best-effort: a failure to WRITE the
+        # heartbeat must never block the actual detection phases below.
+        try:
+            await _nft_alert_state_set(client, _NFT_POLL_HEARTBEAT_SLUG, "started", 0)
+        except httpx.HTTPError:
+            logger.exception("nft-poll: heartbeat write failed")
         try:
             alerted = await _nft_poll_watchlist_alerts(client)
         except (httpx.HTTPError, KeyError) as e:

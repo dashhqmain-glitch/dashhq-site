@@ -245,6 +245,33 @@ async def test_webhook_sync_skips_without_auth_token():
     assert result == {"skipped": "alchemy_webhook_auth_token not configured"}
 
 
+async def test_webhook_sync_skips_within_the_cooldown_window():
+    # Real measured cost: ~27 sequential paginated GETs (3 chains x up to 9
+    # pages against ~880 tracked wallets) on almost every cycle, fetching
+    # data that's already correct almost every time - every real insertion
+    # site already triggers its own immediate sync. This is a safety net,
+    # not the primary path, so it should not re-run every 5 minutes.
+    _set_webhook_sync_settings()
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "nft_alert_state" in url:
+                return FakeRes(200, [{"last_alerted_at": main.datetime.now(main.timezone.utc).isoformat()}])
+            raise AssertionError("should not fetch tracked/current addresses while on cooldown")
+
+        async def patch(self, url, headers=None, json=None):
+            raise AssertionError("should not PATCH while on cooldown")
+
+        async def post(self, url, headers=None, json=None):
+            raise AssertionError("should not write a new cooldown timestamp while skipping")
+
+    try:
+        result = await main._alchemy_webhook_sync_addresses(FakeClient())
+    finally:
+        _clear_webhook_sync_settings()
+    assert result == {"skipped": "synced recently - next full reconciliation due later"}
+
+
 def _set_webhook_sync_settings(webhook_id_ethereum="wh_eth"):
     settings.alchemy_webhook_auth_token = "token"
     settings.alchemy_webhook_id_ethereum = webhook_id_ethereum
@@ -319,6 +346,9 @@ async def test_webhook_sync_adds_and_removes_to_match_tracked_list():
             updates.append(json)
             return FakeRes(200, {})
 
+        async def post(self, url, headers=None, json=None):
+            return FakeRes(200, {})
+
     try:
         result = await main._alchemy_webhook_sync_addresses(FakeClient())
     finally:
@@ -351,6 +381,9 @@ async def test_webhook_sync_chunks_a_batch_over_alchemys_500_address_cap():
             calls.append(json)
             return FakeRes(200, {})
 
+        async def post(self, url, headers=None, json=None):
+            return FakeRes(200, {})
+
     try:
         result = await main._alchemy_webhook_sync_addresses(FakeClient())
     finally:
@@ -378,6 +411,9 @@ async def test_webhook_sync_reports_a_real_failure_instead_of_a_false_success():
         async def patch(self, url, headers=None, json=None):
             return FakeRes(400, {"message": "A maximum of 500 addresses can be added at once.", "name": "ValidationError"})
 
+        async def post(self, url, headers=None, json=None):
+            return FakeRes(200, {})
+
     try:
         result = await main._alchemy_webhook_sync_addresses(FakeClient())
     finally:
@@ -398,6 +434,9 @@ async def test_webhook_sync_reports_in_sync_when_lists_match():
 
         async def patch(self, url, headers=None, json=None):
             raise AssertionError("should not PATCH when already in sync")
+
+        async def post(self, url, headers=None, json=None):
+            return FakeRes(200, {})
 
     try:
         result = await main._alchemy_webhook_sync_addresses(FakeClient())
