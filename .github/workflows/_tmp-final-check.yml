@@ -1,0 +1,14 @@
+name: Temporary final health check
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check poll heartbeat age
+        run: |
+          curl -s -w "\nHTTP_CODE=%{http_code}\n" \
+            -G "https://www.dashhq.site/cron/check-poll-heartbeat" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
