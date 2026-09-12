@@ -10480,6 +10480,26 @@ async def nft_poll(request: Request):
         except (httpx.HTTPError, KeyError) as e:
             logger.exception("nft-poll: watchlist alert phase failed")
             alerted, errors = [], errors + [f"watchlist_alerts: {e}"]
+        # Recheck runs early, right after the cheap watchlist phase and
+        # before NFT Scope's own scan/follow-up (the phases whose cost
+        # scales with how many candidates show up this cycle - a busy
+        # fresh-mint pass alone has run past 100 API calls, and a real
+        # measured cycle has hit 85s total). Recheck is the one phase whose
+        # entire job is catching convergences every other pass already
+        # missed, so it must not be the first thing sacrificed when the
+        # cycle runs long - putting it last gave it a 30s budget inside a
+        # window that was already spent before it ever got a turn.
+        alert_tracker_recheck = {"pending": 0, "checked": 0, "posted": 0}
+        if time.time() - start < _ALERT_TRACKER_RECHECK_TIME_BUDGET_SECONDS:
+            try:
+                alert_tracker_recheck = await _alert_tracker_recheck_pending_convergences(
+                    client, deadline=start + _ALERT_TRACKER_RECHECK_TIME_BUDGET_SECONDS,
+                )
+            except (httpx.HTTPError, KeyError) as e:
+                logger.exception("nft-poll: Alert Tracker recheck phase failed")
+                errors.append(f"alert_tracker_recheck: {e}")
+        else:
+            errors.append("alert_tracker_recheck: skipped - cycle already past its time budget")
         scoped = []
         followups = []
         if settings.nft_scope_enabled:
@@ -10522,17 +10542,6 @@ async def nft_poll(request: Request):
             logger.exception("nft-poll: Alert Tracker digest phase failed")
             alert_tracker_digest_posted = False
             errors.append(f"alert_tracker_digest: {e}")
-        alert_tracker_recheck = {"pending": 0, "checked": 0, "posted": 0}
-        if time.time() - start < _ALERT_TRACKER_RECHECK_TIME_BUDGET_SECONDS:
-            try:
-                alert_tracker_recheck = await _alert_tracker_recheck_pending_convergences(
-                    client, deadline=start + _ALERT_TRACKER_RECHECK_TIME_BUDGET_SECONDS,
-                )
-            except (httpx.HTTPError, KeyError) as e:
-                logger.exception("nft-poll: Alert Tracker recheck phase failed")
-                errors.append(f"alert_tracker_recheck: {e}")
-        else:
-            errors.append("alert_tracker_recheck: skipped - cycle already past its time budget")
         pruned = await _prune_old_snapshots(client)
         pruned_sale_events = await _prune_old_sale_events(client)
         pruned_call_buyers = await _prune_old_call_buyers(client)
