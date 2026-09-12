@@ -1338,18 +1338,38 @@ _ALCHEMY_WEBHOOK_STATUS_ALERT_SLUG = "__alchemy_webhook_status__"  # pseudo-slug
 _ALCHEMY_WEBHOOK_STATUS_ALERT_COOLDOWN_SECONDS = 7200  # don't re-alert every checker tick during one ongoing pause
 
 
+async def _alchemy_webhook_set_active(client: httpx.AsyncClient, webhook_id: str, is_active: bool) -> bool:
+    try:
+        res = await client.patch(
+            "https://dashboard.alchemy.com/api/update-webhook",
+            headers={"X-Alchemy-Token": settings.alchemy_webhook_auth_token, "Content-Type": "application/json"},
+            json={"webhook_id": webhook_id, "is_active": is_active},
+        )
+        res.raise_for_status()
+        return True
+    except httpx.HTTPError:
+        logger.exception("Failed to set is_active=%s for Alchemy webhook %s", is_active, webhook_id)
+        return False
+
+
 @app.get("/cron/check-webhook-status")
 async def check_webhook_status(request: Request):
     # Answers "are our webhooks actually active right now" with certainty -
     # confirmed real precedent this session: Alchemy auto-paused all 3
     # webhooks after TOO_MANY_ERRORS, and that was only caught because a
-    # human happened to check the dashboard directly. This makes that
-    # check self-serve AND proactive: called on its own schedule (see
-    # nft-poll-heartbeat.yml), it now alerts the ops channel the moment a
-    # webhook actually goes inactive, instead of waiting for someone to
-    # look. deactivation_reason is a sticky historical field on Alchemy's
-    # side (it doesn't clear on reactivation) - only is_active reflects
-    # the real current state, so that's the only thing alerted on.
+    # human happened to check the dashboard directly. Now self-serve AND
+    # proactive both ways: called on its own schedule (see
+    # nft-poll-heartbeat.yml), it attempts an immediate one-shot
+    # reactivation the moment a webhook is found inactive - safe to do
+    # now that the actual crash gap likely causing the errors behind a
+    # pause (see the broad except Exception fix in the webhook receiver
+    # and wallet-watch sweep) is fixed, so a reactivation is far less
+    # likely to just immediately re-trip the same failure - and alerts
+    # the ops channel either way (reactivated or not) so a persistent
+    # problem still surfaces instead of silently retrying forever.
+    # deactivation_reason is a sticky historical field on Alchemy's side
+    # (it doesn't clear on reactivation) - only is_active reflects the
+    # real current state, so that's the only thing acted on.
     expected = f"Bearer {settings.cron_secret}"
     if not settings.cron_secret or request.headers.get("authorization") != expected:
         raise HTTPException(status_code=401, detail="Unauthorized")
@@ -1374,25 +1394,36 @@ async def check_webhook_status(request: Request):
                 }
 
         inactive = [chain for chain, info in results.items() if info.get("is_active") is False]
+        reactivated = []
+        for chain in inactive:
+            if await _alchemy_webhook_set_active(client, results[chain]["webhook_id"], True):
+                reactivated.append(chain)
+                results[chain]["is_active"] = True
+
         alerted = False
         if inactive and settings.discord_ops_alert_channel_id:
             alert_state = await _nft_alert_state_get(client, _ALCHEMY_WEBHOOK_STATUS_ALERT_SLUG, "alerted")
             if _nft_alert_cooled_down(alert_state, cooldown_seconds=_ALCHEMY_WEBHOOK_STATUS_ALERT_COOLDOWN_SECONDS):
+                still_down = [c for c in inactive if c not in reactivated]
+                outcome = (
+                    f"Automatically reactivated: {', '.join(reactivated)}." if reactivated and not still_down
+                    else f"Reactivated: {', '.join(reactivated)}. STILL DOWN, needs manual attention: {', '.join(still_down)}." if reactivated
+                    else f"Could not reactivate automatically - needs manual attention: {', '.join(still_down)}."
+                )
                 embed = {
-                    "title": "🚨 CI/Ops Alert",
+                    "title": "🚨 CI/Ops Alert" if still_down else "⚠️ CI/Ops Alert",
                     "description": (
-                        f"Alchemy webhook(s) paused: {', '.join(inactive)}. Real mints on "
-                        f"{'this chain' if len(inactive) == 1 else 'these chains'} will not be detected until "
-                        "reactivated - check the Notify section of the Alchemy dashboard."
+                        f"Alchemy webhook(s) went inactive: {', '.join(inactive)}. {outcome} "
+                        "Real mints on affected chains were not detected while paused."
                     ),
-                    "color": EMBED_COLOR_BAD,
+                    "color": EMBED_COLOR_BAD if still_down else EMBED_COLOR_WARN,
                     "footer": {"text": "Dash HQ Toolkit · CI/CD"},
                     "timestamp": datetime.now(timezone.utc).isoformat(),
                 }
                 alerted = await _post_channel_message(client, settings.discord_ops_alert_channel_id, embed)
                 if alerted:
                     await _nft_alert_state_set(client, _ALCHEMY_WEBHOOK_STATUS_ALERT_SLUG, "alerted", 0)
-    return {"checked": True, "webhooks": results, "inactive": inactive, "alerted": alerted}
+    return {"checked": True, "webhooks": results, "inactive": inactive, "reactivated": reactivated, "alerted": alerted}
 
 
 @app.get("/cron/check-webhook-address")
