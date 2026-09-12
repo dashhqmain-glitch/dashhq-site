@@ -1254,6 +1254,30 @@ async def check_alert_tracker_post(request: Request, slug: str):
     return {"slug": slug, "alert_tracker_posted": bool(rows), "rows": rows}
 
 
+@app.get("/cron/check-tracked-wallets")
+async def check_tracked_wallets(request: Request, addresses: str):
+    # Answers "which of these on-chain addresses are ones we actually
+    # track" with certainty, for exactly the addresses given - not an
+    # unbounded/full-table dump. Built for the recurring "did a tracked
+    # wallet touch this mint" question, so it can be answered from real
+    # smart_wallet_tags rows instead of guessed from code-reading.
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    wanted = sorted({a.strip().lower() for a in addresses.split(",") if a.strip()})
+    if not wanted:
+        return {"checked": 0, "tracked": []}
+    async with httpx.AsyncClient(timeout=15) as client:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/smart_wallet_tags",
+            headers=_supabase_headers(),
+            params={"address": f"in.({','.join(wanted)})", "select": "address,tag,category,rank,pnl"},
+        )
+        res.raise_for_status()
+        rows = res.json()
+    return {"checked": len(wanted), "tracked": rows}
+
+
 @app.get("/cron/diagnose-slug-posting")
 async def diagnose_slug_posting(request: Request, slug: str):
     # Answers "why didn't this real, already-logged slug post" with real
