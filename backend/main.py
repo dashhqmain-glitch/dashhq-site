@@ -1334,6 +1334,70 @@ async def check_tracked_wallets(request: Request, addresses: str):
     return {"checked": len(wanted), "tracked": rows}
 
 
+@app.get("/cron/check-webhook-status")
+async def check_webhook_status(request: Request):
+    # Answers "are our webhooks actually active right now" with certainty -
+    # confirmed real precedent this session: Alchemy auto-paused all 3
+    # webhooks after TOO_MANY_ERRORS, and that was only caught because a
+    # human happened to check the dashboard directly. This makes that
+    # check self-serve instead of relying on someone noticing.
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not settings.alchemy_webhook_auth_token:
+        return {"checked": False, "reason": "alchemy_webhook_auth_token not configured"}
+    configured_ids = {_alchemy_webhook_id(chain): chain for chain in _ALCHEMY_WEBHOOK_CHAINS if _alchemy_webhook_id(chain)}
+    async with httpx.AsyncClient(timeout=15) as client:
+        res = await client.get(
+            "https://dashboard.alchemy.com/api/team-webhooks",
+            headers={"X-Alchemy-Token": settings.alchemy_webhook_auth_token},
+        )
+        res.raise_for_status()
+        data = res.json()
+    webhooks = data.get("data") or []
+    results = {}
+    for wh in webhooks:
+        wh_id = wh.get("id")
+        if wh_id in configured_ids:
+            results[configured_ids[wh_id]] = {
+                "webhook_id": wh_id, "is_active": wh.get("is_active"),
+                "deactivation_reason": wh.get("deactivation_reason"), "network": wh.get("network"),
+            }
+    return {"checked": True, "webhooks": results}
+
+
+@app.get("/cron/check-webhook-address")
+async def check_webhook_address(request: Request, address: str):
+    # Answers "is Alchemy actually watching this address on each configured
+    # chain" with certainty - smart_wallet_tags (what /cron/check-tracked-
+    # wallets checks) is OUR record of intent to track a wallet;
+    # this checks the OTHER side, Alchemy's own webhook-addresses list,
+    # which is what actually determines whether a real on-chain mint ever
+    # generates a webhook delivery in the first place. A wallet can be
+    # correctly tracked in our database and still never fire a webhook if
+    # it was never actually synced to Alchemy's side - this is the one
+    # check that can tell the two apart.
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    address = address.strip().lower()
+    if not settings.alchemy_webhook_auth_token:
+        return {"address": address, "checked": False, "reason": "alchemy_webhook_auth_token not configured"}
+    results = {}
+    async with httpx.AsyncClient(timeout=20) as client:
+        for chain in _ALCHEMY_WEBHOOK_CHAINS:
+            webhook_id = _alchemy_webhook_id(chain)
+            if not webhook_id:
+                results[chain] = "no webhook configured for this chain"
+                continue
+            current = await _alchemy_webhook_current_addresses(client, webhook_id)
+            if current is None:
+                results[chain] = "could not fetch current addresses"
+                continue
+            results[chain] = "watching" if address in current else "NOT watching"
+    return {"address": address, "checked": True, "results": results}
+
+
 @app.get("/cron/diagnose-slug-posting")
 async def diagnose_slug_posting(request: Request, slug: str):
     # Answers "why didn't this real, already-logged slug post" with real
