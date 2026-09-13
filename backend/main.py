@@ -463,7 +463,14 @@ async def register_discord_commands(request: Request):
             headers={"Authorization": f"Bot {settings.discord_bot_token}"},
             json=TOOLKIT_BOT_COMMANDS,
         )
-        res.raise_for_status()
+        if res.status_code >= 400:
+            # Discord's own validation error body is specific (which
+            # command/option, which field, why) - res.raise_for_status()
+            # alone discards it, leaving only "400 Bad Request" with no
+            # way to tell which of ~20 commands is actually malformed.
+            # Surfaced directly in the response instead of just logged,
+            # so this is diagnosable from the CI step's own output.
+            raise HTTPException(status_code=502, detail=f"Discord rejected the command list: {res.status_code} {res.text[:1500]}")
         registered = res.json()
 
     return {"registered": len(registered), "commands": [c["name"] for c in registered]}
