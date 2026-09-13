@@ -1,0 +1,14 @@
+name: Temporary check registered commands
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Re-register and inspect commands
+        run: |
+          curl -s -w "\nHTTP_CODE=%{http_code}\n" \
+            "https://www.dashhq.site/cron/register-discord-commands" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
