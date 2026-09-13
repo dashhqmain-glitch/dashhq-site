@@ -1,0 +1,26 @@
+name: Temporary full health report
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wallet stats
+        run: |
+          curl -s -w "\nHTTP_CODE=%{http_code}\n" \
+            -G "https://www.dashhq.site/cron/wallet-stats" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
+
+      - name: Poll heartbeat
+        run: |
+          curl -s -w "\nHTTP_CODE=%{http_code}\n" \
+            -G "https://www.dashhq.site/cron/check-poll-heartbeat" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
+
+      - name: Webhook status
+        run: |
+          curl -s -w "\nHTTP_CODE=%{http_code}\n" \
+            -G "https://www.dashhq.site/cron/check-webhook-status" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
