@@ -1461,6 +1461,47 @@ async def check_webhook_address(request: Request, address: str):
     return {"address": address, "checked": True, "results": results}
 
 
+@app.get("/cron/wallet-stats")
+async def wallet_stats(request: Request):
+    # Read-only rollup for a health-check request - reuses existing
+    # queries/views (smart_wallet_tags, smart_wallet_submissions,
+    # alert_tracker_stats) rather than adding any new table or logic, so
+    # there's nothing here that can change what the bot actually does.
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    async with httpx.AsyncClient(timeout=20) as client:
+        tags_res = await client.get(
+            f"{settings.supabase_url}/rest/v1/smart_wallet_tags",
+            headers=_supabase_headers(), params={"select": "address,tag"},
+        )
+        tags_res.raise_for_status()
+        tag_rows = tags_res.json()
+        distinct_wallets = {r["address"] for r in tag_rows}
+        tag_counts: dict[str, int] = {}
+        for r in tag_rows:
+            tag_counts[r["tag"]] = tag_counts.get(r["tag"], 0) + 1
+
+        sub_counts = {}
+        for status in ("pending", "approved", "rejected"):
+            res = await client.get(
+                f"{settings.supabase_url}/rest/v1/smart_wallet_submissions",
+                headers=_supabase_headers(prefer="count=exact"),
+                params={"status": f"eq.{status}", "select": "address", "limit": "1"},
+            )
+            res.raise_for_status()
+            range_total = res.headers.get("content-range", "").split("/")[-1]
+            sub_counts[status] = int(range_total) if range_total.isdigit() else None
+
+        stats = await _alert_tracker_stats(client)
+    return {
+        "tracked_wallets_total": len(distinct_wallets),
+        "tags": dict(sorted(tag_counts.items(), key=lambda kv: -kv[1])),
+        "submissions": sub_counts,
+        "alert_tracker_stats": stats,
+    }
+
+
 @app.get("/cron/diagnose-slug-posting")
 async def diagnose_slug_posting(request: Request, slug: str):
     # Answers "why didn't this real, already-logged slug post" with real
