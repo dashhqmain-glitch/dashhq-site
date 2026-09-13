@@ -657,6 +657,16 @@ create index if not exists smart_wallet_submissions_address_idx on smart_wallet_
 
 alter table smart_wallet_submissions enable row level security;
 
+-- Bulk review (/smart-wallets pending -> "Review & Select"): staff
+-- multi-selects a handful of pending submissions to inspect together, and
+-- this short random token (embedded in that message's Accept/Decline
+-- Selected buttons) is stamped onto exactly those rows so the button click
+-- - a separate, later interaction with no memory of the select menu's
+-- own payload - knows which rows it applies to. Nulled again once acted
+-- on; never a permanent grouping.
+alter table smart_wallet_submissions add column if not exists review_batch_id text;
+create index if not exists smart_wallet_submissions_review_batch_idx on smart_wallet_submissions (review_batch_id) where review_batch_id is not null;
+
 -- ── Alert Tracker's own track record ──────────────────────────────────────
 -- nft_scope_call_buyers/nft_scope_proved_slugs above are NFT-Scope-wide -
 -- every scan pass feeds them, not just the standalone Alert Tracker

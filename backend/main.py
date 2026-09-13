@@ -2,6 +2,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import io
 import json
 import logging
 import os
@@ -14,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 import jwt
+import openpyxl
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
@@ -2271,6 +2273,26 @@ async def _dispatch_interaction(payload: dict, itype) -> dict:
     if history_id.startswith("walletsubmit_reject:"):
         _, _, submission_id = history_id.partition(":")
         return await _handle_wallet_submission_review_button(payload, submission_id, approve=False)
+    if history_id == "walletpending_approveall":
+        return await _handle_smart_wallets_pending_all_prompt_button(payload, approve=True)
+    if history_id == "walletpending_declineall":
+        return await _handle_smart_wallets_pending_all_prompt_button(payload, approve=False)
+    if history_id == "walletpending_cancel":
+        return await _handle_smart_wallets_pending_cancel_button(payload)
+    if history_id == "walletpending_confirm:approve":
+        return await _handle_smart_wallets_pending_confirm_button(payload, approve=True)
+    if history_id == "walletpending_confirm:decline":
+        return await _handle_smart_wallets_pending_confirm_button(payload, approve=False)
+    if history_id == "walletpending_review":
+        return await _handle_smart_wallets_pending_review_button(payload)
+    if history_id == "walletpending_select":
+        return await _handle_smart_wallets_pending_select(payload)
+    if history_id.startswith("walletpending_batch_accept:"):
+        _, _, batch_token = history_id.partition(":")
+        return await _handle_smart_wallets_pending_batch_button(payload, batch_token, approve=True)
+    if history_id.startswith("walletpending_batch_decline:"):
+        _, _, batch_token = history_id.partition(":")
+        return await _handle_smart_wallets_pending_batch_button(payload, batch_token, approve=False)
 
     custom_id = payload.get("data", {}).get("custom_id", "")
     action, _, app_id = custom_id.partition(":")
@@ -4223,6 +4245,83 @@ def _dedupe_smart_wallet_rows(rows: list[dict]) -> list[dict]:
     return list(merged.values())
 
 
+_SWT_XLSX_COLUMN_ALIASES = {
+    "address": "address", "wallet": "address", "wallet address": "address",
+    "tag": "tag", "tags": "tag", "label": "tag",
+    "category": "category", "type": "category",
+    "rank": "rank",
+    "pnl": "pnl", "p&l": "pnl",
+}
+_SWT_XLSX_TAG_SPLIT_RE = re.compile(r"\s*[,•|]\s*")  # spreadsheet cells favor commas, unlike the Notion export format
+
+
+def _parse_smart_wallet_xlsx(file_bytes: bytes) -> tuple[list[dict], int]:
+    # A real spreadsheet, not the plain-text formats above - staff fills in
+    # one column per field (Address / Tag / Category / Rank / PNL, any
+    # order, matched by header name so getting the column ORDER right
+    # doesn't matter) instead of learning either of this command's two
+    # existing text formats. Read-only (openpyxl's default read_only mode)
+    # since this never writes back to the file - keeps memory flat even
+    # for a large sheet. Returns the exact same row shape as every other
+    # parser here, so it feeds the same dedup + upsert pipeline unchanged.
+    rows: list[dict] = []
+    skipped = 0
+    try:
+        workbook = openpyxl.load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=True)
+        sheet = workbook.worksheets[0]
+        row_iter = sheet.iter_rows(values_only=True)
+        header = next(row_iter, None)
+        if not header:
+            return [], 0
+        columns = {
+            _SWT_XLSX_COLUMN_ALIASES[str(cell).strip().lower()]: idx
+            for idx, cell in enumerate(header)
+            if cell is not None and str(cell).strip().lower() in _SWT_XLSX_COLUMN_ALIASES
+        }
+        if "address" not in columns or "tag" not in columns:
+            return [], 0  # no recognizable header row at all - not a partial/skip situation, a wrong file
+
+        def _cell(row: tuple, key: str) -> str | None:
+            idx = columns.get(key)
+            if idx is None or idx >= len(row) or row[idx] is None:
+                return None
+            return str(row[idx]).strip()
+
+        for row in row_iter:
+            if row is None or all(c is None for c in row):
+                continue  # openpyxl can yield a trailing run of fully-blank rows for a sheet that was once bigger
+            address_raw = _cell(row, "address")
+            tags_raw = _cell(row, "tag")
+            if not address_raw or not tags_raw or not _SWT_ADDR_RE.fullmatch(address_raw):
+                skipped += 1
+                continue
+            address = address_raw.lower()
+            category = _cell(row, "category")
+            rank_raw = _cell(row, "rank")
+            try:
+                rank = int(float(rank_raw)) if rank_raw else None
+            except ValueError:
+                rank = None
+            pnl_raw = _cell(row, "pnl")
+            try:
+                pnl = float(pnl_raw.replace(",", "")) if pnl_raw else None
+            except ValueError:
+                pnl = None
+            for tag in _SWT_XLSX_TAG_SPLIT_RE.split(tags_raw):
+                tag = tag.strip()
+                if tag:
+                    rows.append({"address": address, "tag": tag, "rank": rank, "pnl": pnl, "category": category})
+    except Exception:
+        # Deliberately broad - openpyxl can raise several different
+        # exception types (zipfile.BadZipFile, KeyError, struct.error) on
+        # a corrupt or non-.xlsx file renamed to look like one. Reported
+        # to staff as "nothing parsable" via the normal empty-rows path
+        # in the caller, not a raw traceback.
+        logger.exception("Failed to parse smart-wallets .xlsx import")
+        return [], 0
+    return _dedupe_smart_wallet_rows(rows), skipped
+
+
 async def _smart_wallet_tags_for_address(address: str) -> list[dict]:
     try:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -4273,7 +4372,7 @@ async def _handle_smart_wallets_import_command(payload: dict) -> dict:
     interaction_id = payload.get("id")
     token = payload.get("token")
     await _discord_deferred_ack(interaction_id, token, ephemeral=True)
-    await _dispatch_smart_wallets_worker(action="import", token=token, file_url=attachment["url"])
+    await _dispatch_smart_wallets_worker(action="import", token=token, file_url=attachment["url"], filename=attachment.get("filename", ""))
     return {"type": 5}
 
 
@@ -4468,14 +4567,41 @@ async def _handle_smart_wallets_command(payload: dict) -> dict:
         return await _handle_smart_wallets_set_category_command(payload)
     if sub_name == "leaderboard":
         return await _handle_smart_wallets_leaderboard_command(payload)
+    if sub_name == "pending":
+        return await _handle_smart_wallets_pending_command(payload)
     return {"type": 4, "data": {"content": "Unknown subcommand.", "flags": 64}}
 
 
-async def _smart_wallets_import_run(token: str, file_url: str) -> None:
+async def _handle_smart_wallets_pending_command(payload: dict) -> dict:
+    if not _is_team_member(payload):
+        return {"type": 4, "data": {"content": "This command is for team members only.", "flags": 64}}
+    if (
+        settings.discord_wallet_review_channel_id
+        and payload.get("channel_id") != settings.discord_wallet_review_channel_id
+    ):
+        return {
+            "type": 4,
+            "data": {"content": f"Use this in <#{settings.discord_wallet_review_channel_id}> instead.", "flags": 64},
+        }
+    await _discord_deferred_ack(payload.get("id"), payload.get("token"), ephemeral=True)
+    await _dispatch_smart_wallets_worker(action="pending", token=payload.get("token"))
+    return {"type": 5}
+
+
+async def _smart_wallets_import_run(token: str, file_url: str, filename: str = "") -> None:
     async with httpx.AsyncClient(timeout=30) as client:
         file_res = await client.get(file_url)
         file_res.raise_for_status()
-        rows, skipped = _parse_smart_wallet_import(file_res.text)
+        # .xlsx is a real spreadsheet upload, not plain text - the other
+        # two formats (Notion export, TSV/leaderboard rows) both parse
+        # file_res.text directly and are untouched by this branch.
+        if filename.lower().endswith(".xlsx"):
+            rows, skipped = _parse_smart_wallet_xlsx(file_res.content)
+            if not rows and not skipped:
+                await _discord_followup_patch(token, {"content": "Couldn't find an Address and Tag column in that sheet - the first row should have column headers (Address, Tag, and optionally Category/Rank/PNL)."})
+                return
+        else:
+            rows, skipped = _parse_smart_wallet_import(file_res.text)
         if not rows:
             await _discord_followup_patch(token, {"content": f"Nothing parsable in that file ({skipped} line(s) skipped)."})
             return
@@ -4519,7 +4645,7 @@ async def discord_smart_wallets_worker(request: Request):
     token = body.get("token")
     try:
         if action == "import":
-            await _smart_wallets_import_run(token, body["file_url"])
+            await _smart_wallets_import_run(token, body["file_url"], body.get("filename", ""))
         elif action == "list":
             await _discord_followup_patch(token, await _smart_wallets_list_response())
         elif action == "clear":
@@ -4528,6 +4654,14 @@ async def discord_smart_wallets_worker(request: Request):
             await _discord_followup_patch(token, await _smart_wallets_set_category_run(body["address"], body["category"]))
         elif action == "leaderboard":
             await _discord_followup_patch(token, await _smart_wallets_leaderboard_response())
+        elif action == "pending":
+            await _discord_followup_patch(token, await _smart_wallets_pending_overview_response())
+        elif action == "pending_bulk_all":
+            await _smart_wallets_pending_bulk_all_run(token, body["approve"], body.get("actor_id", ""))
+        elif action == "pending_batch_detail":
+            await _smart_wallets_pending_batch_detail_run(token, body["submission_ids"], body.get("actor_id", ""))
+        elif action == "pending_batch_execute":
+            await _smart_wallets_pending_batch_execute_run(token, body["batch_token"], body["approve"], body.get("actor_id", ""))
         else:
             await _discord_followup_patch(token, {"content": "Unrecognized request."})
     except Exception:
@@ -4879,6 +5013,282 @@ async def _handle_wallet_submission_review_button(payload: dict, submission_id: 
     embed["author"] = {"name": f"{verb} by a team member — Wallet Submission"}
     embed["color"] = EMBED_COLOR_GOOD if approve else EMBED_COLOR_BAD
     return {"type": 7, "data": {"embeds": [embed], "components": []}}
+
+
+# ── Bulk wallet-submission review: /smart-wallets pending ─────────────────
+# One-at-a-time Approve/Reject above doesn't scale once the queue has
+# dozens of submissions sitting in it - this adds three ways to work
+# through a backlog: clear it all in one action (with a confirm step,
+# since it's not reversible), or select a specific handful to inspect
+# together (full track-record detail per wallet, same assessment the
+# individual review embed already computes) before deciding on just that
+# batch. Every path funnels through the exact same
+# insert-into-smart_wallet_tags + status-update logic the individual
+# button above already uses - nothing about approval itself changes,
+# only how many submissions one action can cover.
+_WALLET_PENDING_PREVIEW_MAX = 10  # how many pending rows to preview inline before "+N more"
+_WALLET_PENDING_SELECT_MAX = 25  # Discord's own hard cap on a single select menu's options
+
+
+async def _smart_wallet_pending_rows(client: httpx.AsyncClient, limit: int | None = None) -> list[dict]:
+    params = {"status": "eq.pending", "select": "*", "order": "submitted_at.asc"}
+    if limit:
+        params["limit"] = str(limit)
+    res = await client.get(
+        f"{settings.supabase_url}/rest/v1/smart_wallet_submissions",
+        headers=_supabase_headers(), params=params,
+    )
+    res.raise_for_status()
+    return res.json()
+
+
+async def _smart_wallet_bulk_apply(client: httpx.AsyncClient, rows: list[dict], approve: bool, actor_id: str) -> int:
+    # Shared by every bulk path (approve/decline all, and accept/decline a
+    # reviewed selection) - one place that ever writes a bulk verdict, so
+    # "how does approving a submission actually work" only has to be
+    # right once. Mirrors _handle_wallet_submission_review_button's
+    # single-submission logic exactly, just batched: one status PATCH
+    # covering every id instead of N, one chunked smart_wallet_tags
+    # upsert instead of N single-row inserts. The caller is responsible
+    # for the one-time Alchemy sync afterward (force=True), since a bulk
+    # action should sync once at the end, not once per wallet.
+    if not rows:
+        return 0
+    ids = [r["id"] for r in rows]
+    new_status = "approved" if approve else "rejected"
+    for i in range(0, len(ids), 200):  # PostgREST-friendly in.() batch size, well under any URL-length concern
+        chunk_ids = ids[i:i + 200]
+        await client.patch(
+            f"{settings.supabase_url}/rest/v1/smart_wallet_submissions",
+            headers=_supabase_headers(prefer="return=minimal"),
+            params={"id": f"in.({','.join(chunk_ids)})"},
+            json={"status": new_status, "reviewed_by": actor_id, "reviewed_at": datetime.now(timezone.utc).isoformat(), "review_batch_id": None},
+        )
+    if approve:
+        for i in range(0, len(rows), 500):
+            chunk = [
+                {"address": r["address"], "tag": r["tag"], "category": r["category"], "source": "smart-wallets-submit"}
+                for r in rows[i:i + 500]
+            ]
+            res = await client.post(
+                f"{settings.supabase_url}/rest/v1/smart_wallet_tags",
+                headers=_supabase_headers(prefer="resolution=merge-duplicates,return=minimal"),
+                json=chunk,
+            )
+            res.raise_for_status()
+    return len(rows)
+
+
+def _smart_wallets_pending_overview_embed_and_components(rows: list[dict]) -> tuple[dict, list]:
+    count = len(rows)
+    if count == 0:
+        embed = {
+            "title": "🗂️ Pending Wallet Submissions",
+            "description": "Nothing pending right now - the queue is clear.",
+            "color": EMBED_COLOR_GOOD, "footer": TOOLKIT_FOOTER,
+        }
+        return _clean_embed(embed), []
+    preview = rows[:_WALLET_PENDING_PREVIEW_MAX]
+    lines = [
+        f"• `{r['address'][:6]}…{r['address'][-4:]}` — **{r['tag']}** (`{r['category']}`)"
+        for r in preview
+    ]
+    if count > len(preview):
+        lines.append(f"…and {count - len(preview)} more")
+    embed = {
+        "title": "🗂️ Pending Wallet Submissions",
+        "description": "\n".join(lines),
+        "color": EMBED_COLOR_WARN,
+        "footer": {"text": f"{count} pending · Approve/Decline All acts on everything, Review & Select lets you pick"},
+    }
+    components = [{"type": 1, "components": [
+        {"type": 2, "style": 3, "label": "✅ Approve All", "custom_id": "walletpending_approveall"},
+        {"type": 2, "style": 4, "label": "❌ Decline All", "custom_id": "walletpending_declineall"},
+        {"type": 2, "style": 2, "label": "🔍 Review & Select", "custom_id": "walletpending_review"},
+    ]}]
+    return _clean_embed(embed), components
+
+
+async def _smart_wallets_pending_overview_response() -> dict:
+    async with httpx.AsyncClient(timeout=15) as client:
+        rows = await _smart_wallet_pending_rows(client)
+    embed, components = _smart_wallets_pending_overview_embed_and_components(rows)
+    return {"embeds": [embed], "components": components}
+
+
+def _smart_wallets_pending_confirm_embed_and_components(approve: bool, count: int) -> tuple[dict, list]:
+    verb = "approve" if approve else "decline"
+    embed = {
+        "title": f"⚠️ Confirm: {verb.capitalize()} All",
+        "description": (
+            f"This will **{verb}** all **{count}** pending submission(s)"
+            f"{' and add them to the tracked wallet list immediately' if approve else ''}. This can't be undone in bulk."
+        ),
+        "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER,
+    }
+    components = [{"type": 1, "components": [
+        {"type": 2, "style": 4 if approve else 3, "label": f"Yes, {verb} all {count}", "custom_id": f"walletpending_confirm:{'approve' if approve else 'decline'}"},
+        {"type": 2, "style": 2, "label": "Cancel", "custom_id": "walletpending_cancel"},
+    ]}]
+    return _clean_embed(embed), components
+
+
+async def _handle_smart_wallets_pending_all_prompt_button(payload: dict, approve: bool) -> dict:
+    if not _is_team_member(payload):
+        return {"type": 4, "data": {"content": "Team members only.", "flags": 64}}
+    async with httpx.AsyncClient(timeout=15) as client:
+        rows = await _smart_wallet_pending_rows(client)
+    if not rows:
+        embed, components = _smart_wallets_pending_overview_embed_and_components(rows)
+        return {"type": 7, "data": {"embeds": [embed], "components": components}}
+    embed, components = _smart_wallets_pending_confirm_embed_and_components(approve, len(rows))
+    return {"type": 7, "data": {"embeds": [embed], "components": components}}
+
+
+async def _handle_smart_wallets_pending_cancel_button(payload: dict) -> dict:
+    if not _is_team_member(payload):
+        return {"type": 4, "data": {"content": "Team members only.", "flags": 64}}
+    response = await _smart_wallets_pending_overview_response()
+    return {"type": 7, "data": response}
+
+
+async def _handle_smart_wallets_pending_confirm_button(payload: dict, approve: bool) -> dict:
+    if not _is_team_member(payload):
+        return {"type": 4, "data": {"content": "Team members only.", "flags": 64}}
+    actor_id = payload.get("member", {}).get("user", {}).get("id", "")
+    await _dispatch_smart_wallets_worker(action="pending_bulk_all", token=payload.get("token"), approve=approve, actor_id=actor_id)
+    return {"type": 6}
+
+
+async def _smart_wallets_pending_bulk_all_run(token: str, approve: bool, actor_id: str) -> None:
+    async with httpx.AsyncClient(timeout=55) as client:
+        rows = await _smart_wallet_pending_rows(client)
+        processed = await _smart_wallet_bulk_apply(client, rows, approve, actor_id)
+        if approve and processed:
+            try:
+                await _alchemy_webhook_sync_addresses(client, force=True)
+            except httpx.HTTPError:
+                logger.exception("Immediate webhook sync failed after bulk-approve")
+    verb = "Approved" if approve else "Declined"
+    icon = "✅" if approve else "❌"
+    embed = {
+        "title": f"{icon} {verb} All",
+        "description": f"{verb} {processed} submission(s)." if processed else "Nothing was pending by the time this ran - no change made.",
+        "color": EMBED_COLOR_GOOD if approve else EMBED_COLOR_BAD, "footer": TOOLKIT_FOOTER,
+    }
+    await _discord_edit_original_raw(token, {"embeds": [_clean_embed(embed)], "components": []})
+
+
+def _smart_wallets_review_select_component(rows: list[dict]) -> list:
+    options = [
+        {
+            "label": f"{r['address'][:6]}…{r['address'][-4:]} — {r['tag']}"[:100],
+            "value": r["id"],
+            "description": f"{r['category']} · submitted {r['submitted_at'][:10]}"[:100],
+        }
+        for r in rows[:_WALLET_PENDING_SELECT_MAX]
+    ]
+    return [{"type": 1, "components": [{
+        "type": 3, "custom_id": "walletpending_select",
+        "placeholder": "Choose which submissions to review together…",
+        "min_values": 1, "max_values": len(options),
+        "options": options,
+    }]}]
+
+
+async def _handle_smart_wallets_pending_review_button(payload: dict) -> dict:
+    if not _is_team_member(payload):
+        return {"type": 4, "data": {"content": "Team members only.", "flags": 64}}
+    async with httpx.AsyncClient(timeout=15) as client:
+        rows = await _smart_wallet_pending_rows(client, limit=_WALLET_PENDING_SELECT_MAX)
+    if not rows:
+        embed, components = _smart_wallets_pending_overview_embed_and_components(rows)
+        return {"type": 7, "data": {"embeds": [embed], "components": components}}
+    note = (
+        f"Showing the {len(rows)} oldest pending submissions - pick which ones to inspect together."
+        if len(rows) >= _WALLET_PENDING_SELECT_MAX else
+        f"Pick which of the {len(rows)} pending submissions to inspect together."
+    )
+    embed = {"title": "🔍 Review & Select", "description": note, "color": EMBED_COLOR, "footer": TOOLKIT_FOOTER}
+    return {"type": 7, "data": {"embeds": [_clean_embed(embed)], "components": _smart_wallets_review_select_component(rows)}}
+
+
+async def _handle_smart_wallets_pending_select(payload: dict) -> dict:
+    if not _is_team_member(payload):
+        return {"type": 4, "data": {"content": "Team members only.", "flags": 64}}
+    values = (payload.get("data") or {}).get("values") or []
+    if not values:
+        return {"type": 4, "data": {"content": "Nothing selected.", "flags": 64}}
+    actor_id = payload.get("member", {}).get("user", {}).get("id", "")
+    await _dispatch_smart_wallets_worker(action="pending_batch_detail", token=payload.get("token"), submission_ids=values, actor_id=actor_id)
+    return {"type": 6}
+
+
+async def _smart_wallets_pending_batch_detail_run(token: str, submission_ids: list[str], actor_id: str) -> None:
+    async with httpx.AsyncClient(timeout=55) as client:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/smart_wallet_submissions",
+            headers=_supabase_headers(), params={"id": f"in.({','.join(submission_ids)})", "status": "eq.pending", "select": "*"},
+        )
+        res.raise_for_status()
+        rows = res.json()
+        if not rows:
+            embed = {"title": "Nothing to review", "description": "Those submission(s) are no longer pending - someone else may have already reviewed them.", "color": EMBED_COLOR_WARN, "footer": TOOLKIT_FOOTER}
+            await _discord_edit_original_raw(token, {"embeds": [_clean_embed(embed)], "components": []})
+            return
+        embeds = []
+        for r in rows[:10]:  # Discord's own cap on embeds per message
+            assessment = await _wallet_assessment(client, r["address"])
+            embeds.append(_wallet_submission_review_embed(r, assessment))
+        batch_token = secrets.token_hex(4)
+        await client.patch(
+            f"{settings.supabase_url}/rest/v1/smart_wallet_submissions",
+            headers=_supabase_headers(prefer="return=minimal"),
+            params={"id": f"in.({','.join(r['id'] for r in rows)})"},
+            json={"review_batch_id": batch_token},
+        )
+    components = [{"type": 1, "components": [
+        {"type": 2, "style": 3, "label": f"✅ Accept Selected ({len(rows)})", "custom_id": f"walletpending_batch_accept:{batch_token}"},
+        {"type": 2, "style": 4, "label": f"❌ Decline Selected ({len(rows)})", "custom_id": f"walletpending_batch_decline:{batch_token}"},
+    ]}]
+    note = "" if len(rows) <= 10 else f"\n\n*Showing the first 10 of {len(rows)} selected - accepting/declining still applies to all {len(rows)}.*"
+    if note:
+        embeds[-1] = {**embeds[-1], "description": embeds[-1]["description"] + note}
+    await _discord_edit_original_raw(token, {"embeds": embeds, "components": components})
+
+
+async def _handle_smart_wallets_pending_batch_button(payload: dict, batch_token: str, approve: bool) -> dict:
+    if not _is_team_member(payload):
+        return {"type": 4, "data": {"content": "Team members only.", "flags": 64}}
+    if not batch_token:
+        return {"type": 4, "data": {"content": "Unrecognized batch.", "flags": 64}}
+    actor_id = payload.get("member", {}).get("user", {}).get("id", "")
+    await _dispatch_smart_wallets_worker(action="pending_batch_execute", token=payload.get("token"), batch_token=batch_token, approve=approve, actor_id=actor_id)
+    return {"type": 6}
+
+
+async def _smart_wallets_pending_batch_execute_run(token: str, batch_token: str, approve: bool, actor_id: str) -> None:
+    async with httpx.AsyncClient(timeout=55) as client:
+        res = await client.get(
+            f"{settings.supabase_url}/rest/v1/smart_wallet_submissions",
+            headers=_supabase_headers(), params={"review_batch_id": f"eq.{batch_token}", "status": "eq.pending", "select": "*"},
+        )
+        res.raise_for_status()
+        rows = res.json()
+        processed = await _smart_wallet_bulk_apply(client, rows, approve, actor_id)
+        if approve and processed:
+            try:
+                await _alchemy_webhook_sync_addresses(client, force=True)
+            except httpx.HTTPError:
+                logger.exception("Immediate webhook sync failed after batch-accept")
+    verb = "Accepted" if approve else "Declined"
+    icon = "✅" if approve else "❌"
+    embed = {
+        "title": f"{icon} {verb} Selected",
+        "description": f"{verb} {processed} submission(s)." if processed else "Nothing left to act on - someone else may have already reviewed this batch.",
+        "color": EMBED_COLOR_GOOD if approve else EMBED_COLOR_BAD, "footer": TOOLKIT_FOOTER,
+    }
+    await _discord_edit_original_raw(token, {"embeds": [_clean_embed(embed)], "components": []})
 
 
 # Most public RPC endpoints don't send CORS headers (they're built for

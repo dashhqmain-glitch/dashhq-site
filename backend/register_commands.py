@@ -200,6 +200,7 @@ COMMANDS = [
                 ],
             },
             {"name": "leaderboard", "description": "Team only: see who's submitted the most approved wallets", "type": 1},
+            {"name": "pending", "description": "Team only: review the pending wallet-submission queue in bulk", "type": 1},
         ],
     },
     {
