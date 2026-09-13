@@ -213,7 +213,7 @@ COMMANDS = [
     },
     {
         "name": "alert-tracker-record",
-        "description": "See the Alert Tracker's own real hit rate - every convergence call it's posted and how each one turned out",
+        "description": "See the Alert Tracker's real hit rate - every call it's posted and how each one turned out",
         # Deliberately no options - one honest number for everyone, not a
         # per-collection lookup.
     },
