@@ -1602,54 +1602,67 @@ async def test_alchemy(request: Request, address: str, chain: str = "ethereum"):
     return {"chain": chain, "subdomain": subdomain, "address": address, "http_status": res.status_code, "response": body}
 
 
+async def _alchemy_collection_mint_transfers(client: httpx.AsyncClient, chain: str, contract: str) -> list[dict] | dict:
+    # Shared by /cron/check-collection-minters and
+    # /cron/backfill-collection-mints - one real Alchemy query for every
+    # mint of a contract (paginated), rather than checking tracked wallets
+    # one at a time (doesn't scale to ~900+ wallets) or trusting an
+    # unverified headcount. Returns the raw transfer list, or a dict with
+    # an "error" key on any failure - callers check for that key rather
+    # than this raising, since both endpoints want to report the real
+    # failure reason, not a generic 500.
+    subdomain = _TRACKED_WALLET_ALCHEMY_CHAINS.get(chain)
+    if not subdomain:
+        return {"error": f"no subdomain mapping for chain '{chain}'"}
+    transfers: list[dict] = []
+    page_key = None
+    for _ in range(20):  # hard cap - never loop forever on a malformed/never-ending cursor
+        params = {
+            "fromAddress": _TRACKED_WALLET_NULL_ADDRESS,
+            "contractAddresses": [contract],
+            "category": ["erc721", "erc1155"],
+            "maxCount": hex(1000),
+            "order": "asc",
+            "withMetadata": True,
+        }
+        if page_key:
+            params["pageKey"] = page_key
+        res = await client.post(
+            f"https://{subdomain}.g.alchemy.com/v2/{settings.alchemy_api_key}",
+            json={"jsonrpc": "2.0", "id": 1, "method": "alchemy_getAssetTransfers", "params": [params]},
+        )
+        if res.status_code != 200:
+            return {"error": f"Alchemy returned HTTP {res.status_code}", "body": res.text[:500]}
+        data = res.json()
+        if "error" in data:
+            return {"error": data["error"]}
+        result = data.get("result") or {}
+        transfers.extend(result.get("transfers", []))
+        page_key = result.get("pageKey")
+        if not page_key:
+            break
+    return transfers
+
+
 @app.get("/cron/check-collection-minters")
 async def check_collection_minters(request: Request, contract: str, chain: str = "ethereum"):
     # Answers "how many of our tracked wallets actually minted THIS
-    # collection" directly and completely - one real Alchemy query for
-    # every mint of the contract, cross-referenced against the full
-    # tracked list, rather than checking wallets one at a time (which
-    # doesn't scale to "did most of our ~900 tracked wallets mint this")
-    # or trusting a member's own count of who they saw mint it.
+    # collection" directly and completely, rather than checking wallets
+    # one at a time (which doesn't scale to "did most of our ~900 tracked
+    # wallets mint this") or trusting a member's own count of who they
+    # saw mint it.
     expected = f"Bearer {settings.cron_secret}"
     if not settings.cron_secret or request.headers.get("authorization") != expected:
         raise HTTPException(status_code=401, detail="Unauthorized")
     if not settings.alchemy_api_key:
         return {"configured": False}
-    subdomain = _TRACKED_WALLET_ALCHEMY_CHAINS.get(chain)
-    if not subdomain:
-        return {"configured": True, "chain": chain, "error": f"no subdomain mapping for chain '{chain}'"}
 
     contract = contract.lower().strip()
-    minters: set[str] = set()
     async with httpx.AsyncClient(timeout=20) as client:
-        page_key = None
-        for _ in range(20):  # hard cap - never loop forever on a malformed/never-ending cursor
-            params = {
-                "fromAddress": _TRACKED_WALLET_NULL_ADDRESS,
-                "contractAddresses": [contract],
-                "category": ["erc721", "erc1155"],
-                "maxCount": hex(1000),
-                "order": "asc",
-            }
-            if page_key:
-                params["pageKey"] = page_key
-            res = await client.post(
-                f"https://{subdomain}.g.alchemy.com/v2/{settings.alchemy_api_key}",
-                json={"jsonrpc": "2.0", "id": 1, "method": "alchemy_getAssetTransfers", "params": [params]},
-            )
-            if res.status_code != 200:
-                return {"chain": chain, "contract": contract, "error": f"Alchemy returned HTTP {res.status_code}", "body": res.text[:500]}
-            data = res.json()
-            if "error" in data:
-                return {"chain": chain, "contract": contract, "error": data["error"]}
-            result = data.get("result") or {}
-            for transfer in result.get("transfers", []):
-                to = transfer.get("to")
-                if to:
-                    minters.add(to.lower())
-            page_key = result.get("pageKey")
-            if not page_key:
-                break
+        transfers = await _alchemy_collection_mint_transfers(client, chain, contract)
+        if isinstance(transfers, dict):
+            return {"chain": chain, "contract": contract, **transfers}
+        minters = {t["to"].lower() for t in transfers if t.get("to")}
 
         tags_res = await client.get(
             f"{settings.supabase_url}/rest/v1/smart_wallet_tags",
@@ -1666,6 +1679,71 @@ async def check_collection_minters(request: Request, contract: str, chain: str =
         "chain": chain, "contract": contract, "total_minters_found": len(minters),
         "tracked_minters_count": len(tracked_minters), "tracked_minters": tracked_minters,
     }
+
+
+@app.get("/cron/backfill-collection-mints")
+async def backfill_collection_mints(request: Request, contract: str, chain: str = "ethereum"):
+    # The direct follow-up to /cron/check-collection-minters: once that's
+    # confirmed real tracked wallets minted a collection our own detection
+    # missed (a real gap, not assumed - e.g. a webhook outage window, or a
+    # chain like Robinhood with no explorer-backstop leg), this logs their
+    # ACTUAL on-chain mint events into nft_sale_events_log (same
+    # merge-duplicates upsert every other detection path uses, so this is
+    # safe to re-run) and then runs the exact same real scoring/posting
+    # pipeline every other path uses - never fabricates or hand-writes a
+    # post. If it doesn't clear a real gate, this reports exactly why,
+    # same as /cron/diagnose-slug-posting.
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    if not settings.alchemy_api_key:
+        return {"configured": False}
+
+    contract = contract.lower().strip()
+    async with httpx.AsyncClient(timeout=30) as client:
+        transfers = await _alchemy_collection_mint_transfers(client, chain, contract)
+        if isinstance(transfers, dict):
+            return {"chain": chain, "contract": contract, **transfers}
+
+        tags_res = await client.get(
+            f"{settings.supabase_url}/rest/v1/smart_wallet_tags",
+            headers=_supabase_headers(), params={"select": "address"},
+        )
+        tags_res.raise_for_status()
+        tracked = {row["address"] for row in tags_res.json()}
+
+        c = await _nft_resolve_by_contract(client, contract, known_chain=chain)
+        if not c or not c.get("slug"):
+            return {"chain": chain, "contract": contract, "error": "could not resolve this contract to an OpenSea collection"}
+        slug = c["slug"]
+
+        logged = 0
+        for t in transfers:
+            buyer = (t.get("to") or "").lower()
+            if buyer not in tracked:
+                continue
+            token_id_raw = t.get("tokenId")
+            event_at = (t.get("metadata") or {}).get("blockTimestamp")
+            if not token_id_raw or not event_at:
+                continue
+            try:
+                token_id = str(int(token_id_raw, 16)) if isinstance(token_id_raw, str) and token_id_raw.startswith("0x") else str(token_id_raw)
+            except ValueError:
+                continue
+            await client.post(
+                f"{settings.supabase_url}/rest/v1/nft_sale_events_log",
+                headers=_supabase_headers(prefer="resolution=merge-duplicates,return=minimal"),
+                json={
+                    "slug": slug, "token_id": token_id, "buyer": buyer,
+                    "seller": _TRACKED_WALLET_NULL_ADDRESS, "price": None, "symbol": c.get("symbol"),
+                    "event_at": event_at,
+                },
+            )
+            logged += 1
+
+        posted = await _nft_scope_maybe_post_from_slug_direct(client, slug, known_collection=c)
+
+    return {"chain": chain, "contract": contract, "slug": slug, "backfilled_events": logged, "posted": posted}
 
 
 # ── Pidgin AutoMod setup (one-time / re-run-on-change) ──────────────────────
