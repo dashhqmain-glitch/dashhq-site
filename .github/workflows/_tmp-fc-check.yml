@@ -1,0 +1,15 @@
+name: Temporary diagnose founding-charter
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Diagnose founding-charter
+        run: |
+          curl -s -w "\nHTTP_CODE=%{http_code}\n" \
+            -G "https://www.dashhq.site/cron/diagnose-slug-posting" \
+            --data-urlencode "slug=founding-charter" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
