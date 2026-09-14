@@ -1,0 +1,16 @@
+name: Temporary founding-charter minters check
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check tracked wallets among founding-charter minters
+        run: |
+          curl -s -w "\nHTTP_CODE=%{http_code}\n" \
+            -G "https://www.dashhq.site/cron/check-collection-minters" \
+            --data-urlencode "contract=0x69101f92427376fa80476a997d024cf9dc3eae39" \
+            --data-urlencode "chain=robinhood" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
