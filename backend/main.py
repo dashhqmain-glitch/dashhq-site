@@ -10525,7 +10525,7 @@ async def _tracked_wallet_watch_sweep(client: httpx.AsyncClient, deadline: float
 # confirmed live, not guessed - so there is no backstop leg for Robinhood;
 # it stays solely on Alchemy, same as before this existed.
 _EXPLORER_BACKSTOP_POLL_BUCKETS = 288  # same cadence/reasoning as _TRACKED_WALLET_POLL_BUCKETS - a safety net only needs to be eventually consistent
-_EXPLORER_BACKSTOP_TIME_BUDGET_SECONDS = 15  # small and last in line - this is the least time-critical phase, catching what two OTHER paths already missed
+_EXPLORER_BACKSTOP_TIME_BUDGET_SECONDS = 70  # absolute cutoff from cycle start, not "15s for this phase alone" - real gap confirmed live: this runs right after the wallet-watch sweep, whose OWN deadline already extends to the 50s absolute mark (_TRACKED_WALLET_POLL_TIME_BUDGET_SECONDS), so a smaller threshold here got skipped every single time that sweep did real work. Vercel has confirmed live tolerance well past the 60s figure vercel.json's own maxDuration suggests (real cycles completing successfully at 90-150s+), so there's real room for this.
 _ETHERSCAN_MINT_TX_LIMIT = 20  # most recent NFT transfers to scan per wallet - a real mint burst is always near the top of a sorted-by-recent list
 
 
