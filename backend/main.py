@@ -11576,6 +11576,25 @@ async def nft_poll(request: Request):
                 errors.append(f"tracked_wallet_watch: {e}")
         else:
             errors.append("tracked_wallet_watch: skipped - cycle already past its time budget")
+        # Runs right after the Alchemy-based wallet-watch sweep, not at the
+        # tail of the cycle - real measured problem, confirmed live: at its
+        # original position (after the digest phase) this was starved to
+        # "0 checked" on every single real cycle measured after deploy,
+        # because NFT Scope's own scan alone routinely spends the whole
+        # 60-90s+ cycle before ever reaching it. Same lesson already
+        # learned once this session for the Alert Tracker recheck phase -
+        # a phase whose entire purpose is catching what another path
+        # might have missed can't be the first thing sacrificed when the
+        # cycle runs long, so it gets real priority here instead.
+        explorer_backstop = {"checked": 0, "mints_found": 0, "posted": 0}
+        if time.time() - start < _EXPLORER_BACKSTOP_TIME_BUDGET_SECONDS:
+            try:
+                explorer_backstop = await _explorer_backstop_sweep(client, deadline=start + _EXPLORER_BACKSTOP_TIME_BUDGET_SECONDS)
+            except (httpx.HTTPError, KeyError) as e:
+                logger.exception("nft-poll: explorer backstop phase failed")
+                errors.append(f"explorer_backstop: {e}")
+        else:
+            errors.append("explorer_backstop: skipped - cycle already past its time budget")
         try:
             await _alchemy_webhook_sync_addresses(client)
         except (httpx.HTTPError, KeyError) as e:
@@ -11593,15 +11612,6 @@ async def nft_poll(request: Request):
             logger.exception("nft-poll: Alert Tracker digest phase failed")
             alert_tracker_digest_posted = False
             errors.append(f"alert_tracker_digest: {e}")
-        explorer_backstop = {"checked": 0, "mints_found": 0, "posted": 0}
-        if time.time() - start < _EXPLORER_BACKSTOP_TIME_BUDGET_SECONDS:
-            try:
-                explorer_backstop = await _explorer_backstop_sweep(client, deadline=start + _EXPLORER_BACKSTOP_TIME_BUDGET_SECONDS)
-            except (httpx.HTTPError, KeyError) as e:
-                logger.exception("nft-poll: explorer backstop phase failed")
-                errors.append(f"explorer_backstop: {e}")
-        else:
-            errors.append("explorer_backstop: skipped - cycle already past its time budget")
         pruned = await _prune_old_snapshots(client)
         pruned_sale_events = await _prune_old_sale_events(client)
         pruned_call_buyers = await _prune_old_call_buyers(client)
