@@ -1,4 +1,4 @@
-name: Temporary founding-charter minters check
+name: Temporary founding-charter backfill
 
 on:
   workflow_dispatch: {}
@@ -7,10 +7,10 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - name: Check tracked wallets among founding-charter minters
+      - name: Backfill founding-charter mint events for tracked wallets
         run: |
           curl -s -w "\nHTTP_CODE=%{http_code}\n" \
-            -G "https://www.dashhq.site/cron/check-collection-minters" \
+            -G "https://www.dashhq.site/cron/backfill-collection-mints" \
             --data-urlencode "contract=0x69101f92427376fa80476a997d024cf9dc3eae39" \
             --data-urlencode "chain=robinhood" \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
