@@ -1,0 +1,17 @@
+name: Temporary raw shape check
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get raw Ink Blockscout response
+        run: |
+          curl -s "https://explorer.inkonchain.com/api/v2/addresses/0x5e84a4bba53d563438c1f4020f8d9d7d89499999/token-transfers?type=ERC-721,ERC-1155" | head -c 3000
+
+      - name: Get raw Etherscan response
+        run: |
+          echo ""
+          curl -s "https://api.etherscan.io/api?module=account&action=tokennfttx&address=0x5e84a4bba53d563438c1f4020f8d9d7d89499999&sort=desc" | head -c 2000
