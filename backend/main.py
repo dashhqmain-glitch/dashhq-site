@@ -10503,6 +10503,176 @@ async def _tracked_wallet_watch_sweep(client: httpx.AsyncClient, deadline: float
     return {"checked": checked, "mints_found": mints_found, "posted": posted, "slugs_touched": sorted(affected_slugs)}
 
 
+# ── Explorer backstop: a third, independent data source ────────────────────
+# Direct request, backed by a real confirmed incident: all 3 Alchemy
+# webhooks were once found paused SIMULTANEOUSLY (not the earlier
+# single-webhook TOO_MANY_ERRORS case) - every detection path in this file
+# up to now (webhooks, and the sweep above) is Alchemy infrastructure, so
+# an Alchemy-side outage is a single point of failure no amount of
+# retry/reactivation logic on OUR side can fully close. This queries two
+# genuinely independent block explorers directly, so a tracked wallet's
+# mint still gets caught even if Alchemy itself is down.
+#
+# Real, tested constraint (not assumed): only 2 of the 3 tracked chains
+# have a usable leg here. Ink's Blockscout instance has a public, keyless
+# API that answered a plain server-side request with a real 200. Ethereum
+# via Etherscan's API works the same way but needs a free API key
+# (etherscan_api_key - sign up at etherscan.io/apis) since it's a real
+# rate-limited product, not just a demo endpoint - empty key means this
+# leg is a safe no-op, same as every other optional integration here.
+# Robinhood's own Blockscout instance returned a flat HTTP 403 to the same
+# plain request (Cloudflare or similar blocking non-browser clients) -
+# confirmed live, not guessed - so there is no backstop leg for Robinhood;
+# it stays solely on Alchemy, same as before this existed.
+_EXPLORER_BACKSTOP_POLL_BUCKETS = 288  # same cadence/reasoning as _TRACKED_WALLET_POLL_BUCKETS - a safety net only needs to be eventually consistent
+_EXPLORER_BACKSTOP_TIME_BUDGET_SECONDS = 15  # small and last in line - this is the least time-critical phase, catching what two OTHER paths already missed
+_ETHERSCAN_MINT_TX_LIMIT = 20  # most recent NFT transfers to scan per wallet - a real mint burst is always near the top of a sorted-by-recent list
+
+
+async def _ink_blockscout_recent_mints(client: httpx.AsyncClient, address: str) -> list[dict]:
+    try:
+        res = await client.get(
+            f"https://explorer.inkonchain.com/api/v2/addresses/{address}/token-transfers",
+            params={"type": "ERC-721,ERC-1155"},
+        )
+        if res.status_code != 200:
+            return []  # chain explorer hiccup or address genuinely has no transfers - skip quietly, this is a backstop, not the primary path
+        items = (res.json() or {}).get("items") or []
+    except (httpx.HTTPError, ValueError):
+        logger.exception("Ink Blockscout backstop request failed for %s", address)
+        return []
+    mints = []
+    for item in items:
+        # Blockscout classifies the event itself ("token_minting") rather
+        # than leaving it to be inferred from the from-address - trust its
+        # own classification first, with the standard from=zero-address
+        # check as a defensive fallback if that field is ever absent.
+        is_mint = item.get("type") == "token_minting" or (item.get("from") or {}).get("hash", "").lower() == _TRACKED_WALLET_NULL_ADDRESS
+        if not is_mint:
+            continue
+        contract = ((item.get("token") or {}).get("address_hash") or "").lower()
+        token_id = (item.get("total") or {}).get("token_id")
+        timestamp = item.get("timestamp")
+        if not contract or token_id is None or not timestamp:
+            continue
+        mints.append({"chain": "ink", "contract": contract, "token_id": str(token_id), "event_at": timestamp})
+    return mints
+
+
+async def _etherscan_recent_mints(client: httpx.AsyncClient, address: str) -> list[dict]:
+    if not settings.etherscan_api_key:
+        return []
+    try:
+        res = await client.get(
+            "https://api.etherscan.io/v2/api",
+            params={
+                "chainid": "1", "module": "account", "action": "tokennfttx", "address": address,
+                "sort": "desc", "page": "1", "offset": str(_ETHERSCAN_MINT_TX_LIMIT),
+                "apikey": settings.etherscan_api_key,
+            },
+        )
+        if res.status_code != 200:
+            return []
+        data = res.json() or {}
+    except (httpx.HTTPError, ValueError):
+        logger.exception("Etherscan backstop request failed for %s", address)
+        return []
+    result = data.get("result")
+    if not isinstance(result, list):
+        # Etherscan reports real failures (bad key, rate limit) as
+        # status="0" with `result` as a STRING message, not a list - "no
+        # transfers for this address" is status="1" with an empty list.
+        # Both must resolve to "nothing found" here, not a crash.
+        if data.get("message") not in ("No transactions found", "OK"):
+            logger.warning("Etherscan backstop returned an error for %s: %s", address, data.get("result"))
+        return []
+    mints = []
+    for item in result:
+        if (item.get("from") or "").lower() != _TRACKED_WALLET_NULL_ADDRESS:
+            continue
+        contract = (item.get("contractAddress") or "").lower()
+        token_id = item.get("tokenID")
+        ts_raw = item.get("timeStamp")
+        if not contract or token_id is None or not ts_raw:
+            continue
+        try:
+            event_at = datetime.fromtimestamp(int(ts_raw), tz=timezone.utc).isoformat()
+        except (ValueError, OverflowError):
+            continue
+        mints.append({"chain": "ethereum", "contract": contract, "token_id": str(token_id), "event_at": event_at})
+    return mints
+
+
+async def _explorer_backstop_sweep(client: httpx.AsyncClient, deadline: float) -> dict:
+    tags_res = await client.get(
+        f"{settings.supabase_url}/rest/v1/smart_wallet_tags",
+        headers=_supabase_headers(), params={"select": "address"},
+    )
+    tags_res.raise_for_status()
+    all_addresses = sorted({row["address"] for row in tags_res.json()})
+    if not all_addresses:
+        return {"checked": 0, "mints_found": 0, "posted": 0}
+
+    # Deliberately the SAME bucket formula as _tracked_wallet_watch_sweep
+    # (not an independently-offset rotation) - the whole point of this
+    # sweep is to be a redundant cross-check against Alchemy specifically,
+    # so checking the exact wallets Alchemy's own sweep is checking this
+    # same cycle, via completely different infrastructure, is the correct
+    # shape for that, not a coincidence to avoid.
+    bucket = int(time.time() // 300) % _EXPLORER_BACKSTOP_POLL_BUCKETS
+    batch = [a for a in all_addresses if _wallet_poll_bucket(a, _EXPLORER_BACKSTOP_POLL_BUCKETS) == bucket]
+
+    checked = mints_found = posted = 0
+    affected_slugs: set[str] = set()
+    resolved_by_slug: dict[str, dict] = {}
+    resolved_by_contract: dict[str, dict | None] = {}
+    for address in batch:
+        if time.time() >= deadline:
+            break
+        checked += 1
+        ink_mints, eth_mints = await asyncio.gather(
+            _ink_blockscout_recent_mints(client, address), _etherscan_recent_mints(client, address),
+        )
+        for mint in ink_mints + eth_mints:
+            try:
+                contract = mint["contract"]
+                if contract not in resolved_by_contract:
+                    resolved_by_contract[contract] = await _nft_resolve_by_contract(client, contract, known_chain=mint["chain"])
+                c = resolved_by_contract[contract]
+                if not c or not c.get("slug"):
+                    continue
+                mints_found += 1
+                await client.post(
+                    f"{settings.supabase_url}/rest/v1/nft_sale_events_log",
+                    headers=_supabase_headers(prefer="resolution=merge-duplicates,return=minimal"),
+                    json={
+                        "slug": c["slug"], "token_id": mint["token_id"], "buyer": address,
+                        "seller": _TRACKED_WALLET_NULL_ADDRESS, "price": None, "symbol": c.get("symbol"),
+                        "event_at": mint["event_at"],
+                    },
+                )
+            except Exception:
+                # Same broad guard as the Alchemy sweep's identical fix -
+                # one bad mint from one explorer must never cost every
+                # other mint in this batch, or the whole backstop phase.
+                logger.exception("Failed to resolve/log explorer-backstop mint for contract %s", mint.get("contract"))
+                continue
+            affected_slugs.add(c["slug"])
+            resolved_by_slug[c["slug"]] = c
+
+    for slug in affected_slugs:
+        if time.time() >= deadline:
+            break
+        try:
+            if await _nft_scope_maybe_post_from_slug_direct(client, slug, known_collection=resolved_by_slug.get(slug)):
+                posted += 1
+        except Exception:
+            logger.exception("Failed to process explorer-backstop-detected slug %s", slug)
+            continue
+
+    return {"checked": checked, "mints_found": mints_found, "posted": posted, "slugs_touched": sorted(affected_slugs)}
+
+
 async def _nft_scope_wallet_signals(client: httpx.AsyncClient, rapid_activity: dict | None) -> tuple[list[dict], list[dict], list[dict]]:
     # Single entry point every pass calls instead of fetching each wallet
     # signal separately - all three run concurrently, so a candidate with a
@@ -11423,6 +11593,15 @@ async def nft_poll(request: Request):
             logger.exception("nft-poll: Alert Tracker digest phase failed")
             alert_tracker_digest_posted = False
             errors.append(f"alert_tracker_digest: {e}")
+        explorer_backstop = {"checked": 0, "mints_found": 0, "posted": 0}
+        if time.time() - start < _EXPLORER_BACKSTOP_TIME_BUDGET_SECONDS:
+            try:
+                explorer_backstop = await _explorer_backstop_sweep(client, deadline=start + _EXPLORER_BACKSTOP_TIME_BUDGET_SECONDS)
+            except (httpx.HTTPError, KeyError) as e:
+                logger.exception("nft-poll: explorer backstop phase failed")
+                errors.append(f"explorer_backstop: {e}")
+        else:
+            errors.append("explorer_backstop: skipped - cycle already past its time budget")
         pruned = await _prune_old_snapshots(client)
         pruned_sale_events = await _prune_old_sale_events(client)
         pruned_call_buyers = await _prune_old_call_buyers(client)
@@ -11431,7 +11610,7 @@ async def nft_poll(request: Request):
         "watchlist_alerts": alerted, "nft_scope_posts": scoped, "nft_scope_followups": followups,
         "tracked_wallet_watch": wallet_watch, "alert_tracker_proving": alert_tracker_proving,
         "alert_tracker_digest_posted": alert_tracker_digest_posted,
-        "alert_tracker_recheck": alert_tracker_recheck,
+        "alert_tracker_recheck": alert_tracker_recheck, "explorer_backstop": explorer_backstop,
         "pruned_old_snapshots": pruned, "pruned_old_sale_events": pruned_sale_events,
         "pruned_old_call_buyers": pruned_call_buyers, "errors": errors,
         "took_seconds": round(time.time() - start, 2),

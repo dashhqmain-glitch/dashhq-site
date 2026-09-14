@@ -165,6 +165,19 @@ class Settings(BaseSettings):
     # no-op, same as every other optional-feature key here.
     alchemy_api_key: str = ""
 
+    # Independent, third-data-source backstop for tracked-wallet mint
+    # detection (see _explorer_backstop_sweep) - Etherscan's own API,
+    # completely separate infrastructure from Alchemy, so an Alchemy-side
+    # outage (confirmed live: all 3 webhooks paused simultaneously) still
+    # gets caught. Free tier, sign up at etherscan.io/apis for a key.
+    # Empty means that leg of the backstop is a safe no-op, same as every
+    # other optional-feature key here - the Ink leg needs no key at all
+    # (Blockscout's public API is keyless), and Robinhood's own explorer
+    # actively blocks non-browser requests (confirmed live: HTTP 403),
+    # so there's no backstop leg for that chain - it stays solely on
+    # Alchemy, same as before.
+    etherscan_api_key: str = ""
+
     # Address Activity webhooks - push-based tracked-wallet mint detection
     # (see alchemy_address_activity_webhook in main.py), replacing most of
     # the old constant-polling sweep. Alchemy scopes one webhook per chain
