@@ -1,0 +1,15 @@
+name: Temporary verify budget fix
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Time a real nft-poll cycle
+        run: |
+          curl -s -o response.json -w "\nHTTP_CODE=%{http_code}\nTIME_TOTAL=%{time_total}\n" \
+            -X GET "https://www.dashhq.site/cron/nft-poll" \
+            -H "Authorization: Bearer ${{ secrets.NFT_CRON_SECRET }}"
+          cat response.json
