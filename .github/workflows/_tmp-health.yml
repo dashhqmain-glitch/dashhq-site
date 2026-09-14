@@ -1,0 +1,27 @@
+name: Temporary health and wallet check
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Poll heartbeat
+        run: |
+          curl -s -w "\nHTTP_CODE=%{http_code}\n" \
+            -G "https://www.dashhq.site/cron/check-poll-heartbeat" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
+
+      - name: Webhook status
+        run: |
+          curl -s -w "\nHTTP_CODE=%{http_code}\n" \
+            -G "https://www.dashhq.site/cron/check-webhook-status" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
+
+      - name: Check the flagged wallet is watched on each chain
+        run: |
+          curl -s -w "\nHTTP_CODE=%{http_code}\n" \
+            -G "https://www.dashhq.site/cron/check-webhook-address" \
+            --data-urlencode "address=0x5e84a4bba53d563438c1f4020f8d9d7d89499999" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
