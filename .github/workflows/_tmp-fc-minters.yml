@@ -1,4 +1,4 @@
-name: Temporary founding-charter backfill
+name: Temporary founding-charter diagnose
 
 on:
   workflow_dispatch: {}
@@ -7,10 +7,9 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - name: Backfill founding-charter mint events for tracked wallets
+      - name: Diagnose why founding-charter didn't post
         run: |
           curl -s -w "\nHTTP_CODE=%{http_code}\n" \
-            -G "https://www.dashhq.site/cron/backfill-collection-mints" \
-            --data-urlencode "contract=0x69101f92427376fa80476a997d024cf9dc3eae39" \
-            --data-urlencode "chain=robinhood" \
+            -G "https://www.dashhq.site/cron/diagnose-slug-posting" \
+            --data-urlencode "slug=founding-charter" \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
