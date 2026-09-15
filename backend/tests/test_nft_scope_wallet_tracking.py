@@ -747,6 +747,41 @@ async def test_maybe_post_from_slug_direct_requires_the_convergence_minimum():
     assert result is False
 
 
+async def test_maybe_post_from_slug_direct_only_counts_recent_buyer_events():
+    # Real bug, confirmed live: this used to fetch EVERY buyer ever logged
+    # for the slug with no event_at filter, so a tracked wallet's mint from
+    # months ago - surfaced for the first time today by a first-ever
+    # explorer-backstop/sweep check of that wallet, or a manual backfill -
+    # read identically to a mint happening right now, and the bot posted a
+    # "call" for long-dead mint activity. Must scope the buyer lookup to the
+    # same 24h freshness bar the recheck watchdog already uses
+    # (_ALERT_TRACKER_RECHECK_WINDOW_HOURS).
+    captured = {}
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            if "nft_sale_events_log" in url:
+                captured["params"] = params
+                return FakeRes(200, [])  # nothing recent enough to qualify
+            if "smart_wallet_tags" in url:
+                return FakeRes(200, [])
+            return FakeRes(200, [])
+
+    async def fail_if_called(*a, **k):
+        raise AssertionError("should never build/post an embed with zero recent tracked-wallet hits")
+
+    with patch.object(main, "_nft_collection_core", new=fail_if_called):
+        result = await main._nft_scope_maybe_post_from_slug_direct(FakeClient(), "some-slug")
+
+    assert result is False
+    params = captured["params"]
+    assert params["slug"] == "eq.some-slug"
+    assert params["event_at"].startswith("gte.")
+    cutoff = main.datetime.fromisoformat(params["event_at"][len("gte."):])
+    hours_ago = (main.datetime.now(main.timezone.utc) - cutoff).total_seconds() / 3600
+    assert abs(hours_ago - main._ALERT_TRACKER_RECHECK_WINDOW_HOURS) < 0.1
+
+
 async def test_maybe_post_from_slug_direct_scores_with_a_real_rapid_activity_shape():
     # Real bug, confirmed live in production: this function used to hand
     # its own partial {"buyer_addresses": [...]} dict straight to

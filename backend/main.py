@@ -10531,9 +10531,20 @@ async def _nft_scope_maybe_post_from_slug_direct(client: httpx.AsyncClient, slug
     # invocation. The recheck watchdog has no such head start (it only
     # ever has a slug, discovered from historical event rows), so it
     # leaves this None and gets the original fresh-fetch behavior.
+    #
+    # event_at window - real bug, confirmed live: this used to fetch EVERY
+    # buyer ever logged for this slug, no matter how old. A tracked wallet's
+    # mint from months ago, surfaced for the very first time today (a
+    # first-ever explorer-backstop/sweep check of that wallet, or a manual
+    # backfill), then read as "this slug has a tracked-wallet hit" exactly
+    # like a mint happening right now, and the community saw a "call" for a
+    # long-dead mint. Same 24h freshness bar the recheck watchdog already
+    # uses (_ALERT_TRACKER_RECHECK_WINDOW_HOURS) - a real, still-relevant
+    # signal, not an arbitrary tighter cutoff.
+    since = (datetime.now(timezone.utc) - timedelta(hours=_ALERT_TRACKER_RECHECK_WINDOW_HOURS)).isoformat()
     buyers_res = await client.get(
         f"{settings.supabase_url}/rest/v1/nft_sale_events_log",
-        headers=_supabase_headers(), params={"slug": f"eq.{slug}", "select": "buyer"},
+        headers=_supabase_headers(), params={"slug": f"eq.{slug}", "event_at": f"gte.{since}", "select": "buyer"},
     )
     buyers_res.raise_for_status()
     # Deliberately its own lightweight shape (buyer_addresses only) - this
