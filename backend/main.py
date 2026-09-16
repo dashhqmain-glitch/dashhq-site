@@ -6467,7 +6467,6 @@ _CHAIN_EXPLORERS = {
     "ink": "https://explorer.inkonchain.com/address/{a}",  # unverified
     "hyperevm": "https://hyperevmscan.io/address/{a}",  # unverified
     "robinhood": "https://robinhoodchain.blockscout.com/address/{a}",  # confirmed live - explorer.robinhood.com (the old value here) doesn't exist; this is the real official Blockscout explorer
-    "arc": "https://arc-scan.org/address/{a}",  # confirmed real domain for Circle's Arc (chain ID 5042) - a human's browser click works fine even though arc-scan.org blocks plain server-side requests (Cloudflare)
 }
 
 
@@ -10099,7 +10098,6 @@ _TRACKED_WALLET_ALCHEMY_CHAINS = {
     "arbitrum": "arb-mainnet",
     "robinhood": "robinhood-mainnet",  # confirmed live 2026 per Alchemy's own docs, but not independently verified against this account's actual key - watch the first few sweeps' "checked"/"mints_found" counts
     "ink": "ink-mainnet",  # same caveat as robinhood above
-    "arc": "arc-mainnet",  # Circle's USDC-gas L1, chain ID 5042 - real, direct request. Alchemy's own subdomain reference only lists "Arc Testnet" (arc-testnet.g.alchemy.com); this mainnet slug is unconfirmed against this account's actual key until the first live /cron/test-alchemy?chain=arc check - watch that before trusting "0 checked" as "no mints" rather than "not actually supported". Arc's own explorer (arc-scan.org) returned a flat HTTP 403 to a plain server-side request (Cloudflare, same as Robinhood's Blockscout) - no explorer-backstop leg exists for this chain, it depends on Alchemy alone.
 }
 _TRACKED_WALLET_NULL_ADDRESS = "0x0000000000000000000000000000000000000000"
 _TRACKED_WALLET_EVENTS_PER_WALLET = 10
