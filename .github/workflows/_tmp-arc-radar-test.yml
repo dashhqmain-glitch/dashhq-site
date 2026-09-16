@@ -11,6 +11,6 @@ jobs:
         run: |
           curl -s -w "\nHTTP_CODE=%{http_code}\n" \
             -G "https://www.dashhq.site/cron/test-alchemy" \
-            --data-urlencode "address=0x0000000000000000000000000000000000dEaD" \
+            --data-urlencode "address=0x0000000000000000000000000000000000000000" \
             --data-urlencode "chain=arc" \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
