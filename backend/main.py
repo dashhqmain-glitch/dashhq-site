@@ -10830,170 +10830,6 @@ async def _explorer_backstop_sweep(client: httpx.AsyncClient, deadline: float) -
     return {"checked": checked, "mints_found": mints_found, "posted": posted, "slugs_touched": sorted(affected_slugs)}
 
 
-# ── Arc Mint Radar: chain-wide mint discovery, no OpenSea involved ─────────
-# Direct request: "see the projects currently minting on Arc" (chain ID
-# 5042, Circle's USDC-gas L1) - the same thing NFT Scope's Pass 1 already
-# does for ethereum/robinhood/ink. Can't reuse that pass as-is: Pass 1, and
-# every scoring/posting function downstream of it in this file
-# (_nft_resolve_by_contract, _nft_collection_core, floor price, verified
-# badge, wash-trade checks), is built entirely on OpenSea's API - confirmed
-# live, OpenSea does not support Arc at all. MintGo (mintgo.fun) DOES track
-# Arc, but its API sits behind an explicit same-origin browser-session
-# check ("Same-origin browser session required", 403 to a plain request) -
-# defeating that would mean spoofing browser-only signals to impersonate a
-# real session, the same category of thing already declined once this
-# session for the Twitter automation script, so it's not an option here
-# either.
-#
-# What's left, and what this uses instead: Alchemy's alchemy_getAssetTransfers
-# can scan the WHOLE chain for mint activity directly (fromAddress = the
-# null address, no toAddress filter), not just specific tracked wallets -
-# the only real data source that actually covers this chain. No floor
-# price, no verified badge, no wash-trade check - those concepts don't
-# exist here without a marketplace indexing this chain, so every post this
-# produces says so plainly rather than pretending to the same confidence
-# level as a real NFT Scope embed.
-_ARC_MINT_RADAR_CHAIN = "arc"
-_ARC_MINT_RADAR_LOOKBACK_BLOCKS = 6000  # first-run bootstrap only - Arc produces a block roughly every 506ms per its own docs, so ~6000 blocks is close to the last hour; avoids dumping this cycle's entire pre-launch history the moment this ships
-_ARC_MINT_RADAR_MAX_TRANSFER_PAGES = 20  # same hard-cap pattern as _alchemy_collection_mint_transfers - never loop forever on a malformed/never-ending cursor
-_ARC_MINT_RADAR_MAX_NEW_CONTRACTS_PER_CYCLE = 3  # posts-per-cycle cap, same spirit as _NFT_SCOPE_FRESH_MAX_POSTS - a brand-new chain's launch window can produce a lot of contracts at once, and this channel must not get flooded
-_ARC_MINT_RADAR_WATERMARK_SLUG = "__arc_mint_radar__"
-_ARC_MINT_RADAR_ALERT_TYPE = "mint_radar_posted"
-_ARC_MINT_RADAR_COLOR = 0x2FE0C6  # deliberately distinct from every other NFT Scope embed color - a visual tell that this is the reduced-confidence, no-marketplace-data alert, not the real thing
-_ARC_MINT_RADAR_TIME_BUDGET_SECONDS = 90  # absolute cutoff from cycle start, same phase-priority reasoning as _EXPLORER_BACKSTOP_TIME_BUDGET_SECONDS (70) right before it - a smaller/relative budget here would starve this phase the same way the backstop was starved twice before that fix
-
-
-async def _arc_mint_radar_post(client: httpx.AsyncClient, contract: str, transfers: list[dict], tracked_by_address: dict[str, list[str]]) -> bool:
-    name = None
-    try:
-        meta = await _alchemy_rpc(client, _ARC_MINT_RADAR_CHAIN, "alchemy_getContractMetadata", {"contractAddress": contract})
-        if meta:
-            name = meta.get("name") or ((meta.get("openSeaMetadata") or {}).get("collectionName"))
-    except Exception:
-        logger.exception("Arc mint radar: contract metadata lookup failed for %s", contract)
-
-    buyers = sorted({(t.get("to") or "").lower() for t in transfers if t.get("to")})
-    tracked_hits = {addr: tags for addr, tags in tracked_by_address.items() if addr in buyers}
-
-    short_contract = f"{contract[:6]}…{contract[-4:]}"
-    lines = [
-        f"**{len(transfers)}** mint(s) detected in this window · **{len(buyers)}** distinct minter(s)",
-    ]
-    if tracked_hits:
-        tags = sorted({t for tag_list in tracked_hits.values() for t in tag_list})
-        shown = ", ".join(tags[:5]) + (f" (+{len(tags) - 5} more)" if len(tags) > 5 else "")
-        lines.append(f"🏷️ Includes tracked wallet(s): {shown}")
-    lines.append(
-        "⚠️ Basic alert only - Arc has no OpenSea/marketplace coverage yet, "
-        "so there's no floor price, verified badge, or wash-trade check available here."
-    )
-    embed = {
-        "title": name or f"New Arc mint · {short_contract}",
-        "description": "\n".join(lines),
-        "color": _ARC_MINT_RADAR_COLOR,
-        "url": f"https://arc-scan.org/address/{contract}",
-        "fields": [
-            {"name": "Contract", "value": f"`{contract}`", "inline": False},
-            {"name": "Explorer", "value": f"[arc-scan.org](https://arc-scan.org/address/{contract})", "inline": True},
-        ],
-        "footer": {"text": "Arc Mint Radar · chain ID 5042"},
-    }
-    return await _post_channel_message(client, settings.discord_nft_scope_channel_id, embed)
-
-
-async def _arc_mint_radar_sweep(client: httpx.AsyncClient, deadline: float) -> dict:
-    if not settings.alchemy_api_key:
-        return {"configured": False}
-
-    latest = await _alchemy_rpc(client, _ARC_MINT_RADAR_CHAIN, "eth_blockNumber", {})
-    if not latest:
-        return {"checked": 0, "new_contracts": 0, "posted": 0, "skipped": "arc_not_enabled_or_unreachable"}
-    try:
-        latest_block = int(latest, 16)
-    except (TypeError, ValueError):
-        return {"checked": 0, "new_contracts": 0, "posted": 0, "skipped": "bad_block_number"}
-
-    # Block-range watermark, not a fixed per-cycle lookback window - a fixed
-    # window risks either gaps (this cycle ran late) or reprocessing blocks
-    # it already checked (wasted Alchemy spend). Advances every cycle
-    # regardless of whether anything was found below - an empty window is a
-    # real, correct answer, not a reason to keep re-scanning the same
-    # already-checked blocks forever.
-    watermark = await _nft_alert_state_get(client, _ARC_MINT_RADAR_WATERMARK_SLUG, "last_block")
-    from_block = int(watermark["last_value"]) + 1 if watermark else max(0, latest_block - _ARC_MINT_RADAR_LOOKBACK_BLOCKS)
-    if from_block > latest_block:
-        return {"checked": 0, "new_contracts": 0, "posted": 0, "from_block": from_block, "to_block": latest_block}
-
-    transfers: list[dict] = []
-    page_key = None
-    for _ in range(_ARC_MINT_RADAR_MAX_TRANSFER_PAGES):
-        if time.time() >= deadline:
-            break
-        params = {
-            "fromAddress": _TRACKED_WALLET_NULL_ADDRESS, "category": ["erc721", "erc1155"],
-            "fromBlock": hex(from_block), "toBlock": hex(latest_block),
-            "maxCount": hex(1000), "order": "asc", "withMetadata": True,
-        }
-        if page_key:
-            params["pageKey"] = page_key
-        result = await _alchemy_rpc(client, _ARC_MINT_RADAR_CHAIN, "alchemy_getAssetTransfers", params)
-        if not result:
-            break
-        transfers.extend(result.get("transfers", []))
-        page_key = result.get("pageKey")
-        if not page_key:
-            break
-
-    await _nft_alert_state_set(client, _ARC_MINT_RADAR_WATERMARK_SLUG, "last_block", latest_block)
-
-    if not transfers:
-        return {"checked": 0, "new_contracts": 0, "posted": 0, "from_block": from_block, "to_block": latest_block}
-
-    by_contract: dict[str, list[dict]] = {}
-    for t in transfers:
-        contract = ((t.get("rawContract") or {}).get("address") or "").lower()
-        if contract:
-            by_contract.setdefault(contract, []).append(t)
-
-    all_buyers = sorted({(t.get("to") or "").lower() for t in transfers if t.get("to")})
-    tracked_by_address: dict[str, list[str]] = {}
-    if all_buyers:
-        try:
-            tags_res = await client.get(
-                f"{settings.supabase_url}/rest/v1/smart_wallet_tags",
-                headers=_supabase_headers(), params={"address": f"in.({','.join(all_buyers)})", "select": "address,tag"},
-            )
-            tags_res.raise_for_status()
-            for row in tags_res.json():
-                tracked_by_address.setdefault(row["address"], []).append(row["tag"])
-        except httpx.HTTPError:
-            logger.exception("Arc mint radar: tracked-wallet lookup failed")
-
-    posted = 0
-    for contract, contract_transfers in by_contract.items():
-        if posted >= _ARC_MINT_RADAR_MAX_NEW_CONTRACTS_PER_CYCLE or time.time() >= deadline:
-            break
-        try:
-            already = await _nft_alert_state_get(client, f"arc:{contract}", _ARC_MINT_RADAR_ALERT_TYPE)
-            if already:
-                continue
-            if await _arc_mint_radar_post(client, contract, contract_transfers, tracked_by_address):
-                posted += 1
-            await _nft_alert_state_set(client, f"arc:{contract}", _ARC_MINT_RADAR_ALERT_TYPE, 0)
-        except Exception:
-            # One bad contract (a malformed metadata response, a Discord
-            # hiccup) must never cost every other contract in this batch,
-            # or the whole radar phase - same broad-guard reasoning as
-            # every other sweep in this file.
-            logger.exception("Arc mint radar: failed to process contract %s", contract)
-            continue
-
-    return {
-        "checked": len(transfers), "new_contracts": len(by_contract), "posted": posted,
-        "from_block": from_block, "to_block": latest_block,
-    }
-
-
 async def _nft_scope_wallet_signals(client: httpx.AsyncClient, rapid_activity: dict | None) -> tuple[list[dict], list[dict], list[dict]]:
     # Single entry point every pass calls instead of fetching each wallet
     # signal separately - all three run concurrently, so a candidate with a
@@ -11900,20 +11736,6 @@ async def nft_poll(request: Request):
                 errors.append(f"explorer_backstop: {e}")
         else:
             errors.append("explorer_backstop: skipped - cycle already past its time budget")
-        # Same phase-priority tier as the wallet-watch sweep and explorer
-        # backstop above (before NFT Scope's own uncapped scan) - Arc mint
-        # detection is core "catch real mints" functionality now, not the
-        # lower-stakes general discovery feature that can afford to be the
-        # one occasionally squeezed.
-        arc_mint_radar = {"checked": 0, "new_contracts": 0, "posted": 0}
-        if time.time() - start < _ARC_MINT_RADAR_TIME_BUDGET_SECONDS:
-            try:
-                arc_mint_radar = await _arc_mint_radar_sweep(client, deadline=start + _ARC_MINT_RADAR_TIME_BUDGET_SECONDS)
-            except (httpx.HTTPError, KeyError) as e:
-                logger.exception("nft-poll: Arc mint radar phase failed")
-                errors.append(f"arc_mint_radar: {e}")
-        else:
-            errors.append("arc_mint_radar: skipped - cycle already past its time budget")
         scoped = []
         followups = []
         if settings.nft_scope_enabled:
@@ -11956,7 +11778,6 @@ async def nft_poll(request: Request):
         "tracked_wallet_watch": wallet_watch, "alert_tracker_proving": alert_tracker_proving,
         "alert_tracker_digest_posted": alert_tracker_digest_posted,
         "alert_tracker_recheck": alert_tracker_recheck, "explorer_backstop": explorer_backstop,
-        "arc_mint_radar": arc_mint_radar,
         "pruned_old_snapshots": pruned, "pruned_old_sale_events": pruned_sale_events,
         "pruned_old_call_buyers": pruned_call_buyers, "errors": errors,
         "took_seconds": round(time.time() - start, 2),
