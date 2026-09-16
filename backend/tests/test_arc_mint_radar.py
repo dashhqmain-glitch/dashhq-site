@@ -165,6 +165,56 @@ def _mint_transfer(contract, token_id, buyer):
     }
 
 
+async def test_arc_mint_radar_looks_up_tracked_wallets_without_an_oversized_url():
+    # Real bug, live-confirmed: a launch-day backlog window can carry
+    # thousands of distinct buyers, and an address=in.(...) filter with all
+    # of them crammed into one URL is exactly the oversized-URL problem
+    # already fixed elsewhere in this file
+    # (_alert_tracker_pending_convergence_slugs) for the identical shape of
+    # problem. This must fetch the whole tracked list unconditionally and
+    # intersect in Python instead, regardless of how many buyers this
+    # window contains.
+    settings.alchemy_api_key = "key"
+    tags_get_params = []
+
+    class FakeClient:
+        async def post(self, url, headers=None, json=None):
+            if not isinstance(json, dict):
+                return FakeRes(200, {})
+            method = json["method"]
+            if method == "eth_blockNumber":
+                return FakeRes(200, {"result": "0x2710"})
+            if method == "alchemy_getAssetTransfers":
+                transfers = [_mint_transfer("0xCONTRACT1", str(i), f"0xBUYER{i}") for i in range(500)]
+                return FakeRes(200, {"result": {"transfers": transfers}})
+            if method == "alchemy_getContractMetadata":
+                return FakeRes(200, {"result": {}})
+            raise AssertionError(f"unexpected method {method}")
+
+        async def get(self, url, headers=None, params=None):
+            if "smart_wallet_tags" in url:
+                tags_get_params.append(params)
+                return FakeRes(200, [])
+            if "nft_alert_state" in url:
+                if (params or {}).get("alert_type") == "eq.last_block":
+                    return FakeRes(200, [{"last_value": 9000}])
+                return FakeRes(200, [])
+            return FakeRes(200, [])
+
+    async def fake_post_channel_message(*a, **k):
+        return True
+
+    with patch.object(main, "_post_channel_message", new=fake_post_channel_message):
+        try:
+            await main._arc_mint_radar_sweep(FakeClient(), deadline=main.time.time() + 30)
+        finally:
+            settings.alchemy_api_key = ""
+
+    assert len(tags_get_params) == 1
+    assert "address" not in tags_get_params[0]
+    assert tags_get_params[0] == {"select": "address,tag"}
+
+
 async def test_arc_mint_radar_posts_a_new_contract_and_highlights_tracked_wallets():
     settings.alchemy_api_key = "key"
     posted_embeds = []
