@@ -14,41 +14,59 @@ name: NFT Poll Heartbeat Check
 # check the Alchemy dashboard directly. /cron/check-webhook-status alerts
 # the ops channel itself the moment any configured webhook goes inactive.
 #
-# Runs on its own schedule rather than being part of nft-poll.yml itself -
-# if THAT job is the one that's dead, a check living inside it would be
-# dead too. GH Actions' short-interval schedule unreliability (see
-# nft-poll.yml's own notes) doesn't undermine this: both endpoints enforce
-# their own staleness/alerting server-side, so even a delayed run of this
-# workflow still correctly detects and alerts on a real outage, just
-# possibly a bit later than the ideal 30-minute cadence.
+# Self-looping, same fix as nft-poll.yml and for the identical reason:
+# a raw `schedule: '*/30 * * * *'` (the old approach here) looks right but
+# isn't - GitHub Actions silently delays/queues short-interval schedules
+# under its own platform load, and this repo's real run history showed
+# "every 30 min" landing anywhere from ~5 to ~7+ hours apart. That's
+# precisely the kind of blind window that let a real, confirmed incident
+# (the Robinhood webhook sitting paused) go uncaught by this watchdog long
+# enough that a human found and fixed it manually instead. Fix: get the
+# real 30-minute cadence from this job's own wall clock via `sleep 1800`,
+# which isn't subject to GH's scheduler queue, same as the poll loop. The
+# job loops for as long as GH allows a single job to run (hard 6h cap),
+# then a much coarser `schedule:` (which GH delivers on reliably, unlike
+# 30-min) starts the next loop. `concurrency` makes a fresh restart replace
+# any still-running loop instead of stacking duplicates alongside it.
 
 on:
   schedule:
-    - cron: '*/30 * * * *'
+    - cron: '0 */2 * * *'  # coarse restart cadence GH Actions actually delivers on time - NOT the real check interval, see the loop below
   workflow_dispatch: {}
+
+concurrency:
+  group: nft-poll-heartbeat-chain
+  cancel-in-progress: true
 
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 350  # under GitHub's hard 6-hour per-job cap, with margin before a forced cutoff
     steps:
-      - name: Check nft-poll heartbeat
+      - name: Check heartbeat + webhook status every 30 minutes using this job's own clock
         run: |
-          status=$(curl -s -o response.json -w "%{http_code}" \
-            "https://www.dashhq.site/cron/check-poll-heartbeat" \
-            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}")
-          echo "Heartbeat check: HTTP $status"
-          cat response.json
-          if [ "$status" -ge 400 ]; then
-            echo "::warning::Heartbeat check endpoint itself failed with HTTP $status - check manually."
-          fi
+          set +e  # a transient network hiccup must not kill a 5.5-hour loop over one bad tick
+          deadline=$((SECONDS + 340 * 60))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            status=$(curl -s -o response.json -w "%{http_code}" \
+              "https://www.dashhq.site/cron/check-poll-heartbeat" \
+              -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}")
+            echo "$(date -u +%H:%M:%S) Heartbeat check: HTTP $status"
+            cat response.json 2>/dev/null
+            echo
+            if [ "$status" -ge 400 ]; then
+              echo "::warning::Heartbeat check endpoint itself failed with HTTP $status - check manually."
+            fi
 
-      - name: Check Alchemy webhook status
-        run: |
-          status=$(curl -s -o response.json -w "%{http_code}" \
-            "https://www.dashhq.site/cron/check-webhook-status" \
-            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}")
-          echo "Webhook status check: HTTP $status"
-          cat response.json
-          if [ "$status" -ge 400 ]; then
-            echo "::warning::Webhook status check endpoint itself failed with HTTP $status - check manually."
-          fi
+            status=$(curl -s -o response.json -w "%{http_code}" \
+              "https://www.dashhq.site/cron/check-webhook-status" \
+              -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}")
+            echo "$(date -u +%H:%M:%S) Webhook status check: HTTP $status"
+            cat response.json 2>/dev/null
+            echo
+            if [ "$status" -ge 400 ]; then
+              echo "::warning::Webhook status check endpoint itself failed with HTTP $status - check manually."
+            fi
+
+            sleep 1800
+          done
