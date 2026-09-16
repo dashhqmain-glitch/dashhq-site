@@ -10955,25 +10955,17 @@ async def _arc_mint_radar_sweep(client: httpx.AsyncClient, deadline: float) -> d
         if contract:
             by_contract.setdefault(contract, []).append(t)
 
-    all_buyers = {(t.get("to") or "").lower() for t in transfers if t.get("to")}
+    all_buyers = sorted({(t.get("to") or "").lower() for t in transfers if t.get("to")})
     tracked_by_address: dict[str, list[str]] = {}
     if all_buyers:
-        # Fetch the whole tracked list and intersect in Python, rather than
-        # an address=in.(...) filter - real bug, live-confirmed: a launch-day
-        # backlog window can carry thousands of distinct buyers, and that
-        # filter builds one URL with all of them in it. Same oversized-URL
-        # fix already established elsewhere in this file
-        # (_alert_tracker_pending_convergence_slugs) for the identical
-        # shape of problem.
         try:
             tags_res = await client.get(
                 f"{settings.supabase_url}/rest/v1/smart_wallet_tags",
-                headers=_supabase_headers(), params={"select": "address,tag"},
+                headers=_supabase_headers(), params={"address": f"in.({','.join(all_buyers)})", "select": "address,tag"},
             )
             tags_res.raise_for_status()
             for row in tags_res.json():
-                if row["address"] in all_buyers:
-                    tracked_by_address.setdefault(row["address"], []).append(row["tag"])
+                tracked_by_address.setdefault(row["address"], []).append(row["tag"])
         except httpx.HTTPError:
             logger.exception("Arc mint radar: tracked-wallet lookup failed")
 
