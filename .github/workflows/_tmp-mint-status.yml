@@ -7,13 +7,18 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - name: Dry-run the ended-mint check against today's real tracked-wallet mints
+      - name: Probe why Ink reports no last-mint time
         run: |
-          curl -s "https://www.dashhq.site/cron/recent-convergence-summary?hours=24&limit=500" \
-            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" -o summary.json
-          slugs=$(jq -r '[.slugs[].slug] | .[0:14] | join(",")' summary.json)
-          echo "Candidate slugs (today's tracked-wallet mints): $slugs"
           curl -s -G "https://www.dashhq.site/cron/check-mint-status" \
-            --data-urlencode "slugs=${slugs},founding-charter" \
+            --data-urlencode "slugs=lunas-luminous-dream" \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" -o status.json
-          jq -r '.results[] | [.slug, (.chain // "-"), ((.last_mint_age_seconds // -1) | floor | tostring), (.mints_last_10m // "-" | tostring), (.mints_last_30m // "-" | tostring), (.mints_last_60m // "-" | tostring), ((.total_supply // "-") | tostring), ((.max_supply // "-") | tostring), (.would_block | tostring), (.reason // .error // "")] | @tsv' status.json | column -t -s $'\t'
+          echo "--- diagnostic row ---"; cat status.json; echo
+          contract=$(jq -r '.results[0].contract' status.json)
+          echo "--- check-collection-minters (asc, maxCount 1000, contractAddresses+fromAddress) on ink for $contract ---"
+          curl -s -G "https://www.dashhq.site/cron/check-collection-minters" \
+            --data-urlencode "contract=$contract" --data-urlencode "chain=ink" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" | head -c 900; echo
+          echo "--- same check on robinhood for comparison (useless-bankers) ---"
+          curl -s -G "https://www.dashhq.site/cron/check-mint-status" \
+            --data-urlencode "slugs=useless-bankers" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" | head -c 700; echo
