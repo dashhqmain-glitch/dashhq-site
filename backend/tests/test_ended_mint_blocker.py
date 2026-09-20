@@ -483,3 +483,113 @@ async def test_block_timestamp_returns_none_for_bad_input_or_responses():
         assert await main._alchemy_block_timestamp(FakeClient(FakeRes(200, {"result": {"timestamp": "0x1"}})), "ink", "20") is None
     finally:
         settings.alchemy_api_key = ""
+
+
+# ── wired into the Alert Tracker ("N Wallet Minting X") ─────────────────
+
+def _tracker_collection():
+    return {"name": "Test Collection", "slug": "test-collection", "floor": 0.05, "symbol": "ETH", "chain": "ethereum",
+            "openseaUrl": "https://opensea.io/collection/test-collection", "image": None}
+
+
+def _tracker_score(**overrides):
+    data = {"tier": "red", "blocked": False, "has_real_activity": True, "has_timeliness_signal": True}
+    data.update(overrides)
+    return data
+
+
+_TRACKER_HITS = [{"address": "0xa", "tag": "REALCOIN", "rank": None, "pnl": None}]
+
+
+async def _run_tracker(ended_check=None, score=None, patch_ended=True):
+    posted, recorded = [], []
+
+    async def fake_already(client, slug):
+        return False
+
+    async def fake_wash(client, slug):
+        return True
+
+    async def fake_post(client, channel_id, embed, content=None, components=None):
+        posted.append(embed["title"])
+        return True
+
+    async def record(*a, **k):
+        recorded.append(1)
+
+    patches = [
+        patch.object(main, "_alert_tracker_already_posted", new=fake_already),
+        patch.object(main, "_nft_scope_clears_wash_check", new=fake_wash),
+        patch.object(main, "_post_channel_message", new=fake_post),
+        patch.object(main, "_nft_scope_mark_posted", new=record),
+        patch.object(main, "_nft_scope_record_call_buyers", new=record),
+        patch.object(main, "_alert_tracker_record_call", new=record),
+    ]
+    if patch_ended:
+        patches.append(patch.object(main, "_mint_has_ended", new=ended_check))
+    for p in patches:
+        p.start()
+    try:
+        result = await main._nft_scope_maybe_post_tracked_convergence(
+            main.httpx.AsyncClient(), "slug", _tracker_collection(), _TRACKER_HITS, score or _tracker_score(),
+        )
+    finally:
+        for p in patches:
+            p.stop()
+    return result, posted, recorded
+
+
+async def test_alert_tracker_withholds_a_post_when_the_mint_has_ended():
+    async def ended(client, c):
+        return True, "sold out (4,444 of 4,444 minted)"
+
+    result, posted, recorded = await _run_tracker(ended)
+    assert result is False
+    assert posted == []
+    assert recorded == []  # never counted as a call it didn't make
+
+
+async def test_alert_tracker_still_posts_when_the_mint_is_live():
+    async def live(client, c):
+        return False, None
+
+    result, posted, recorded = await _run_tracker(live)
+    assert result is True
+    assert len(posted) == 1
+    assert recorded  # the call is recorded exactly as before
+
+
+async def test_alert_tracker_still_posts_when_the_ended_check_itself_breaks():
+    # Fail open end to end: a broken blocker must never silence a real mint.
+    async def boom(*a, **k):
+        raise RuntimeError("alchemy exploded")
+
+    with patch.object(main, "_mint_status_signals", new=boom):
+        result, posted, _ = await _run_tracker(patch_ended=False)
+    assert result is True
+    assert len(posted) == 1
+
+
+async def test_alert_tracker_does_not_pay_for_the_ended_check_on_posts_that_fail_earlier_gates():
+    # The check costs an Alchemy call - it must only run for a post that
+    # would otherwise actually go out.
+    async def must_not_run(client, c):
+        raise AssertionError("ended-mint lookup ran for a post another gate had already rejected")
+
+    result, posted, _ = await _run_tracker(must_not_run, score=_tracker_score(blocked=True))
+    assert result is False
+    assert posted == []
+
+
+async def test_mint_still_live_reports_the_reason_it_blocked(caplog):
+    import logging
+
+    async def ended(client, c):
+        return True, "no one has minted in the last 254 min"
+
+    with patch.object(main, "_mint_has_ended", new=ended), caplog.at_level(logging.INFO):
+        live = await main._mint_still_live(object(), "gas-ghosts", collection(), "Alert Tracker")
+
+    assert live is False
+    assert "withholding gas-ghosts" in caplog.text
+    assert "no one has minted in the last 254 min" in caplog.text

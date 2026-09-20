@@ -596,16 +596,66 @@ async def test_alchemy_wallet_recent_mints_parses_hex_token_id_and_skips_malform
             return None
         return {"transfers": [
             {"rawContract": {"address": "0xCONTRACT"}, "tokenId": "0x2a", "metadata": {"blockTimestamp": "2026-01-01T00:00:00Z"}},
-            {"rawContract": {"address": "0xdef"}, "tokenId": "7", "metadata": {}},
+            {"rawContract": {"address": "0xdef"}, "tokenId": "7", "metadata": {}, "blockNum": "0x10"},
             {"rawContract": None, "tokenId": "1"},  # missing contract - skipped
         ]}
 
-    with patch.object(main, "_alchemy_rpc", new=fake_rpc):
+    async def fake_block_ts(client, chain, block_num):
+        assert (chain, block_num) == ("ethereum", "0x10")
+        return 1_700_000_000.0
+
+    with patch.object(main, "_alchemy_rpc", new=fake_rpc), patch.object(main, "_alchemy_block_timestamp", new=fake_block_ts):
         mints = await main._alchemy_wallet_recent_mints(main.httpx.AsyncClient(), "0xwallet")
 
     assert {"chain": "ethereum", "contract": "0xcontract", "token_id": "42", "event_at": "2026-01-01T00:00:00Z"} in mints
     assert any(m["contract"] == "0xdef" and m["token_id"] == "7" for m in mints)
     assert len(mints) == 2  # the malformed (no contract) transfer never made it in
+
+
+async def test_alchemy_wallet_recent_mints_uses_the_real_block_time_when_metadata_is_null():
+    # Real bug, confirmed live: Ink returns metadata: null, and this used to
+    # fall back to "now" - so a mint from weeks ago was logged as just
+    # minted, sailed past the 24h recency guard, and got posted as live.
+    block_lookups = []
+
+    async def fake_rpc(client, chain, method, params):
+        if chain != "ink":
+            return None
+        return {"transfers": [
+            {"rawContract": {"address": "0xOLD"}, "tokenId": "1", "metadata": None, "blockNum": "0x2000"},
+            {"rawContract": {"address": "0xOLD"}, "tokenId": "2", "metadata": None, "blockNum": "0x2000"},
+        ]}
+
+    weeks_ago = main.time.time() - 26 * 86400
+
+    async def fake_block_ts(client, chain, block_num):
+        block_lookups.append((chain, block_num))
+        return weeks_ago
+
+    with patch.object(main, "_alchemy_rpc", new=fake_rpc), patch.object(main, "_alchemy_block_timestamp", new=fake_block_ts):
+        mints = await main._alchemy_wallet_recent_mints(main.httpx.AsyncClient(), "0xwallet")
+
+    assert len(mints) == 2
+    for m in mints:
+        stamped = main.datetime.fromisoformat(m["event_at"]).timestamp()
+        assert abs(stamped - weeks_ago) < 2  # the real time, not "now"
+        assert main.time.time() - stamped > 25 * 86400
+    assert block_lookups == [("ink", "0x2000")]  # same block resolved once, not per transfer
+
+
+async def test_alchemy_wallet_recent_mints_skips_a_mint_whose_time_cannot_be_resolved():
+    # Inventing "now" is what let old mints pass as fresh - an unresolvable
+    # time means the mint is skipped, never guessed.
+    async def fake_rpc(client, chain, method, params):
+        if chain != "ink":
+            return None
+        return {"transfers": [{"rawContract": {"address": "0xunknown"}, "tokenId": "1", "metadata": None, "blockNum": "0x1"}]}
+
+    async def fake_block_ts(client, chain, block_num):
+        return None
+
+    with patch.object(main, "_alchemy_rpc", new=fake_rpc), patch.object(main, "_alchemy_block_timestamp", new=fake_block_ts):
+        assert await main._alchemy_wallet_recent_mints(main.httpx.AsyncClient(), "0xwallet") == []
 
 
 async def test_tracked_wallet_watch_sweep_skips_when_alchemy_not_configured():

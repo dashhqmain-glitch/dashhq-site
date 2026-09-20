@@ -1383,3 +1383,86 @@ async def test_rapid_activity_still_checked_even_when_stats_sales24h_reads_zero(
     # own when the stats field hasn't caught up yet.
     assert posted == ["stale-stats-mint"]
     assert any("verified sale" in t for t in posted_titles)
+
+
+async def _run_fresh_mint_scan(ended_verdict):
+    # A fresh-mint candidate that clears every other gate (strong
+    # collection, wash-clean qualifying burst) - the only variable is
+    # whether its mint has ended.
+    _config_channel()
+    state: dict = {}
+    posted_titles: list[str] = []
+    ended_checked: list[str] = []
+
+    async def fake_opensea_get(client, path, params=None):
+        if path == "/collections":
+            if params["order_by"] == "created_date" and params["chain"] == "ethereum":
+                return {"collections": [{"collection": "just-minted"}]}
+            return {"collections": []}
+        if path.startswith("/events/collection/"):
+            return _qualifying_sale_events()
+        raise AssertionError(f"unexpected {path}")
+
+    async def fake_seen_has(client, slug, cooldown_seconds=None):
+        return False
+
+    async def fake_mark_seen(client, slug):
+        return None
+
+    async def fake_collection_core(slug):
+        return _strong_collection(slug)
+
+    async def fake_top_offer(client, slug):
+        return None
+
+    async def fake_wash_clean(client, slug):
+        return True
+
+    async def fake_tracked_slugs(client):
+        return []
+
+    async def fake_alert_state_get(client, slug, alert_type):
+        return state.get((slug, alert_type))
+
+    async def fake_alert_state_set(client, slug, alert_type, value):
+        state[(slug, alert_type)] = {"last_alerted_at": datetime.now(timezone.utc).isoformat()}
+
+    async def fake_post(client, channel_id, embed, content=None, components=None):
+        posted_titles.append(embed["title"])
+        return True
+
+    async def fake_ended(client, c):
+        ended_checked.append(c["slug"])
+        return ended_verdict
+
+    with patch.object(main, "_opensea_get", new=fake_opensea_get), \
+         patch.object(main, "_nft_mint_radar_recently_seen", new=fake_seen_has), \
+         patch.object(main, "_nft_mint_radar_mark_seen", new=fake_mark_seen), \
+         patch.object(main, "_nft_collection_core", new=fake_collection_core), \
+         patch.object(main, "_opensea_get_top_offer", new=fake_top_offer), \
+         patch.object(main, "_nft_scope_clears_wash_check", new=fake_wash_clean), \
+         patch.object(main, "_nft_poll_tracked_slugs", new=fake_tracked_slugs), \
+         patch.object(main, "_nft_alert_state_get", new=fake_alert_state_get), \
+         patch.object(main, "_nft_alert_state_set", new=fake_alert_state_set), \
+         patch.object(main, "_mint_has_ended", new=fake_ended), \
+         patch.object(main, "_post_channel_message", new=fake_post):
+        async with main.httpx.AsyncClient() as client:
+            posted = await main._nft_scope_scan(client)
+    return posted, posted_titles, ended_checked
+
+
+async def test_fresh_mint_pass_still_posts_a_mint_that_is_live():
+    posted, titles, ended_checked = await _run_fresh_mint_scan((False, None))
+    assert posted == ["just-minted"]
+    assert any("New Mint" in t for t in titles)
+    assert ended_checked == ["just-minted"]
+
+
+async def test_fresh_mint_pass_withholds_a_new_mint_post_once_the_mint_has_ended():
+    # The complaint this fixes: "New Mint" posts for mints that had already
+    # ended. Everything else about this candidate qualifies - only the
+    # ended-mint gate can be what stops it.
+    posted, titles, ended_checked = await _run_fresh_mint_scan((True, "sold out (500 of 500 minted)"))
+    assert posted == []
+    assert not any("New Mint" in t for t in titles)
+    assert ended_checked == ["just-minted"]

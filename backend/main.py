@@ -10031,6 +10031,12 @@ async def _nft_scope_maybe_post_tracked_convergence(client: httpx.AsyncClient, s
     # this exact gate blocked it anyway before this fix.
     if not _nft_scope_worth_posting(score, ignore_negligible_value=True):
         return False
+    # Last, after every cheaper gate: this one costs an Alchemy lookup. The
+    # embed below tells members these wallets are minting NOW and hands
+    # them a Mint Link - nothing above ever checked that the mint was still
+    # open, so sold-out and long-closed mints kept getting posted.
+    if not await _mint_still_live(client, slug, c, "Alert Tracker"):
+        return False
     ping = f"<@&{settings.discord_minting_now_role_id}>" if settings.discord_minting_now_role_id else None
     uncategorized = [h["address"] for h in tracked_wallet_hits if not h.get("category")]
     estimated, track_records, event_times, record_stats = await asyncio.gather(
@@ -10410,6 +10416,15 @@ async def _mint_has_ended(client: httpx.AsyncClient, c: dict) -> tuple[bool, str
     return verdict
 
 
+async def _mint_still_live(client: httpx.AsyncClient, slug: str, c: dict, surface: str) -> bool:
+    # The single gate every mint-claiming post goes through. Fails open:
+    # only positive evidence the mint ended returns False.
+    ended, reason = await _mint_has_ended(client, c)
+    if ended:
+        logger.info("%s: withholding %s - its mint has ended (%s)", surface, slug, reason)
+    return not ended
+
+
 def _wallet_poll_bucket(address: str, num_buckets: int) -> int:
     return int(hashlib.sha256(address.encode()).hexdigest(), 16) % num_buckets
 
@@ -10427,6 +10442,7 @@ async def _alchemy_wallet_recent_mints(client: httpx.AsyncClient, address: str) 
 
     results = await asyncio.gather(*[fetch(chain) for chain in _TRACKED_WALLET_ALCHEMY_CHAINS])
     mints = []
+    block_times: dict[tuple[str, str | None], float | None] = {}
     for chain, result in results:
         if not result:
             continue
@@ -10439,7 +10455,23 @@ async def _alchemy_wallet_recent_mints(client: httpx.AsyncClient, address: str) 
                 token_id = str(int(raw_token_id, 16)) if isinstance(raw_token_id, str) and raw_token_id.startswith("0x") else str(raw_token_id)
             except ValueError:
                 continue
-            event_at = (transfer.get("metadata") or {}).get("blockTimestamp") or datetime.now(timezone.utc).isoformat()
+            event_at = (transfer.get("metadata") or {}).get("blockTimestamp")
+            if not event_at:
+                # Real bug, confirmed live: Ink returns transfers with
+                # `metadata: null`, and this used to fall back to "now" -
+                # so EVERY Ink mint the sweep found was logged as if it
+                # had just happened, however old. A mint from 26 days ago
+                # sailed past the 24h recency guard downstream and got
+                # posted as a live call. The chain itself knows when the
+                # block was produced, so ask it; if that can't be
+                # resolved, skip the mint rather than invent a time.
+                block_num = transfer.get("blockNum")
+                if (chain, block_num) not in block_times:
+                    block_times[(chain, block_num)] = await _alchemy_block_timestamp(client, chain, block_num)
+                block_ts = block_times[(chain, block_num)]
+                if block_ts is None:
+                    continue
+                event_at = datetime.fromtimestamp(block_ts, tz=timezone.utc).isoformat()
             mints.append({"chain": chain, "contract": contract.lower(), "token_id": token_id, "event_at": event_at})
     return mints
 
@@ -11328,6 +11360,11 @@ async def _nft_scope_scan(client: httpx.AsyncClient, per_chain_limit: int = 30) 
                     and _nft_scope_worth_posting(score)
                     and not await _nft_scope_recently_posted(client, slug)
                     and await _nft_scope_clears_wash_check(client, slug)
+                    # Labeled "New Mint" - a mint that already ended isn't one.
+                    # A collection that's hot on the secondary market still
+                    # surfaces through the trending/momentum passes, which
+                    # deliberately don't have this gate.
+                    and await _mint_still_live(client, slug, c, "NFT Scope new-mint")
                 ):
                     estimated_target = await _nft_scope_estimated_target(client, c.get("floor"))
                     delivered = await _post_channel_message(client, settings.discord_nft_scope_channel_id, _nft_scope_embed(c, score, top_offer_amount, "fresh", rapid_activity=rapid_activity, estimated_target=estimated_target))
