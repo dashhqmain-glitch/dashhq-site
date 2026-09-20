@@ -10421,7 +10421,10 @@ async def _mint_still_live(client: httpx.AsyncClient, slug: str, c: dict, surfac
     # only positive evidence the mint ended returns False.
     ended, reason = await _mint_has_ended(client, c)
     if ended:
-        logger.info("%s: withholding %s - its mint has ended (%s)", surface, slug, reason)
+        # warning, not info: the app never configures logging, so the stdlib
+        # default (WARNING) silently drops info - and a blocker whose
+        # decisions can't be seen in production can't be trusted or tuned.
+        logger.warning("%s: withholding %s - its mint has ended (%s)", surface, slug, reason)
     return not ended
 
 
