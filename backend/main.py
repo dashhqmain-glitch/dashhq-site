@@ -1566,7 +1566,7 @@ async def diagnose_slug_posting(request: Request, slug: str):
 
 
 @app.get("/cron/check-mint-status")
-async def check_mint_status(request: Request, slugs: str):
+async def check_mint_status(request: Request, slugs: str, probe: bool = False):
     # Read-only dry run of the ended-mint blocker: reports every raw signal
     # plus the verdict for each slug, without posting or blocking anything.
     # The way to answer "would the bot have posted this ended mint" (or
@@ -1588,7 +1588,7 @@ async def check_mint_status(request: Request, slugs: str):
             ended, reason = _mint_ended_verdict(signals["last_mint_age_seconds"], signals["total_supply"], signals["max_supply"])
             stamps = signals.pop("recent_mint_timestamps")
             now = time.time()
-            results.append({
+            row = {
                 "slug": slug, **signals,
                 "sampled_mints": len(stamps),
                 "mints_last_10m": sum(1 for t in stamps if now - t <= 600),
@@ -1596,7 +1596,10 @@ async def check_mint_status(request: Request, slugs: str):
                 "mints_last_60m": sum(1 for t in stamps if now - t <= 3600),
                 "quiet_window_seconds": _MINT_ENDED_QUIET_SECONDS,
                 "would_block": ended, "reason": reason,
-            })
+            }
+            if probe and signals["alchemy_chain"] and signals["contract"]:
+                row["query_probe"] = await _mint_query_probe(client, signals["alchemy_chain"], signals["contract"])
+            results.append(row)
     return {"results": results}
 
 
@@ -10286,6 +10289,43 @@ async def _mint_status_signals(client: httpx.AsyncClient, c: dict, sample: int =
     # 0 is what an open-edition contract reports for "no cap" - not a real limit.
     signals["max_supply"] = next((m for m in max_candidates if m), None)
     return signals
+
+
+async def _mint_query_probe(client: httpx.AsyncClient, alchemy_chain: str, contract: str) -> dict:
+    # Diagnostic only: _alchemy_rpc deliberately swallows every non-200 and
+    # JSON-RPC error as None (right for the live pipeline), which made "this
+    # chain returned no mints" indistinguishable from "this chain rejected
+    # my query". This reports Alchemy's real status and body for each query
+    # shape, so a chain-specific quirk shows up as an actual message.
+    subdomain = _TRACKED_WALLET_ALCHEMY_CHAINS.get(alchemy_chain)
+    if not settings.alchemy_api_key or not subdomain:
+        return {"error": "no Alchemy key or unsupported chain"}
+    base = {"fromAddress": _TRACKED_WALLET_NULL_ADDRESS, "contractAddresses": [contract], "category": ["erc721", "erc1155"]}
+    variants = {
+        "desc_100_meta": {**base, "order": "desc", "maxCount": hex(100), "withMetadata": True},
+        "desc_1_meta": {**base, "order": "desc", "maxCount": hex(1), "withMetadata": True},
+        "asc_1_meta": {**base, "order": "asc", "maxCount": hex(1), "withMetadata": True},
+        "desc_1_no_meta": {**base, "order": "desc", "maxCount": hex(1)},
+        "desc_1_erc721_only": {**base, "category": ["erc721"], "order": "desc", "maxCount": hex(1), "withMetadata": True},
+    }
+    out = {}
+    for name, params in variants.items():
+        try:
+            res = await client.post(
+                f"https://{subdomain}.g.alchemy.com/v2/{settings.alchemy_api_key}",
+                json={"jsonrpc": "2.0", "id": 1, "method": "alchemy_getAssetTransfers", "params": [params]},
+            )
+            body = res.json() if res.headers.get("content-type", "").startswith("application/json") else res.text
+        except (httpx.HTTPError, ValueError) as e:
+            out[name] = {"error": str(e)[:200]}
+            continue
+        transfers = ((body or {}).get("result") or {}).get("transfers") if isinstance(body, dict) else None
+        out[name] = {
+            "http": res.status_code,
+            "transfers_returned": len(transfers) if transfers is not None else None,
+            "error": (body.get("error") if isinstance(body, dict) else str(body)[:200]),
+        }
+    return out
 
 
 def _mint_ended_verdict(last_mint_age_seconds: float | None, total_supply: int | None, max_supply: int | None) -> tuple[bool, str | None]:

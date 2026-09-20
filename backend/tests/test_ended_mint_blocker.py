@@ -292,3 +292,76 @@ async def test_check_mint_status_reports_signals_rates_and_the_verdict():
     assert live["would_block"] is True and "sold out" in live["reason"]
     assert "recent_mint_timestamps" not in live
     assert missing == {"slug": "missing", "error": "collection lookup failed (404)"}
+
+
+# ── _mint_query_probe / probe=true ──────────────────────────────────────
+
+async def test_query_probe_reports_each_variants_real_status_and_error():
+    settings.alchemy_api_key = "key"
+    seen = []
+
+    class FakeHeaders(dict):
+        pass
+
+    class ProbeRes:
+        def __init__(self, status, body):
+            self.status_code = status
+            self._body = body
+            self.headers = {"content-type": "application/json"}
+            self.text = str(body)
+
+        def json(self):
+            return self._body
+
+    class FakeClient:
+        async def post(self, url, json=None):
+            params = json["params"][0]
+            seen.append((params["order"], params["maxCount"], "withMetadata" in params, tuple(params["category"])))
+            if params["order"] == "desc":
+                return ProbeRes(200, {"error": {"message": "order desc unsupported on this network"}})
+            return ProbeRes(200, {"result": {"transfers": [{"to": "0x1"}]}})
+
+    try:
+        out = await main._mint_query_probe(FakeClient(), "ink", "0xabc")
+    finally:
+        settings.alchemy_api_key = ""
+
+    assert set(out) == {"desc_100_meta", "desc_1_meta", "asc_1_meta", "desc_1_no_meta", "desc_1_erc721_only"}
+    assert out["asc_1_meta"] == {"http": 200, "transfers_returned": 1, "error": None}
+    assert out["desc_1_meta"]["transfers_returned"] is None
+    assert out["desc_1_meta"]["error"] == {"message": "order desc unsupported on this network"}
+    assert ("desc", hex(100), True, ("erc721", "erc1155")) in seen
+    assert ("desc", hex(1), False, ("erc721", "erc1155")) in seen
+
+
+async def test_query_probe_is_a_no_op_without_a_key_or_supported_chain():
+    settings.alchemy_api_key = ""
+    assert await main._mint_query_probe(object(), "ink", "0xabc") == {"error": "no Alchemy key or unsupported chain"}
+
+
+async def test_check_mint_status_only_probes_when_asked():
+    settings.cron_secret = "s"
+    probed = []
+
+    async def fake_core(slug):
+        return collection(contract="0xprobe", chain="ink")
+
+    async def fake_signals(client, c, sample=1):
+        return {"chain": "ink", "alchemy_chain": "ink", "contract": "0xprobe", "last_mint_age_seconds": None,
+                "recent_mint_timestamps": [], "total_supply": None, "max_supply": None}
+
+    async def fake_probe(client, chain, contract):
+        probed.append((chain, contract))
+        return {"desc_1_meta": {"http": 200}}
+
+    try:
+        with patch.object(main, "_nft_collection_core", new=fake_core), patch.object(main, "_mint_status_signals", new=fake_signals), \
+             patch.object(main, "_mint_query_probe", new=fake_probe):
+            plain = await main.check_mint_status(FakeRequest("Bearer s"), slugs="x")
+            probed_result = await main.check_mint_status(FakeRequest("Bearer s"), slugs="x", probe=True)
+    finally:
+        settings.cron_secret = "test-cron-secret"
+
+    assert "query_probe" not in plain["results"][0]
+    assert probed_result["results"][0]["query_probe"] == {"desc_1_meta": {"http": 200}}
+    assert probed == [("ink", "0xprobe")]
