@@ -315,17 +315,20 @@ create table if not exists nft_sale_events_log (
 create index if not exists nft_sale_events_log_buyer_idx on nft_sale_events_log (buyer);
 create index if not exists nft_sale_events_log_token_idx on nft_sale_events_log (slug, token_id, event_at);
 
--- Serves the "recent mints" lookups (event_at >= X AND seller = null address,
--- ordered newest-first): the Alert Tracker recheck watchdog and
--- /cron/recent-convergence-summary. Neither the primary key nor the two
--- indexes above lead with event_at or seller, so this had to scan and sort
--- the whole table, and it intermittently came back from Supabase as an
--- HTTP 500 (confirmed in production logs: the recheck's fetch failed with
--- "Failed to fetch pending Alert Tracker convergence slugs"). Partial on
--- mint rows only, so it stays small - mints are a fraction of what's logged.
-create index if not exists nft_sale_events_log_mints_event_at_idx
-  on nft_sale_events_log (event_at desc)
-  where seller = '0x0000000000000000000000000000000000000000';
+-- Serves every time-window lookup on this table: the poll's own cleanup
+-- (event_at < cutoff), the Alert Tracker recheck watchdog and
+-- /cron/recent-convergence-summary (event_at >= X, newest first), and the
+-- 3-day/30-day windows in nft_wallet_recent_activity. Neither the primary
+-- key nor the two indexes above lead with event_at, so all of these had to
+-- scan the whole table (839k rows before it was trimmed), and the recheck's
+-- fetch intermittently came back from Supabase as an HTTP 500 (seen in
+-- production logs: "Failed to fetch pending Alert Tracker convergence
+-- slugs"). The timeout is the likely cause, not yet confirmed - the recheck
+-- now logs Supabase's error body when it fails. A plain btree serves
+-- "order by event_at desc" as a backward scan, so one index covers both
+-- directions.
+create index if not exists nft_sale_events_log_event_at_idx
+  on nft_sale_events_log (event_at);
 
 alter table nft_sale_events_log enable row level security;
 

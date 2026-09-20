@@ -11980,16 +11980,31 @@ async def _prune_old_snapshots(client: httpx.AsyncClient) -> bool:
             headers=_supabase_headers(prefer="return=minimal"),
             params={"captured_at": f"lt.{cutoff}"},
         )
-        return res.status_code < 300
+        return _prune_result(res, "nft_snapshot_history")
     except httpx.HTTPError:
         logger.exception("nft-poll: snapshot pruning failed")
         return False
 
 
-_SALE_EVENTS_LOG_RETENTION_DAYS = 180  # much longer than snapshot history on purpose - a wallet's track record is only as
-# good as how much realized-trade history backs it, and pruning this as aggressively as the 5-min snapshot table would
-# erase months of proof behind an otherwise-earned win rate. Still bounded, not literally forever - nft_sale_events_log
-# has no other cleanup and would otherwise grow unbounded exactly like nft_snapshot_history did before this pattern existed.
+# Was 180. Measured against the real database: at ~4,700 rows/day and ~495 bytes/row (table + its three indexes),
+# 180 days settles at ~415 MB - by itself most of the Supabase Free Plan's 500 MB cap, which is what pushed the project
+# past it (0.54 / 0.5 GB) and toward read-only mode. 90 days settles at ~210 MB, leaving real headroom, while still
+# being a long realized-trade history: nft_wallet_recent_activity only looks back 30 days, and the trade pairing behind a
+# wallet's win rate needs a buy and its later sell inside the window. Still bounded, not literally forever.
+_SALE_EVENTS_LOG_RETENTION_DAYS = 90
+# nft_scope_call_buyers is tiny (~5 MB) and is the raw evidence behind each wallet's NFT-Scope track record, so it keeps
+# the original 180-day window - it was only ever sharing the sale log's constant by coincidence.
+_CALL_BUYERS_RETENTION_DAYS = 180
+
+
+def _prune_result(res, table: str) -> bool:
+    # A rejected delete used to come back as a bare False that nothing looked at
+    # (the poll just puts it in its response JSON), so a table that stopped
+    # being pruned would only ever have been noticed by its size.
+    if res.status_code >= 300:
+        logger.error("nft-poll: pruning %s was rejected: HTTP %s %s", table, res.status_code, getattr(res, "text", "")[:300])
+        return False
+    return True
 
 
 async def _prune_old_sale_events(client: httpx.AsyncClient) -> bool:
@@ -12000,7 +12015,7 @@ async def _prune_old_sale_events(client: httpx.AsyncClient) -> bool:
             headers=_supabase_headers(prefer="return=minimal"),
             params={"event_at": f"lt.{cutoff}"},
         )
-        return res.status_code < 300
+        return _prune_result(res, "nft_sale_events_log")
     except httpx.HTTPError:
         logger.exception("nft-poll: sale event log pruning failed")
         return False
@@ -12014,14 +12029,14 @@ async def _prune_old_call_buyers(client: httpx.AsyncClient) -> bool:
     # but "slower" isn't "never." Same 180-day window as the sale events
     # log, for the same reason: a wallet's NFT-Scope-specific track
     # record needs real history behind it to mean anything.
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=_SALE_EVENTS_LOG_RETENTION_DAYS)).isoformat()
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=_CALL_BUYERS_RETENTION_DAYS)).isoformat()
     try:
         res = await client.delete(
             f"{settings.supabase_url}/rest/v1/nft_scope_call_buyers",
             headers=_supabase_headers(prefer="return=minimal"),
             params={"called_at": f"lt.{cutoff}"},
         )
-        return res.status_code < 300
+        return _prune_result(res, "nft_scope_call_buyers")
     except httpx.HTTPError:
         logger.exception("nft-poll: call buyers pruning failed")
         return False
