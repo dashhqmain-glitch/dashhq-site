@@ -269,8 +269,10 @@ async def test_check_mint_status_reports_signals_rates_and_the_verdict():
             raise main.HTTPException(status_code=404, detail="Collection not found")
         return collection(contract="0xdiag")
 
+    samples_asked_for = []
+
     async def fake_signals(client, c, sample=1):
-        assert sample == 100
+        samples_asked_for.append(sample)
         stamps = [now - 30, now - 400, now - 1500, now - 3000, now - 9000]
         return {
             "chain": "ethereum", "alchemy_chain": "ethereum", "contract": "0xdiag",
@@ -290,6 +292,8 @@ async def test_check_mint_status_reports_signals_rates_and_the_verdict():
     assert live["mints_last_30m"] == 3
     assert live["mints_last_60m"] == 4
     assert live["would_block"] is True and "sold out" in live["reason"]
+    assert live["passes_live_gate"] is False  # the exact wrapper production uses agrees with the verdict
+    assert samples_asked_for == [100, 1]  # the diagnostic samples deeply; the live gate asks for just the newest mint
     assert "recent_mint_timestamps" not in live
     assert missing == {"slug": "missing", "error": "collection lookup failed (404)"}
 

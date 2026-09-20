@@ -1596,6 +1596,10 @@ async def check_mint_status(request: Request, slugs: str, probe: bool = False):
                 "mints_last_60m": sum(1 for t in stamps if now - t <= 3600),
                 "quiet_window_seconds": _MINT_ENDED_QUIET_SECONDS,
                 "would_block": ended, "reason": reason,
+                # Runs the exact wrapper the live posting paths use (fail-open
+                # handling, verdict cache, and the production log line) on
+                # real data, with no way to post anything.
+                "passes_live_gate": await _mint_still_live(client, slug, c, "dry-run"),
             }
             if probe and signals["alchemy_chain"] and signals["contract"]:
                 row["query_probe"] = await _mint_query_probe(client, signals["alchemy_chain"], signals["contract"])
@@ -9782,6 +9786,12 @@ async def _alert_tracker_pending_convergence_slugs(client: httpx.AsyncClient, ho
             "select": "slug,buyer,event_at", "order": "event_at.desc", "limit": str(_ALERT_TRACKER_RECHECK_EVENTS_LIMIT),
         },
     )
+    if events_res.status_code >= 400:
+        # This query has been failing most poll cycles in production with a
+        # bare HTTP 500, and raise_for_status() alone throws away the one
+        # thing that says why (PostgREST's error body - e.g. a statement
+        # timeout reads very differently from a bad query). Keep it.
+        logger.error("Recheck mint-events query failed: HTTP %s %s", events_res.status_code, getattr(events_res, "text", "")[:400])
     events_res.raise_for_status()
     events = events_res.json()
     if not events:

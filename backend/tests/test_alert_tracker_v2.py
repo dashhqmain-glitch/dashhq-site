@@ -930,6 +930,45 @@ async def test_pending_convergence_slugs_finds_a_slug_past_the_minimum_not_yet_p
     assert result == {"pending-slug": "2026-01-01T00:05:00+00:00"}  # the newer (first-seen, event_at.desc) timestamp
 
 
+async def test_pending_convergence_query_failure_logs_the_response_body_and_still_raises(caplog):
+    # This query has been failing most poll cycles in production with a bare
+    # HTTP 500. raise_for_status() alone discards the one thing that says
+    # why, so the body has to be logged - and logging it must never replace
+    # the real HTTPStatusError the caller's except clause depends on.
+    import logging
+
+    class BodyRes(FakeRes):
+        def __init__(self):
+            super().__init__(500, {})
+            self.text = '{"code":"57014","message":"canceling statement due to statement timeout"}'
+
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return BodyRes()
+
+    with caplog.at_level(logging.ERROR):
+        try:
+            await main._alert_tracker_pending_convergence_slugs(FakeClient(), hours=24)
+            assert False, "should have raised"
+        except main.httpx.HTTPStatusError:
+            pass
+
+    assert "HTTP 500" in caplog.text
+    assert "57014" in caplog.text and "statement timeout" in caplog.text
+
+
+async def test_pending_convergence_query_failure_without_a_body_still_raises_the_real_error():
+    class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(500, {})  # no .text at all
+
+    try:
+        await main._alert_tracker_pending_convergence_slugs(FakeClient(), hours=24)
+        assert False, "should have raised"
+    except main.httpx.HTTPStatusError:
+        pass
+
+
 async def test_pending_convergence_slugs_excludes_ones_already_posted():
     class FakeClient:
         async def get(self, url, headers=None, params=None):
