@@ -6577,8 +6577,8 @@ async def _nft_alert_state_get(client: httpx.AsyncClient, slug: str, alert_type:
     return rows[0] if rows else None
 
 
-async def _nft_alert_state_set(client: httpx.AsyncClient, slug: str, alert_type: str, value: float) -> None:
-    await client.post(
+async def _nft_alert_state_set(client: httpx.AsyncClient, slug: str, alert_type: str, value: float) -> bool:
+    res = await client.post(
         f"{settings.supabase_url}/rest/v1/nft_alert_state",
         headers=_supabase_headers(prefer="resolution=merge-duplicates,return=minimal"),
         json=[{
@@ -6588,6 +6588,72 @@ async def _nft_alert_state_set(client: httpx.AsyncClient, slug: str, alert_type:
             "last_value": value,
         }],
     )
+    # Whether Supabase actually accepted the write. Almost every caller
+    # ignores this (best-effort bookkeeping), which is exactly the hazard
+    # _db_writable guards against below.
+    status = getattr(res, "status_code", None)
+    return status is None or status < 300
+
+
+# ── Refusing to post when the database refuses writes ────────────────────
+# Real, imminent risk: the Free Plan's database quota is 500 MB and past it
+# Supabase puts the project in read-only mode - every write is rejected
+# while reads keep working. Almost every write in this file is
+# fire-and-forget, so the bot would carry on posting to Discord while
+# silently failing to save its "already posted" records (alert_tracker_calls,
+# nft_alert_state, the mint-radar seen list). A hot mint fires dozens of
+# webhook events, and each one would then re-post the same alert. Posting
+# something you can't record having posted is worse than not posting, so
+# both the poll cycle and the Alert Tracker check that a write is actually
+# accepted first.
+#
+# Only a POSITIVE rejection counts. A network error says nothing about
+# whether writes are refused, so it fails open like every other check here.
+_DB_WRITABLE_CACHE_TTL_SECONDS = 60
+_DB_WRITE_ALERT_COOLDOWN_SECONDS = 3600
+_db_writable_cache: tuple[float, bool] | None = None
+# In memory, not nft_alert_state like the other alert cooldowns: that table
+# is the very thing that can't be written when this fires.
+_db_write_alert_last_sent = 0.0
+
+
+async def _db_writable(client: httpx.AsyncClient) -> bool:
+    global _db_writable_cache
+    now = time.time()
+    if _db_writable_cache and now - _db_writable_cache[0] < _DB_WRITABLE_CACHE_TTL_SECONDS:
+        return _db_writable_cache[1]
+    try:
+        accepted = await _nft_alert_state_set(client, "__db_probe__", "probe", 0)
+    except httpx.HTTPError:
+        return True
+    writable = accepted is not False
+    _db_writable_cache = (now, writable)
+    return writable
+
+
+async def _alert_ops_db_not_writable(client: httpx.AsyncClient, where: str) -> None:
+    global _db_write_alert_last_sent
+    if not settings.discord_ops_alert_channel_id:
+        return
+    if time.time() - _db_write_alert_last_sent < _DB_WRITE_ALERT_COOLDOWN_SECONDS:
+        return
+    embed = {
+        "title": "🚨 CI/Ops Alert",
+        "description": (
+            f"Supabase is rejecting database writes (checked in: {where}). Most likely the project is in read-only "
+            "mode because it went over the Free Plan's 500 MB database limit. The bot has stopped posting alerts "
+            "because it can't save its 'already posted' records, and carrying on would re-post the same alerts over "
+            "and over. Free up space or upgrade in Supabase - posting resumes on its own once writes are accepted."
+        ),
+        "color": EMBED_COLOR_BAD,
+        "footer": {"text": "Dash HQ Toolkit · CI/CD"},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        if await _post_channel_message(client, settings.discord_ops_alert_channel_id, embed):
+            _db_write_alert_last_sent = time.time()
+    except Exception:
+        logger.exception("Failed to send the database-not-writable ops alert")
 
 
 def _nft_alert_cooled_down(state: dict | None, cooldown_seconds: int = _NFT_ALERT_COOLDOWN_SECONDS) -> bool:
@@ -10047,6 +10113,14 @@ async def _nft_scope_maybe_post_tracked_convergence(client: httpx.AsyncClient, s
     # open, so sold-out and long-closed mints kept getting posted.
     if not await _mint_still_live(client, slug, c, "Alert Tracker"):
         return False
+    # The webhook, sweep, backstop and recheck all post through here outside
+    # the poll cycle's own check. Without a working database the "already
+    # posted" record below never lands, and every further event for this
+    # slug would re-post it.
+    if not await _db_writable(client):
+        logger.error("Alert Tracker: withholding %s - Supabase is rejecting writes, so the post couldn't be recorded", slug)
+        await _alert_ops_db_not_writable(client, "Alert Tracker")
+        return False
     ping = f"<@&{settings.discord_minting_now_role_id}>" if settings.discord_minting_now_role_id else None
     uncategorized = [h["address"] for h in tracked_wallet_hits if not h.get("category")]
     estimated, track_records, event_times, record_stats = await asyncio.gather(
@@ -11983,12 +12057,26 @@ async def nft_poll(request: Request):
         # (a runner failure, GH's own restart trigger getting dropped) there
         # was nothing that would ever notice or say so. Checked by the
         # separate nft-poll-heartbeat.yml workflow against
-        # /cron/check-poll-heartbeat. Best-effort: a failure to WRITE the
-        # heartbeat must never block the actual detection phases below.
+        # /cron/check-poll-heartbeat. Best-effort against a NETWORK failure
+        # (that must never block the detection phases below) - but not
+        # against Supabase positively REFUSING the write. That means the
+        # database is read-only or otherwise rejecting writes, and every
+        # "already posted" record this cycle would silently fail to save
+        # while the posts themselves still went out: the same alert
+        # re-posted every cycle. See _db_writable.
+        heartbeat_accepted = True
         try:
-            await _nft_alert_state_set(client, _NFT_POLL_HEARTBEAT_SLUG, "started", 0)
+            heartbeat_accepted = await _nft_alert_state_set(client, _NFT_POLL_HEARTBEAT_SLUG, "started", 0)
         except httpx.HTTPError:
             logger.exception("nft-poll: heartbeat write failed")
+        if heartbeat_accepted is False:
+            logger.error("nft-poll: Supabase rejected the heartbeat write - skipping this cycle rather than posting without being able to record it")
+            await _alert_ops_db_not_writable(client, "nft-poll")
+            return {
+                "skipped": "database_not_writable",
+                "errors": ["database_not_writable: Supabase rejected a write, so this cycle posted nothing"],
+                "took_seconds": round(time.time() - start, 2),
+            }
         try:
             alerted = await _nft_poll_watchlist_alerts(client)
         except (httpx.HTTPError, KeyError) as e:
