@@ -315,6 +315,18 @@ create table if not exists nft_sale_events_log (
 create index if not exists nft_sale_events_log_buyer_idx on nft_sale_events_log (buyer);
 create index if not exists nft_sale_events_log_token_idx on nft_sale_events_log (slug, token_id, event_at);
 
+-- Serves the "recent mints" lookups (event_at >= X AND seller = null address,
+-- ordered newest-first): the Alert Tracker recheck watchdog and
+-- /cron/recent-convergence-summary. Neither the primary key nor the two
+-- indexes above lead with event_at or seller, so this had to scan and sort
+-- the whole table, and it intermittently came back from Supabase as an
+-- HTTP 500 (confirmed in production logs: the recheck's fetch failed with
+-- "Failed to fetch pending Alert Tracker convergence slugs"). Partial on
+-- mint rows only, so it stays small - mints are a fraction of what's logged.
+create index if not exists nft_sale_events_log_mints_event_at_idx
+  on nft_sale_events_log (event_at desc)
+  where seller = '0x0000000000000000000000000000000000000000';
+
 alter table nft_sale_events_log enable row level security;
 
 -- Ground-truth realized trades: a wallet that bought a specific token and
