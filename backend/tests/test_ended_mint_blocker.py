@@ -329,7 +329,7 @@ async def test_query_probe_reports_each_variants_real_status_and_error():
     assert set(out) == {"desc_100_meta", "desc_1_meta", "asc_1_meta", "desc_1_no_meta", "desc_1_erc721_only"}
     assert out["asc_1_meta"] == {
         "http": 200, "transfers_returned": 1, "error": None,
-        "first_metadata": None, "first_timestamp_parses_to": None,
+        "first_metadata": None, "first_blockNum": None, "first_timestamp_parses_to": None,
     }
     assert out["desc_1_meta"]["transfers_returned"] is None
     assert out["desc_1_meta"]["error"] == {"message": "order desc unsupported on this network"}
@@ -395,3 +395,91 @@ async def test_query_probe_surfaces_a_timestamp_the_parser_cannot_read():
     assert out["desc_1_meta"]["first_metadata"] == {"blockTimestamp": "2026-13-45 nonsense"}
     assert out["desc_1_meta"]["first_timestamp_parse_error"].startswith("ValueError")
     assert "first_timestamp_parses_to" not in out["desc_1_meta"]
+
+
+# ── block-timestamp fallback (Ink returns metadata: null) ────────────────
+
+async def test_recent_timestamps_fall_back_to_the_block_when_metadata_is_null():
+    # Confirmed live on Ink: transfers come back with metadata: null, so
+    # there is no blockTimestamp at all. Only the newest transfer's block is
+    # resolved - one cheap call, not one per transfer.
+    resolved = []
+
+    async def fake_rpc(client, chain, method, params):
+        return {"transfers": [
+            {"blockNum": "0x20", "metadata": None},
+            {"blockNum": "0x10", "metadata": None},
+        ]}
+
+    async def fake_block_ts(client, chain, block_num):
+        resolved.append((chain, block_num))
+        return 1_800_000_000.0
+
+    with patch.object(main, "_alchemy_rpc", new=fake_rpc), patch.object(main, "_alchemy_block_timestamp", new=fake_block_ts):
+        stamps = await main._mint_recent_timestamps(object(), "ink", "0xabc", count=2)
+
+    assert stamps == [1_800_000_000.0]
+    assert resolved == [("ink", "0x20")]
+
+
+async def test_recent_timestamps_do_not_hit_the_block_fallback_when_metadata_exists():
+    async def fake_rpc(client, chain, method, params):
+        return {"transfers": [{"blockNum": "0x20", "metadata": {"blockTimestamp": iso(30)}}]}
+
+    async def boom(*a, **k):
+        raise AssertionError("must not resolve a block when the timestamp is already there")
+
+    with patch.object(main, "_alchemy_rpc", new=fake_rpc), patch.object(main, "_alchemy_block_timestamp", new=boom):
+        stamps = await main._mint_recent_timestamps(object(), "robinhood", "0xabc")
+
+    assert len(stamps) == 1
+
+
+async def test_recent_timestamps_stay_empty_when_the_block_cannot_be_resolved():
+    async def fake_rpc(client, chain, method, params):
+        return {"transfers": [{"blockNum": "0x20", "metadata": None}]}
+
+    async def fake_block_ts(client, chain, block_num):
+        return None
+
+    with patch.object(main, "_alchemy_rpc", new=fake_rpc), patch.object(main, "_alchemy_block_timestamp", new=fake_block_ts):
+        assert await main._mint_recent_timestamps(object(), "ink", "0xabc") == []
+
+
+async def test_block_timestamp_decodes_the_chains_own_block_time():
+    settings.alchemy_api_key = "key"
+    seen = {}
+
+    class FakeClient:
+        async def post(self, url, json=None):
+            seen["json"] = json
+            return FakeRes(200, {"result": {"number": "0x20", "timestamp": hex(1_789_888_608)}})
+
+    try:
+        value = await main._alchemy_block_timestamp(FakeClient(), "ink", "0x20")
+    finally:
+        settings.alchemy_api_key = ""
+
+    assert value == 1_789_888_608.0
+    assert seen["json"]["method"] == "eth_getBlockByNumber"
+    assert seen["json"]["params"] == ["0x20", False]
+
+
+async def test_block_timestamp_returns_none_for_bad_input_or_responses():
+    settings.alchemy_api_key = "key"
+
+    class FakeClient:
+        def __init__(self, res):
+            self.res = res
+
+        async def post(self, url, json=None):
+            return self.res
+
+    try:
+        assert await main._alchemy_block_timestamp(FakeClient(FakeRes(200, {"result": None})), "ink", "0x20") is None
+        assert await main._alchemy_block_timestamp(FakeClient(FakeRes(200, {"result": {"timestamp": "zzz"}})), "ink", "0x20") is None
+        assert await main._alchemy_block_timestamp(FakeClient(FakeRes(500, {})), "ink", "0x20") is None
+        assert await main._alchemy_block_timestamp(FakeClient(FakeRes(200, {"result": {"timestamp": "0x1"}})), "ink", None) is None
+        assert await main._alchemy_block_timestamp(FakeClient(FakeRes(200, {"result": {"timestamp": "0x1"}})), "ink", "20") is None
+    finally:
+        settings.alchemy_api_key = ""

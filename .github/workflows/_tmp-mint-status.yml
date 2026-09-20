@@ -7,9 +7,15 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - name: Show the raw timestamp Ink vs Robinhood return, and whether it parses
+      - name: Ink ordering proof (desc newest block must be greater than asc oldest block)
         run: |
           curl -s -G "https://www.dashhq.site/cron/check-mint-status" \
-            --data-urlencode "slugs=lunas-luminous-dream,useless-bankers" --data-urlencode "probe=true" \
+            --data-urlencode "slugs=fresh-ink-opensea-x-ink,giga-611735476,nftiecjmr" --data-urlencode "probe=true" \
             -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-            | jq -c '.results[] | {slug, chain, sampled_mints, first: .query_probe.desc_1_meta}'
+            | jq -r '.results[] | [.slug, "desc_block", .query_probe.desc_1_meta.first_blockNum, "asc_block", .query_probe.asc_1_meta.first_blockNum] | @tsv'
+      - name: Verdicts on real Ink + Robinhood collections after the fix
+        run: |
+          curl -s -G "https://www.dashhq.site/cron/check-mint-status" \
+            --data-urlencode "slugs=fresh-ink-opensea-x-ink,giga-611735476,nftiecjmr,lunas-luminous-dream,smolboi-380681282,404-machine,gas-ghosts-235055470,proof-of-pixels-676717767,inkglyphs,prtscn-ink,4-bit-ink--,useless-bankers,founding-charter" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            | jq -r '.results[] | [.slug, (.chain // "-"), ((.last_mint_age_seconds // -1) | floor | tostring), ((.total_supply // "-") | tostring), ((.max_supply // "-") | tostring), (.would_block | tostring), (.reason // .error // "")] | @tsv' | column -t -s $'\t'

@@ -10231,8 +10231,9 @@ async def _mint_recent_timestamps(client: httpx.AsyncClient, alchemy_chain: str,
         "fromAddress": _TRACKED_WALLET_NULL_ADDRESS, "contractAddresses": [contract],
         "category": ["erc721", "erc1155"], "order": "desc", "maxCount": hex(count), "withMetadata": True,
     })
+    transfers = (result or {}).get("transfers", [])
     stamps: list[float] = []
-    for transfer in (result or {}).get("transfers", []):
+    for transfer in transfers:
         raw = (transfer.get("metadata") or {}).get("blockTimestamp")
         if not raw:
             continue
@@ -10240,7 +10241,42 @@ async def _mint_recent_timestamps(client: httpx.AsyncClient, alchemy_chain: str,
             stamps.append(_parse_event_at(raw))
         except (ValueError, TypeError):
             continue
+    # Confirmed live: Ink returns the transfers but `metadata: null` - it
+    # ignores withMetadata entirely - while Robinhood returns a real
+    # blockTimestamp. Without this, the quiet-mint check silently did
+    # nothing on Ink. Every transfer carries its blockNum regardless of
+    # chain, and the chain itself can say when that block was produced.
+    # Only the newest is resolved: that's all the verdict needs, and it
+    # keeps this to one extra cheap call instead of one per transfer.
+    if not stamps and transfers:
+        newest = await _alchemy_block_timestamp(client, alchemy_chain, transfers[0].get("blockNum"))
+        if newest is not None:
+            stamps.append(newest)
     return stamps
+
+
+async def _alchemy_block_timestamp(client: httpx.AsyncClient, alchemy_chain: str, block_num: str | None) -> float | None:
+    subdomain = _TRACKED_WALLET_ALCHEMY_CHAINS.get(alchemy_chain)
+    if not settings.alchemy_api_key or not subdomain or not isinstance(block_num, str) or not block_num.startswith("0x"):
+        return None
+    try:
+        res = await client.post(
+            f"https://{subdomain}.g.alchemy.com/v2/{settings.alchemy_api_key}",
+            json={"jsonrpc": "2.0", "id": 1, "method": "eth_getBlockByNumber", "params": [block_num, False]},
+        )
+    except httpx.HTTPError:
+        return None
+    if res.status_code != 200:
+        return None
+    data = res.json()
+    block = data.get("result") if isinstance(data, dict) else None
+    raw = block.get("timestamp") if isinstance(block, dict) else None
+    if not isinstance(raw, str):
+        return None
+    try:
+        return float(int(raw, 16))
+    except ValueError:
+        return None
 
 
 async def _alchemy_eth_call_uint(client: httpx.AsyncClient, alchemy_chain: str, contract: str, selector: str) -> int | None:
@@ -10330,6 +10366,11 @@ async def _mint_query_probe(client: httpx.AsyncClient, alchemy_chain: str, contr
             # work with, and whether it can read it.
             metadata = transfers[0].get("metadata")
             out[name]["first_metadata"] = metadata
+            # desc vs asc block numbers for the same contract prove whether
+            # a chain actually honors `order` - a chain that ignored it
+            # would hand back the OLDEST mint as "newest" and make a live
+            # mint look long-dead.
+            out[name]["first_blockNum"] = transfers[0].get("blockNum")
             raw = (metadata or {}).get("blockTimestamp")
             try:
                 out[name]["first_timestamp_parses_to"] = _parse_event_at(raw) if raw else None
