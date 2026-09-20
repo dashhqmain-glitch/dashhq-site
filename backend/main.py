@@ -10325,6 +10325,16 @@ async def _mint_query_probe(client: httpx.AsyncClient, alchemy_chain: str, contr
             "transfers_returned": len(transfers) if transfers is not None else None,
             "error": (body.get("error") if isinstance(body, dict) else str(body)[:200]),
         }
+        if transfers:
+            # What the parser in _mint_recent_timestamps actually gets to
+            # work with, and whether it can read it.
+            metadata = transfers[0].get("metadata")
+            out[name]["first_metadata"] = metadata
+            raw = (metadata or {}).get("blockTimestamp")
+            try:
+                out[name]["first_timestamp_parses_to"] = _parse_event_at(raw) if raw else None
+            except (ValueError, TypeError, AttributeError) as e:
+                out[name]["first_timestamp_parse_error"] = f"{type(e).__name__}: {e}"
     return out
 
 

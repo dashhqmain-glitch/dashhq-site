@@ -7,21 +7,9 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - name: Probe Alchemy query shapes on ink vs robinhood
+      - name: Show the raw timestamp Ink vs Robinhood return, and whether it parses
         run: |
           curl -s -G "https://www.dashhq.site/cron/check-mint-status" \
             --data-urlencode "slugs=lunas-luminous-dream,useless-bankers" --data-urlencode "probe=true" \
-            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" | jq -c '.results[] | {slug, chain, query_probe}'
-      - name: Wider sample across chains
-        run: |
-          curl -s "https://www.dashhq.site/cron/recent-convergence-summary?hours=72&limit=1000" \
-            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" -o summary.json
-          jq -r '[.slugs[].slug] | .[0:45] | join(",")' summary.json | tr ',' '\n' | paste -sd, - | tr ',' '\n' > all_slugs.txt
-          wc -l all_slugs.txt
-          for i in 1 2 3; do
-            batch=$(sed -n "$(( (i-1)*15 + 1 )),$(( i*15 ))p" all_slugs.txt | paste -sd, -)
-            [ -z "$batch" ] && continue
-            curl -s -G "https://www.dashhq.site/cron/check-mint-status" --data-urlencode "slugs=$batch" \
-              -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
-              | jq -r '.results[] | [.slug, (.chain // "-"), ((.last_mint_age_seconds // -1) | floor | tostring), (.mints_last_10m | tostring), (.mints_last_60m | tostring), ((.total_supply // "-") | tostring), ((.max_supply // "-") | tostring), (.would_block | tostring), (.reason // .error // "")] | @tsv'
-          done | column -t -s $'\t'
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            | jq -c '.results[] | {slug, chain, sampled_mints, first: .query_probe.desc_1_meta}'

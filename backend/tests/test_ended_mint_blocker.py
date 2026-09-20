@@ -327,7 +327,10 @@ async def test_query_probe_reports_each_variants_real_status_and_error():
         settings.alchemy_api_key = ""
 
     assert set(out) == {"desc_100_meta", "desc_1_meta", "asc_1_meta", "desc_1_no_meta", "desc_1_erc721_only"}
-    assert out["asc_1_meta"] == {"http": 200, "transfers_returned": 1, "error": None}
+    assert out["asc_1_meta"] == {
+        "http": 200, "transfers_returned": 1, "error": None,
+        "first_metadata": None, "first_timestamp_parses_to": None,
+    }
     assert out["desc_1_meta"]["transfers_returned"] is None
     assert out["desc_1_meta"]["error"] == {"message": "order desc unsupported on this network"}
     assert ("desc", hex(100), True, ("erc721", "erc1155")) in seen
@@ -365,3 +368,30 @@ async def test_check_mint_status_only_probes_when_asked():
     assert "query_probe" not in plain["results"][0]
     assert probed_result["results"][0]["query_probe"] == {"desc_1_meta": {"http": 200}}
     assert probed == [("ink", "0xprobe")]
+
+
+async def test_query_probe_surfaces_a_timestamp_the_parser_cannot_read():
+    # The exact failure mode the dry run pointed at: Alchemy returns
+    # transfers, but the timestamp on them can't be turned into a time.
+    settings.alchemy_api_key = "key"
+
+    class ProbeRes:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+        text = ""
+
+        def json(self):
+            return {"result": {"transfers": [{"metadata": {"blockTimestamp": "2026-13-45 nonsense"}}]}}
+
+    class FakeClient:
+        async def post(self, url, json=None):
+            return ProbeRes()
+
+    try:
+        out = await main._mint_query_probe(FakeClient(), "ink", "0xabc")
+    finally:
+        settings.alchemy_api_key = ""
+
+    assert out["desc_1_meta"]["first_metadata"] == {"blockTimestamp": "2026-13-45 nonsense"}
+    assert out["desc_1_meta"]["first_timestamp_parse_error"].startswith("ValueError")
+    assert "first_timestamp_parses_to" not in out["desc_1_meta"]
