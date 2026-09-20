@@ -1,0 +1,19 @@
+name: Temporary ended-mint dry run
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dry-run the ended-mint check against today's real tracked-wallet mints
+        run: |
+          curl -s "https://www.dashhq.site/cron/recent-convergence-summary?hours=24&limit=500" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" -o summary.json
+          slugs=$(jq -r '[.slugs[].slug] | .[0:14] | join(",")' summary.json)
+          echo "Candidate slugs (today's tracked-wallet mints): $slugs"
+          curl -s -G "https://www.dashhq.site/cron/check-mint-status" \
+            --data-urlencode "slugs=${slugs},founding-charter" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" -o status.json
+          jq -r '.results[] | [.slug, (.chain // "-"), ((.last_mint_age_seconds // -1) | floor | tostring), (.mints_last_10m // "-" | tostring), (.mints_last_30m // "-" | tostring), (.mints_last_60m // "-" | tostring), ((.total_supply // "-") | tostring), ((.max_supply // "-") | tostring), (.would_block | tostring), (.reason // .error // "")] | @tsv' status.json | column -t -s $'\t'

@@ -1565,6 +1565,41 @@ async def diagnose_slug_posting(request: Request, slug: str):
         }
 
 
+@app.get("/cron/check-mint-status")
+async def check_mint_status(request: Request, slugs: str):
+    # Read-only dry run of the ended-mint blocker: reports every raw signal
+    # plus the verdict for each slug, without posting or blocking anything.
+    # The way to answer "would the bot have posted this ended mint" (or
+    # "why did it block that live one") with real data instead of a guess.
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    slug_list = [s.strip() for s in slugs.split(",") if s.strip()][:15]
+    results = []
+    async with httpx.AsyncClient(timeout=30) as client:
+        for slug in slug_list:
+            try:
+                c = await _nft_collection_core(slug)
+            except HTTPException as e:
+                results.append({"slug": slug, "error": f"collection lookup failed ({e.status_code})"})
+                continue
+            signals = await _mint_status_signals(client, c, sample=100)
+            ended, reason = _mint_ended_verdict(signals["last_mint_age_seconds"], signals["total_supply"], signals["max_supply"])
+            stamps = signals.pop("recent_mint_timestamps")
+            now = time.time()
+            results.append({
+                "slug": slug, **signals,
+                "sampled_mints": len(stamps),
+                "mints_last_10m": sum(1 for t in stamps if now - t <= 600),
+                "mints_last_30m": sum(1 for t in stamps if now - t <= 1800),
+                "mints_last_60m": sum(1 for t in stamps if now - t <= 3600),
+                "quiet_window_seconds": _MINT_ENDED_QUIET_SECONDS,
+                "would_block": ended, "reason": reason,
+            })
+    return {"results": results}
+
+
 @app.get("/cron/test-alchemy")
 async def test_alchemy(request: Request, address: str, chain: str = "ethereum"):
     # Raw, unswallowed diagnostic - _alchemy_rpc deliberately returns None
@@ -10150,6 +10185,138 @@ async def _alchemy_healthy(client: httpx.AsyncClient) -> bool:
     except httpx.HTTPError:
         return True
     return _nft_alert_cooled_down(state, cooldown_seconds=_NFT_SCOPE_RATE_LIMIT_BACKOFF_SECONDS)
+
+
+# ── Ended-mint blocker ────────────────────────────────────────────────────
+# Direct request, repeated complaint: members kept getting "N Wallet Minting
+# X" (Alert Tracker) and "New Mint" (NFT Scope Pass 1) posts for mints that
+# had already ended - sold out or closed - so the Mint Link led nowhere.
+# Nothing in the posting pipeline ever asked "can someone still mint this
+# RIGHT NOW": every gate was about wallet quality, wash trading, or how
+# recent a tracked wallet's own event was, none of which says anything
+# about whether the mint itself is still open.
+#
+# Two independent, contract-agnostic signals - either one is enough to
+# block:
+#   1. Sold out: on-chain totalSupply() has reached maxSupply()/MAX_SUPPLY().
+#   2. Gone quiet: nobody at all (tracked or not) has minted this contract
+#      - a transfer from the null address - within _MINT_ENDED_QUIET_SECONDS.
+#
+# Both fail OPEN. An unsupported chain, a contract exposing neither supply
+# getter, an Alchemy error/rate-limit, or no mint history at all means
+# "unknown", never "ended" - a broken blocker must never silence a real
+# live mint, the same reasoning behind every other fail-open in this file.
+_MINT_ENDED_QUIET_SECONDS = 30 * 60
+_MINT_ENDED_CACHE_TTL_SECONDS = 300  # webhook bursts re-evaluate the same blocked slug repeatedly; one 150-CU lookup per contract per window is plenty
+_MINT_ENDED_TOTAL_SUPPLY_SELECTOR = "0x18160ddd"  # totalSupply()
+_MINT_ENDED_MAX_SUPPLY_SELECTORS = ("0xd5abeb01", "0x32cb6b0c")  # maxSupply(), MAX_SUPPLY() - the two conventions real mint contracts actually use
+# OpenSea's chain identifiers -> the keys _TRACKED_WALLET_ALCHEMY_CHAINS uses.
+# Any chain missing here (e.g. avalanche) has no Alchemy coverage, so the
+# check reports "unknown" rather than guessing.
+_OPENSEA_CHAIN_TO_ALCHEMY = {
+    "ethereum": "ethereum", "base": "base", "matic": "polygon", "polygon": "polygon",
+    "arbitrum": "arbitrum", "optimism": "optimism", "robinhood": "robinhood", "ink": "ink",
+}
+_mint_ended_cache: dict[str, tuple[float, tuple[bool, str | None]]] = {}
+
+
+async def _mint_recent_timestamps(client: httpx.AsyncClient, alchemy_chain: str, contract: str, count: int = 1) -> list[float]:
+    # Newest-first epoch timestamps of the most recent mints of this
+    # contract by ANYONE - the whole point is that this isn't limited to the
+    # wallets we track.
+    result = await _alchemy_rpc(client, alchemy_chain, "alchemy_getAssetTransfers", {
+        "fromAddress": _TRACKED_WALLET_NULL_ADDRESS, "contractAddresses": [contract],
+        "category": ["erc721", "erc1155"], "order": "desc", "maxCount": hex(count), "withMetadata": True,
+    })
+    stamps: list[float] = []
+    for transfer in (result or {}).get("transfers", []):
+        raw = (transfer.get("metadata") or {}).get("blockTimestamp")
+        if not raw:
+            continue
+        try:
+            stamps.append(_parse_event_at(raw))
+        except (ValueError, TypeError):
+            continue
+    return stamps
+
+
+async def _alchemy_eth_call_uint(client: httpx.AsyncClient, alchemy_chain: str, contract: str, selector: str) -> int | None:
+    subdomain = _TRACKED_WALLET_ALCHEMY_CHAINS.get(alchemy_chain)
+    if not settings.alchemy_api_key or not subdomain:
+        return None
+    try:
+        res = await client.post(
+            f"https://{subdomain}.g.alchemy.com/v2/{settings.alchemy_api_key}",
+            json={"jsonrpc": "2.0", "id": 1, "method": "eth_call", "params": [{"to": contract, "data": selector}, "latest"]},
+        )
+    except httpx.HTTPError:
+        return None
+    if res.status_code != 200:
+        return None
+    data = res.json()
+    result = data.get("result") if isinstance(data, dict) else None
+    # A real uint256 return is exactly 32 bytes ("0x" + 64 hex chars) - "0x"
+    # alone means the contract has no such function.
+    if not isinstance(result, str) or len(result) != 66:
+        return None
+    try:
+        return int(result, 16)
+    except ValueError:
+        return None
+
+
+async def _mint_status_signals(client: httpx.AsyncClient, c: dict, sample: int = 1) -> dict:
+    contract = (c.get("contractAddress") or "").lower()
+    alchemy_chain = _OPENSEA_CHAIN_TO_ALCHEMY.get((c.get("chain") or "").lower())
+    signals = {
+        "chain": c.get("chain"), "alchemy_chain": alchemy_chain, "contract": contract or None,
+        "last_mint_age_seconds": None, "recent_mint_timestamps": [], "total_supply": None, "max_supply": None,
+    }
+    if not contract or not alchemy_chain:
+        return signals
+    stamps, total_supply, *max_candidates = await asyncio.gather(
+        _mint_recent_timestamps(client, alchemy_chain, contract, sample),
+        _alchemy_eth_call_uint(client, alchemy_chain, contract, _MINT_ENDED_TOTAL_SUPPLY_SELECTOR),
+        *[_alchemy_eth_call_uint(client, alchemy_chain, contract, sel) for sel in _MINT_ENDED_MAX_SUPPLY_SELECTORS],
+    )
+    signals["recent_mint_timestamps"] = stamps
+    if stamps:
+        signals["last_mint_age_seconds"] = max(0.0, time.time() - stamps[0])
+    signals["total_supply"] = total_supply
+    # 0 is what an open-edition contract reports for "no cap" - not a real limit.
+    signals["max_supply"] = next((m for m in max_candidates if m), None)
+    return signals
+
+
+def _mint_ended_verdict(last_mint_age_seconds: float | None, total_supply: int | None, max_supply: int | None) -> tuple[bool, str | None]:
+    if total_supply is not None and max_supply and total_supply >= max_supply:
+        return True, f"sold out ({total_supply:,} of {max_supply:,} minted)"
+    if last_mint_age_seconds is not None and last_mint_age_seconds > _MINT_ENDED_QUIET_SECONDS:
+        return True, f"no one has minted in the last {int(last_mint_age_seconds // 60)} min"
+    return False, None
+
+
+async def _mint_has_ended(client: httpx.AsyncClient, c: dict) -> tuple[bool, str | None]:
+    contract = (c.get("contractAddress") or "").lower()
+    alchemy_chain = _OPENSEA_CHAIN_TO_ALCHEMY.get((c.get("chain") or "").lower())
+    if not contract or not alchemy_chain:
+        return False, None
+    key = f"{alchemy_chain}:{contract}"
+    cached = _mint_ended_cache.get(key)
+    if cached and time.time() - cached[0] < _MINT_ENDED_CACHE_TTL_SECONDS:
+        return cached[1]
+    try:
+        signals = await _mint_status_signals(client, c)
+        verdict = _mint_ended_verdict(signals["last_mint_age_seconds"], signals["total_supply"], signals["max_supply"])
+    except Exception:
+        logger.exception("ended-mint check failed for %s - failing open", key)
+        return False, None
+    # Nothing learned at all (Alchemy down/rate-limited) is not worth
+    # caching - the very next evaluation should get a real chance.
+    if signals["last_mint_age_seconds"] is not None or signals["total_supply"] is not None:
+        _mint_ended_cache[key] = (time.time(), verdict)
+        _cap_cache(_mint_ended_cache)
+    return verdict
 
 
 def _wallet_poll_bucket(address: str, num_buckets: int) -> int:
