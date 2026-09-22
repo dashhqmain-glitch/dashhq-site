@@ -9669,6 +9669,16 @@ def _nft_scope_tracked_convergence_embed(
         lines.append(f"\n🎟️ [Mint Link]({opensea_url})")
     if opensea_url:
         lines.append(f"🔗 [View Collection]({opensea_url})")
+    # Same field OpenSea already gives every collection lookup
+    # (_nft_scope_embed's "Links" line already shows it for the
+    # fresh/trending/momentum posts - this was the one embed that didn't
+    # carry it yet) - zero extra API cost, just rendering data already in
+    # hand. Direct request: members want the project's own account for
+    # research before minting, not just a Mint Link that could be
+    # anything. Omitted cleanly when OpenSea has no handle on file, same
+    # fail-open as every other optional link here.
+    if c.get("twitter"):
+        lines.append(f"𝕏 [{c['twitter']}](https://x.com/{c['twitter']})")
     # Flagged separately from the link itself (not just omitted) - a
     # member seeing NO link might go looking for one themselves and land
     # on the exact phishing site this was trying to warn them off of.
@@ -9718,6 +9728,12 @@ def _nft_scope_tracked_convergence_components(c: dict) -> list:
         buttons.append({"type": 2, "style": 5, "label": "Mint Link (unverified)", "url": website})
     if opensea_url:
         buttons.append({"type": 2, "style": 5, "label": "OpenSea", "url": opensea_url})
+    # Same OpenSea-provided handle the embed body links as text - a button
+    # too since a tap beats hunting for a link inside the description on
+    # mobile. Discord caps an action row at 5 buttons; this is at most the
+    # 3rd, so there's no risk of overflowing it.
+    if c.get("twitter"):
+        buttons.append({"type": 2, "style": 5, "label": "X / Twitter", "url": f"https://x.com/{c['twitter']}"})
     if not buttons:
         return []
     return [{"type": 1, "components": buttons}]

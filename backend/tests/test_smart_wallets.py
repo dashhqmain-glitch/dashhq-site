@@ -551,6 +551,47 @@ def test_convergence_embed_chain_falls_back_to_a_titlecased_unknown_slug():
     assert embed["fields"][0]["value"] == "Somenewchain"
 
 
+def test_convergence_embed_links_the_projects_x_account_when_opensea_has_one():
+    # Same data _nft_scope_embed's "Links" line already shows for
+    # fresh/trending/momentum posts - the one embed that didn't carry it
+    # yet. OpenSea already returns this on every collection lookup, so
+    # this is a pure render of data already in hand, zero extra API cost.
+    hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": "Whale"}]
+    embed = main._nft_scope_tracked_convergence_embed(_fake_collection(twitter="somecoolproject"), hits)
+    assert "𝕏 [somecoolproject](https://x.com/somecoolproject)" in embed["description"]
+
+
+def test_convergence_embed_omits_the_x_line_when_opensea_has_no_handle_on_file():
+    hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": "Whale"}]
+    embed = main._nft_scope_tracked_convergence_embed(_fake_collection(), hits)  # no "twitter" key at all
+    assert "𝕏" not in embed["description"]
+    embed_none = main._nft_scope_tracked_convergence_embed(_fake_collection(twitter=None), hits)
+    assert "𝕏" not in embed_none["description"]
+
+
+def test_convergence_components_include_an_x_button_when_the_project_has_one():
+    c = _fake_collection(twitter="somecoolproject")
+    components = main._nft_scope_tracked_convergence_components(c)
+    labels = [b["label"] for b in components[0]["components"]]
+    assert labels == ["OpenSea", "X / Twitter"]
+    x_button = components[0]["components"][1]
+    assert x_button["url"] == "https://x.com/somecoolproject"
+    assert x_button["style"] == 5  # LINK style, same as every other button here
+
+
+def test_convergence_components_omit_the_x_button_without_a_handle():
+    components = main._nft_scope_tracked_convergence_components(_fake_collection())
+    labels = [b["label"] for b in components[0]["components"]]
+    assert "X / Twitter" not in labels
+
+
+def test_convergence_components_stay_under_discords_five_button_row_cap_with_every_link_present():
+    c = _fake_collection(website="https://mint.example.xyz", twitter="somecoolproject")
+    components = main._nft_scope_tracked_convergence_components(c)
+    assert len(components[0]["components"]) == 3  # Mint Link + OpenSea + X, well under Discord's 5-button cap
+    assert len(components) == 1
+
+
 def test_convergence_embed_includes_a_scam_warning_when_given_one():
     hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": "Whale"}]
     embed = main._nft_scope_tracked_convergence_embed(_fake_collection(), hits, scam_warning="⚠️ **evil.xyz** is on ScamSniffer's known-phishing list")
