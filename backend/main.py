@@ -9598,7 +9598,7 @@ def _alert_tracker_footer_text(stats: dict | None) -> str:
 def _nft_scope_tracked_convergence_embed(
     c: dict, tracked_hits: list[dict], estimated: dict[str, str] | None = None, scam_warning: str | None = None,
     track_records: dict[str, dict] | None = None, event_times: dict[str, float] | None = None,
-    record_stats: dict | None = None,
+    record_stats: dict | None = None, mint_signals: dict | None = None,
 ) -> dict:
     # A category badge and a shortened linked address, one line per
     # wallet - this list is externally curated, not proprietary internal
@@ -9662,23 +9662,26 @@ def _nft_scope_tracked_convergence_embed(
     # reliable third source exists to cross-check it against (no X/social
     # API access here), so rather than silently trust it, or invent a
     # web-search guess that could be just as wrong, it's shown but always
-    # marked unverified.
+    # marked unverified. Kept on its own line, full caveat text intact -
+    # this is real safety information, not something to shorten away just
+    # to save a line.
     if external_site and external_site != opensea_url:
         lines.append(f"\n🎟️ [Mint Link]({external_site}) ⚠️ *unverified - confirm via the project's official channels before minting*")
     elif opensea_url:
         lines.append(f"\n🎟️ [Mint Link]({opensea_url})")
+    # OpenSea + the project's X account (same data _nft_scope_embed's
+    # "Links" line already shows for fresh/trending/momentum posts) merged
+    # into one secondary line instead of two - same information members
+    # want for research, less visual clutter than a line each. Omitted
+    # cleanly when OpenSea has no handle on file, same fail-open as every
+    # other optional link here.
+    secondary_links = []
     if opensea_url:
-        lines.append(f"🔗 [View Collection]({opensea_url})")
-    # Same field OpenSea already gives every collection lookup
-    # (_nft_scope_embed's "Links" line already shows it for the
-    # fresh/trending/momentum posts - this was the one embed that didn't
-    # carry it yet) - zero extra API cost, just rendering data already in
-    # hand. Direct request: members want the project's own account for
-    # research before minting, not just a Mint Link that could be
-    # anything. Omitted cleanly when OpenSea has no handle on file, same
-    # fail-open as every other optional link here.
+        secondary_links.append(f"[OpenSea]({opensea_url})")
     if c.get("twitter"):
-        lines.append(f"𝕏 [{c['twitter']}](https://x.com/{c['twitter']})")
+        secondary_links.append(f"𝕏 [{c['twitter']}](https://x.com/{c['twitter']})")
+    if secondary_links:
+        lines.append("🔗 " + "  ·  ".join(secondary_links))
     # Flagged separately from the link itself (not just omitted) - a
     # member seeing NO link might go looking for one themselves and land
     # on the exact phishing site this was trying to warn them off of.
@@ -9699,6 +9702,27 @@ def _nft_scope_tracked_convergence_embed(
         emoji = "⚡"
     else:
         emoji = "🌱"
+    # Real, scannable numbers pulled OUT of the wall of text and into a
+    # clean field grid, same idea _nft_scope_embed's own fields already
+    # use - direct request: floor price and real mint progress, for more
+    # info and accuracy, without the embed reading as packed/disorganized.
+    # Both optional and additive - a slug with no floor data yet, or a
+    # chain/contract shape mint_signals couldn't read, just shows fewer
+    # fields, never a broken or misleading one.
+    fields = []
+    symbol = c.get("symbol") or "ETH"
+    if (floor := c.get("floor")) is not None:
+        floor_text = f"{floor:.4f} {symbol}"
+        if c.get("floorUsd") is not None:
+            floor_text += f" (~${c['floorUsd']:,.2f})"
+        fields.append({"name": "💰 Floor Price", "value": floor_text, "inline": True})
+    mint_progress = _mint_progress_text(mint_signals)
+    if mint_progress:
+        fields.append({"name": "🎟️ Mint Progress", "value": mint_progress, "inline": True})
+    # Highlighted as its own field (not buried in text) - this bot
+    # covers several chains at once (see _NFT_SCOPE_CHAINS), and which
+    # one a mint is actually on is easy to miss otherwise.
+    fields.append({"name": "⛓️ Chain", "value": chain_display, "inline": True})
     return {
         "author": {"name": "🔔 Alert Tracker"},
         "title": f"{emoji} {len(by_address)} Wallet Minting {c['name']}",
@@ -9706,10 +9730,7 @@ def _nft_scope_tracked_convergence_embed(
         "description": "\n".join(lines),
         "color": _NFT_SCOPE_TRACKED_ALERT_COLOR,
         "thumbnail": {"url": c["image"]} if c.get("image") else None,
-        # Highlighted as its own field (not buried in text) - this bot
-        # covers several chains at once (see _NFT_SCOPE_CHAINS), and which
-        # one a mint is actually on is easy to miss otherwise.
-        "fields": [{"name": "⛓️ Chain", "value": chain_display, "inline": True}],
+        "fields": fields,
         "footer": {"text": _alert_tracker_footer_text(record_stats)},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
@@ -10139,16 +10160,21 @@ async def _nft_scope_maybe_post_tracked_convergence(client: httpx.AsyncClient, s
         return False
     ping = f"<@&{settings.discord_minting_now_role_id}>" if settings.discord_minting_now_role_id else None
     uncategorized = [h["address"] for h in tracked_wallet_hits if not h.get("category")]
-    estimated, track_records, event_times, record_stats = await asyncio.gather(
+    # Same real on-chain data _mint_still_live just used to confirm this
+    # mint is still open (cache-warm from the call above, so this is
+    # effectively free) - reused here to show real mint progress in the
+    # embed below, not a second live lookup.
+    estimated, track_records, event_times, record_stats, mint_signals = await asyncio.gather(
         _estimate_wallet_categories(client, uncategorized),
         _nft_scope_merged_track_records(client, sorted(distinct_addresses)),
         _nft_scope_tracked_convergence_event_times(client, slug, sorted(distinct_addresses)),
         _alert_tracker_stats(client),
+        _mint_status_signals_cached(client, c),
     )
     scam_warning = await _mint_link_scam_warning(client, c.get("website") or c.get("openseaUrl"))
     delivered = await _post_channel_message(
         client, settings.discord_smart_wallet_channel_id,
-        _nft_scope_tracked_convergence_embed(c, tracked_wallet_hits, estimated, scam_warning, track_records, event_times, record_stats),
+        _nft_scope_tracked_convergence_embed(c, tracked_wallet_hits, estimated, scam_warning, track_records, event_times, record_stats, mint_signals),
         content=ping,
         components=_nft_scope_tracked_convergence_components(c),
     )
@@ -10326,7 +10352,7 @@ _OPENSEA_CHAIN_TO_ALCHEMY = {
     "ethereum": "ethereum", "base": "base", "matic": "polygon", "polygon": "polygon",
     "arbitrum": "arbitrum", "optimism": "optimism", "robinhood": "robinhood", "ink": "ink",
 }
-_mint_ended_cache: dict[str, tuple[float, tuple[bool, str | None]]] = {}
+_mint_ended_cache: dict[str, tuple[float, dict]] = {}  # "chain:contract" -> (cached_at, signals) - the verdict is derived from signals, not cached separately, so the same lookup also serves real display data (floor's neighbor, mint progress) at no extra cost
 
 
 async def _mint_recent_timestamps(client: httpx.AsyncClient, alchemy_chain: str, contract: str, count: int = 1) -> list[float]:
@@ -10493,27 +10519,56 @@ def _mint_ended_verdict(last_mint_age_seconds: float | None, total_supply: int |
     return False, None
 
 
-async def _mint_has_ended(client: httpx.AsyncClient, c: dict) -> tuple[bool, str | None]:
+async def _mint_status_signals_cached(client: httpx.AsyncClient, c: dict) -> dict:
+    # Shared by the ended-mint blocker (_mint_has_ended) and the Alert
+    # Tracker embed's real floor/mint-progress display - one real on-chain
+    # lookup serves both, not two. Same empty shape _mint_status_signals
+    # itself returns for "nothing known", so a caller never has to special-
+    # case which function it came from.
     contract = (c.get("contractAddress") or "").lower()
     alchemy_chain = _OPENSEA_CHAIN_TO_ALCHEMY.get((c.get("chain") or "").lower())
+    empty = {
+        "chain": c.get("chain"), "alchemy_chain": alchemy_chain, "contract": contract or None,
+        "last_mint_age_seconds": None, "recent_mint_timestamps": [], "total_supply": None, "max_supply": None,
+    }
     if not contract or not alchemy_chain:
-        return False, None
+        return empty
     key = f"{alchemy_chain}:{contract}"
     cached = _mint_ended_cache.get(key)
     if cached and time.time() - cached[0] < _MINT_ENDED_CACHE_TTL_SECONDS:
         return cached[1]
     try:
         signals = await _mint_status_signals(client, c)
-        verdict = _mint_ended_verdict(signals["last_mint_age_seconds"], signals["total_supply"], signals["max_supply"])
     except Exception:
-        logger.exception("ended-mint check failed for %s - failing open", key)
-        return False, None
+        logger.exception("mint status lookup failed for %s - failing open", key)
+        return empty
     # Nothing learned at all (Alchemy down/rate-limited) is not worth
     # caching - the very next evaluation should get a real chance.
     if signals["last_mint_age_seconds"] is not None or signals["total_supply"] is not None:
-        _mint_ended_cache[key] = (time.time(), verdict)
+        _mint_ended_cache[key] = (time.time(), signals)
         _cap_cache(_mint_ended_cache)
-    return verdict
+    return signals
+
+
+async def _mint_has_ended(client: httpx.AsyncClient, c: dict) -> tuple[bool, str | None]:
+    signals = await _mint_status_signals_cached(client, c)
+    return _mint_ended_verdict(signals["last_mint_age_seconds"], signals["total_supply"], signals["max_supply"])
+
+
+def _mint_progress_text(signals: dict | None) -> str | None:
+    # Sourced from the same real, on-chain totalSupply()/maxSupply() check
+    # _mint_still_live already ran to confirm the mint hasn't ended - zero
+    # extra cost, and more accurate than OpenSea's own aggregate stats
+    # (which can lag a fast-moving mint by minutes).
+    if not signals:
+        return None
+    total_supply = signals.get("total_supply")
+    if total_supply is None:
+        return None
+    max_supply = signals.get("max_supply")
+    if max_supply:
+        return f"{total_supply:,} / {max_supply:,} ({total_supply / max_supply * 100:.0f}%)"
+    return f"{total_supply:,} minted"
 
 
 async def _mint_still_live(client: httpx.AsyncClient, slug: str, c: dict, surface: str) -> bool:

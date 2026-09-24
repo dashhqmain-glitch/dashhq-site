@@ -386,7 +386,7 @@ def test_convergence_embed_is_terse_and_names_wallet_count():
     # not proprietary internal scoring, and showing which wallet matched
     # is the whole point of the alert.
     assert "opensea.io/0x1111111111111111111111111111111111111a" in embed["description"]
-    assert "[View Collection]" in embed["description"]
+    assert "[OpenSea]" in embed["description"]  # consolidated into one secondary links line with the X account
     assert embed["color"] == main._NFT_SCOPE_TRACKED_ALERT_COLOR
     assert embed["url"] == _fake_collection()["openseaUrl"]
 
@@ -542,13 +542,17 @@ def test_convergence_embed_row_names_the_project_being_minted():
 def test_convergence_embed_highlights_the_chain():
     hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": "Whale"}]
     embed = main._nft_scope_tracked_convergence_embed(_fake_collection(chain="robinhood"), hits)
-    assert embed["fields"] == [{"name": "⛓️ Chain", "value": "Robinhood Chain", "inline": True}]
+    # Chain is always last in the field grid - Floor Price (and Mint
+    # Progress, when known) lead, same left-to-right priority order as
+    # _nft_scope_embed's own field grid.
+    assert embed["fields"][-1] == {"name": "⛓️ Chain", "value": "Robinhood Chain", "inline": True}
+    assert all(f["inline"] for f in embed["fields"])  # clean grid, not a stacked column
 
 
 def test_convergence_embed_chain_falls_back_to_a_titlecased_unknown_slug():
     hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": "Whale"}]
     embed = main._nft_scope_tracked_convergence_embed(_fake_collection(chain="somenewchain"), hits)
-    assert embed["fields"][0]["value"] == "Somenewchain"
+    assert embed["fields"][-1]["value"] == "Somenewchain"
 
 
 def test_convergence_embed_links_the_projects_x_account_when_opensea_has_one():
@@ -590,6 +594,84 @@ def test_convergence_components_stay_under_discords_five_button_row_cap_with_eve
     components = main._nft_scope_tracked_convergence_components(c)
     assert len(components[0]["components"]) == 3  # Mint Link + OpenSea + X, well under Discord's 5-button cap
     assert len(components) == 1
+
+
+# ── Floor price + mint progress fields (real data, for accuracy) ────────
+
+def test_convergence_embed_shows_floor_price_as_a_field():
+    hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": "Whale"}]
+    embed = main._nft_scope_tracked_convergence_embed(_fake_collection(floor=0.5, symbol="ETH"), hits)
+    floor_field = next(f for f in embed["fields"] if f["name"] == "💰 Floor Price")
+    assert floor_field["value"] == "0.5000 ETH"
+    assert floor_field["inline"] is True
+
+
+def test_convergence_embed_floor_price_includes_usd_when_available():
+    hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": "Whale"}]
+    embed = main._nft_scope_tracked_convergence_embed(_fake_collection(floor=0.5, floorUsd=1234.5), hits)
+    floor_field = next(f for f in embed["fields"] if f["name"] == "💰 Floor Price")
+    assert floor_field["value"] == "0.5000 ETH (~$1,234.50)"
+
+
+def test_convergence_embed_omits_floor_price_field_when_unknown():
+    hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": "Whale"}]
+    embed = main._nft_scope_tracked_convergence_embed(_fake_collection(floor=None), hits)
+    assert not any(f["name"] == "💰 Floor Price" for f in embed["fields"])
+
+
+def test_convergence_embed_shows_mint_progress_against_a_known_cap():
+    hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": "Whale"}]
+    signals = {"total_supply": 9999, "max_supply": 10000}
+    embed = main._nft_scope_tracked_convergence_embed(_fake_collection(), hits, mint_signals=signals)
+    progress_field = next(f for f in embed["fields"] if f["name"] == "🎟️ Mint Progress")
+    assert progress_field["value"] == "9,999 / 10,000 (100%)"
+    assert progress_field["inline"] is True
+
+
+def test_convergence_embed_shows_mint_progress_without_a_known_cap():
+    # Open-edition style contracts report 0/None for "no cap" -
+    # _mint_progress_text already handles that, just show the raw count.
+    hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": "Whale"}]
+    signals = {"total_supply": 4321, "max_supply": None}
+    embed = main._nft_scope_tracked_convergence_embed(_fake_collection(), hits, mint_signals=signals)
+    progress_field = next(f for f in embed["fields"] if f["name"] == "🎟️ Mint Progress")
+    assert progress_field["value"] == "4,321 minted"
+
+
+def test_convergence_embed_omits_mint_progress_field_when_signals_are_absent_or_empty():
+    hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": "Whale"}]
+    embed_none = main._nft_scope_tracked_convergence_embed(_fake_collection(), hits)  # mint_signals not passed at all
+    assert not any(f["name"] == "🎟️ Mint Progress" for f in embed_none["fields"])
+    embed_empty = main._nft_scope_tracked_convergence_embed(_fake_collection(), hits, mint_signals={"total_supply": None, "max_supply": None})
+    assert not any(f["name"] == "🎟️ Mint Progress" for f in embed_empty["fields"])
+
+
+def test_convergence_embed_field_grid_order_is_floor_then_mint_progress_then_chain():
+    # Same left-to-right priority every time - a member scanning several
+    # alerts in a row should find the same kind of number in the same spot.
+    hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": "Whale"}]
+    embed = main._nft_scope_tracked_convergence_embed(
+        _fake_collection(floor=0.5, chain="ink"), hits, mint_signals={"total_supply": 100, "max_supply": 200},
+    )
+    assert [f["name"] for f in embed["fields"]] == ["💰 Floor Price", "🎟️ Mint Progress", "⛓️ Chain"]
+
+
+# ── Consolidated secondary links line (OpenSea + X) ──────────────────────
+
+def test_convergence_embed_merges_opensea_and_x_into_one_secondary_links_line():
+    hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": "Whale"}]
+    embed = main._nft_scope_tracked_convergence_embed(_fake_collection(twitter="somecoolproject"), hits)
+    assert "🔗 [OpenSea](https://opensea.io/collection/test-collection)  ·  𝕏 [somecoolproject](https://x.com/somecoolproject)" in embed["description"]
+    # Mint Link stays on its own line, not folded into the secondary line -
+    # it's the actual call to action, not supplementary research material.
+    assert embed["description"].count("🎟️ [Mint Link]") == 1
+
+
+def test_convergence_embed_secondary_links_line_still_shows_opensea_alone_without_an_x_handle():
+    hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": "Whale"}]
+    embed = main._nft_scope_tracked_convergence_embed(_fake_collection(), hits)
+    assert "🔗 [OpenSea](https://opensea.io/collection/test-collection)" in embed["description"]
+    assert "𝕏" not in embed["description"]
 
 
 def test_convergence_embed_includes_a_scam_warning_when_given_one():

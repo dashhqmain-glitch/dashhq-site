@@ -597,3 +597,109 @@ async def test_mint_still_live_reports_the_reason_it_blocked(caplog):
     assert live is False
     assert "withholding gas-ghosts" in caplog.text
     assert "no one has minted in the last 254 min" in caplog.text
+
+
+# ── _mint_progress_text ─────────────────────────────────────────────────
+
+def test_mint_progress_text_shows_percent_against_a_known_cap():
+    assert main._mint_progress_text({"total_supply": 9999, "max_supply": 10000}) == "9,999 / 10,000 (100%)"
+    assert main._mint_progress_text({"total_supply": 500, "max_supply": 1000}) == "500 / 1,000 (50%)"
+
+
+def test_mint_progress_text_shows_a_bare_count_without_a_cap():
+    assert main._mint_progress_text({"total_supply": 4321, "max_supply": None}) == "4,321 minted"
+    assert main._mint_progress_text({"total_supply": 4321, "max_supply": 0}) == "4,321 minted"  # open-edition "no cap"
+
+
+def test_mint_progress_text_is_none_when_nothing_is_known():
+    assert main._mint_progress_text(None) is None
+    assert main._mint_progress_text({}) is None
+    assert main._mint_progress_text({"total_supply": None, "max_supply": None}) is None
+
+
+# ── _mint_status_signals_cached: shared by the blocker and the embed ────
+
+async def test_status_signals_cached_shares_its_cache_with_the_ended_mint_check():
+    # The whole point of the refactor: one real on-chain lookup serves both
+    # the blocker's verdict and the embed's display data, not two.
+    calls = []
+
+    async def fake_signals(client, c, sample=1):
+        calls.append(1)
+        return {"last_mint_age_seconds": 5.0, "total_supply": 100, "max_supply": 200, "recent_mint_timestamps": []}
+
+    with patch.object(main, "_mint_status_signals", new=fake_signals):
+        ended, _ = await main._mint_has_ended(object(), collection(contract="0xshared"))
+        signals = await main._mint_status_signals_cached(object(), collection(contract="0xshared"))
+
+    assert ended is False  # 100/200, not sold out, and recently minted
+    assert signals["total_supply"] == 100 and signals["max_supply"] == 200
+    assert len(calls) == 1  # second call served from the same cache _mint_has_ended already warmed
+
+
+async def test_status_signals_cached_returns_the_empty_shape_for_an_unsupported_collection():
+    class Boom:
+        async def post(self, *a, **k):
+            raise AssertionError("must not call out")
+
+    signals = await main._mint_status_signals_cached(Boom(), collection(chain="avalanche"))
+    assert signals["total_supply"] is None and signals["max_supply"] is None
+    assert signals["alchemy_chain"] is None
+
+
+async def test_status_signals_cached_fails_open_on_any_exception():
+    async def boom(*a, **k):
+        raise RuntimeError("alchemy exploded")
+
+    with patch.object(main, "_mint_status_signals", new=boom):
+        signals = await main._mint_status_signals_cached(object(), collection(contract="0xerr"))
+    assert signals["total_supply"] is None and signals["max_supply"] is None
+
+
+# ── End-to-end: the Alert Tracker post actually carries real mint data ──
+
+async def test_alert_tracker_post_carries_real_floor_and_mint_progress_end_to_end():
+    # Not just "the embed builder accepts a mint_signals param" - this
+    # proves _nft_scope_maybe_post_tracked_convergence actually fetches
+    # real on-chain signals and the posted embed actually contains them.
+    posted_embeds = []
+
+    async def fake_already(client, slug):
+        return False
+
+    async def fake_wash(client, slug):
+        return True
+
+    async def fake_signals(client, c, sample=1):
+        return {"last_mint_age_seconds": 30.0, "total_supply": 777, "max_supply": 1000, "recent_mint_timestamps": [time.time() - 30]}
+
+    async def fake_post(client, channel_id, embed, content=None, components=None):
+        posted_embeds.append(embed)
+        return True
+
+    async def record(*a, **k):
+        pass
+
+    c = {
+        "name": "Real Collection", "slug": "real-collection", "floor": 0.42, "floorUsd": 1500.0, "symbol": "ETH",
+        "chain": "ethereum", "openseaUrl": "https://opensea.io/collection/real-collection", "image": None,
+        "contractAddress": "0xrealcontract",
+    }
+    hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": "Whale"}]
+    score = {"tier": "red", "blocked": False, "has_real_activity": True, "has_timeliness_signal": True}
+
+    with patch.object(main, "_alert_tracker_already_posted", new=fake_already), \
+         patch.object(main, "_nft_scope_clears_wash_check", new=fake_wash), \
+         patch.object(main, "_mint_status_signals", new=fake_signals), \
+         patch.object(main, "_post_channel_message", new=fake_post), \
+         patch.object(main, "_nft_scope_mark_posted", new=record), \
+         patch.object(main, "_nft_scope_record_call_buyers", new=record), \
+         patch.object(main, "_alert_tracker_record_call", new=record):
+        result = await main._nft_scope_maybe_post_tracked_convergence(main.httpx.AsyncClient(), "real-collection", c, hits, score)
+
+    assert result is True
+    embed = posted_embeds[0]
+    floor_field = next(f for f in embed["fields"] if f["name"] == "💰 Floor Price")
+    assert floor_field["value"] == "0.4200 ETH (~$1,500.00)"
+    progress_field = next(f for f in embed["fields"] if f["name"] == "🎟️ Mint Progress")
+    assert progress_field["value"] == "777 / 1,000 (78%)"
