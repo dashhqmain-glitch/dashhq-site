@@ -1,0 +1,18 @@
+name: Temporary fire real calls to see the grade
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post the real Alert Tracker preview (with the new grade)
+        run: |
+          curl -s -w "\nHTTP_CODE=%{http_code}\n" "https://www.dashhq.site/cron/post-latest-tracked-mint" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
+      - name: Run a real full poll cycle (may find + grade a fresh live convergence)
+        run: |
+          curl -s -w "\nHTTP_CODE=%{http_code}\n" "https://www.dashhq.site/cron/nft-poll" \
+            -H "Authorization: Bearer ${{ secrets.NFT_CRON_SECRET }}" \
+            | jq -Rr 'if startswith("{") then (fromjson | {took_seconds, tracked_wallet_watch, alert_tracker_recheck, explorer_backstop}) else . end'
