@@ -1,0 +1,13 @@
+name: Temporary embed redesign live check
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post a real Alert Tracker preview and show the fields it carried
+        run: |
+          curl -s -w "\nHTTP_CODE=%{http_code}\n" "https://www.dashhq.site/cron/post-latest-tracked-mint" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
