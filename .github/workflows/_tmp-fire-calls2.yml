@@ -7,7 +7,6 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - name: Post the real Alert Tracker preview (with the 4-axis grade)
+      - name: Show the-artifacts real collection data
         run: |
-          curl -s -w "\nHTTP_CODE=%{http_code}\n" "https://www.dashhq.site/cron/post-latest-tracked-mint" \
-            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
+          curl -s "https://www.dashhq.site/toolkit/nft-collection?slug=the-artifacts" | jq '{name, floor, floorUsd, symbol, verified, category, twitter, discord, website}'
