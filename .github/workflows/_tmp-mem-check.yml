@@ -1,0 +1,14 @@
+name: Temporary post-memory-cut timing check
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: One real poll cycle, timing only
+        run: |
+          curl -s -w "\nHTTP_CODE=%{http_code}\n" "https://www.dashhq.site/cron/nft-poll" \
+            -H "Authorization: Bearer ${{ secrets.NFT_CRON_SECRET }}" \
+            | jq -Rr 'if startswith("{") then (fromjson | {took_seconds, skipped, errors}) else . end'
