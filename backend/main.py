@@ -906,7 +906,7 @@ async def post_latest_tracked_mint(request: Request, ping: bool = False):
         # show, never a fabricated number.
         distinct_addresses = {h["address"] for h in hits}
         track_records = await _nft_scope_merged_track_records(client, sorted(distinct_addresses))
-        grade, grade_points, grade_reasons = _alert_tracker_grade(distinct_addresses, track_records, {})
+        grade, grade_points, grade_reasons = _alert_tracker_grade(distinct_addresses, track_records, {}, c)
         embed = _nft_scope_tracked_convergence_embed(
             c, hits, estimated, scam_warning, track_records, mint_signals=mint_signals,
             grade=grade, grade_points=grade_points, grade_reasons=grade_reasons,
@@ -9615,39 +9615,76 @@ def _alert_tracker_footer_text(stats: dict | None) -> str:
 
 
 # ── Alert Tracker grade: S/A/B/C on every call ──────────────────────────
-# Direct request: grade each call by (1) the quality of the wallets
-# converging and (2) real floor/price action, not the general NFT Scope
-# score - that score answers "is this collection legitimate" (distribution
-# health, socials, verified badge, supply sanity), most of which has
-# nothing to do with what's actually being asked here. This is a narrower,
-# purpose-built combination of two things already computed elsewhere in
-# this file, reused as-is rather than re-derived: track_records (this
-# wallet's REAL resolved win rate, already cleared
-# _NFT_SCOPE_SMART_WALLET_MIN_SAMPLE/_MIN_WIN_RATE to even be present) and
+# Direct request: grade each call by the quality of the wallets converging,
+# real price momentum, the floor's actual dollar value, and the type of
+# project being minted - not the general NFT Scope score, which answers a
+# different question ("is this collection legitimate") via signals like
+# supply sanity that have nothing to do with any of the above. This is a
+# narrower, purpose-built combination of four things already computed
+# elsewhere in this file, reused as-is rather than re-derived:
+# track_records (a wallet's REAL resolved win rate, already cleared
+# _NFT_SCOPE_SMART_WALLET_MIN_SAMPLE/_MIN_WIN_RATE to even be present),
 # score["floor_multiple"]/score["reasons"] (the same real, proven
 # appreciation-since-first-tracked and rapid-activity signals every other
-# post already trusts). Zero new API calls - every input is already in
-# hand by the time a post is about to go out.
+# post already trusts), and c["floorUsd"]/c["verified"]/c["category"] (the
+# same OpenSea collection data every embed already has in hand). Zero new
+# API calls.
 #
 # Deliberately additive and capped per axis, same shape as every other
 # scoring function in this file (_nft_scope_score, _nft_scope_tracked_wallet_points)
-# - transparent, tunable constants, not a black box. Wallet Quality is
-# weighted slightly heavier than Price Action (60 vs 40) because this IS
-# the Alert Tracker: WHO is buying is the primary signal it exists to
-# surface; price action is real corroborating evidence, not the headline.
-_ALERT_TRACKER_GRADE_POINTS_PER_WALLET = 15  # per distinct tracked wallet converging
-_ALERT_TRACKER_GRADE_MAX_WALLET_COUNT_POINTS = 45  # caps at 3 wallets - a 4th converging wallet is still shown, just doesn't add further grade points
-_ALERT_TRACKER_GRADE_ONE_PROVEN_WALLET_POINTS = 10  # at least one converging wallet has a REAL resolved track record, not just a category label
-_ALERT_TRACKER_GRADE_TWO_PROVEN_WALLETS_BONUS = 5  # stacks on top of the above - two independently proven wallets agreeing is stronger than one
-_ALERT_TRACKER_GRADE_MAX_WALLET_POINTS = 60
+# - transparent, tunable constants, not a black box. Wallet Quality stays
+# the heaviest single axis (45 of 100) because this IS the Alert Tracker:
+# WHO is buying is the primary signal it exists to surface. The other
+# three - price momentum, the floor's real dollar value, and project
+# quality/type - are real corroborating evidence, not the headline, so
+# each gets a smaller slice (20/20/15) rather than being folded into one
+# vague "everything else" bucket.
+_ALERT_TRACKER_GRADE_POINTS_PER_WALLET = 12  # per distinct tracked wallet converging
+_ALERT_TRACKER_GRADE_MAX_WALLET_COUNT_POINTS = 36  # caps at 3 wallets - a 4th converging wallet is still shown, just doesn't add further grade points
+_ALERT_TRACKER_GRADE_ONE_PROVEN_WALLET_POINTS = 6  # at least one converging wallet has a REAL resolved track record, not just a category label
+_ALERT_TRACKER_GRADE_TWO_PROVEN_WALLETS_BONUS = 3  # stacks on top of the above - two independently proven wallets agreeing is stronger than one
+_ALERT_TRACKER_GRADE_MAX_WALLET_POINTS = 45
 
-_ALERT_TRACKER_GRADE_FLOOR_2X_POINTS = 25  # floor_multiple >= 2.0 - real, proven appreciation since NFT Scope first tracked this
-_ALERT_TRACKER_GRADE_FLOOR_1_5X_POINTS = 15
-_ALERT_TRACKER_GRADE_FLOOR_1_2X_POINTS = 8
-_ALERT_TRACKER_GRADE_SHARP_MOMENTUM_POINTS = 15  # score already found a 🔥 "happening right now" burst this cycle
-_ALERT_TRACKER_GRADE_SURGE_MOMENTUM_POINTS = 10  # 💥 price and volume moving together within the burst
-_ALERT_TRACKER_GRADE_RAPID_MOMENTUM_POINTS = 5  # 🚀 a real but more modest burst of verified sales
-_ALERT_TRACKER_GRADE_MAX_ACTION_POINTS = 40
+_ALERT_TRACKER_GRADE_FLOOR_2X_POINTS = 12  # floor_multiple >= 2.0 - real, proven appreciation since NFT Scope first tracked this
+_ALERT_TRACKER_GRADE_FLOOR_1_5X_POINTS = 8
+_ALERT_TRACKER_GRADE_FLOOR_1_2X_POINTS = 4
+_ALERT_TRACKER_GRADE_SHARP_MOMENTUM_POINTS = 8  # score already found a 🔥 "happening right now" burst this cycle
+_ALERT_TRACKER_GRADE_SURGE_MOMENTUM_POINTS = 5  # 💥 price and volume moving together within the burst
+_ALERT_TRACKER_GRADE_RAPID_MOMENTUM_POINTS = 3  # 🚀 a real but more modest burst of verified sales
+_ALERT_TRACKER_GRADE_MAX_MOMENTUM_POINTS = 20
+
+# Floor Value (max 20) - real dollar stakes, not the general "is this
+# legitimate" checklist. Priced in USD specifically (not ETH/the chain's
+# native token) so a Robinhood-chain cent-floor mint and an Ethereum
+# blue-chip are graded on the same real scale instead of an apples-to-
+# oranges token count - the exact reason c["floorUsd"] exists at all.
+# Confirmed live: "Aura" (real Alert Tracker call, 28 converging wallets)
+# had a $0.91 floor - real wallet interest, but a fundamentally different,
+# lower-stakes situation than the same wallet count on a $5,000 floor, and
+# nothing before this axis existed could tell the two apart.
+_ALERT_TRACKER_GRADE_FLOOR_ELITE_USD = 5000
+_ALERT_TRACKER_GRADE_FLOOR_HIGH_USD = 500
+_ALERT_TRACKER_GRADE_FLOOR_MID_USD = 50
+_ALERT_TRACKER_GRADE_FLOOR_LOW_USD = 5
+_ALERT_TRACKER_GRADE_FLOOR_ELITE_POINTS = 20
+_ALERT_TRACKER_GRADE_FLOOR_HIGH_POINTS = 14
+_ALERT_TRACKER_GRADE_FLOOR_MID_POINTS = 8
+_ALERT_TRACKER_GRADE_FLOOR_LOW_POINTS = 3
+_ALERT_TRACKER_GRADE_MAX_FLOOR_POINTS = 20  # same value as the elite tier above - named separately so every axis has one consistent cap constant
+
+# Project Quality (max 15) - the TYPE of project being minted: an OpenSea-
+# verified collection with a real declared category and a public presence
+# is a fundamentally different kind of mint than an anonymous, blank-
+# listing drop, independent of who's currently buying it. Same signals
+# _nft_scope_score's own "project substance" check already trusts
+# (verified badge, category, socials) - reused, not re-derived - just a
+# smaller, targeted slice of them rather than that whole checklist
+# (supply sanity, description length, etc. genuinely don't belong in a
+# wallet-convergence grade).
+_ALERT_TRACKER_GRADE_VERIFIED_POINTS = 7  # OpenSea-verified - earned, not self-reported
+_ALERT_TRACKER_GRADE_CATEGORY_POINTS = 4  # a real declared category, not a blank listing
+_ALERT_TRACKER_GRADE_SOCIALS_POINTS = 4  # Twitter/X, Discord, or a website linked - not an anonymous drop
+_ALERT_TRACKER_GRADE_MAX_QUALITY_POINTS = 15
 
 _ALERT_TRACKER_GRADE_S_THRESHOLD = 80
 _ALERT_TRACKER_GRADE_A_THRESHOLD = 55
@@ -9656,15 +9693,16 @@ _ALERT_TRACKER_GRADE_B_THRESHOLD = 30
 # graded at all already cleared _nft_scope_maybe_post_tracked_convergence's
 # own posting gates (real activity, not blocked, worth posting). C means
 # "this call is real, just the thinnest qualifying form of one" - a single
-# wallet with no proven history yet and no price action so far.
+# wallet with no proven history yet, no price action, a low or unknown
+# floor, and no project-quality signals on file.
 _ALERT_TRACKER_GRADE_EMOJI = {"S": "🏆", "A": "🥇", "B": "🥈", "C": "🥉"}
 
 
-def _alert_tracker_grade(distinct_addresses: set[str], track_records: dict[str, dict] | None, score: dict) -> tuple[str, int, list[str]]:
+def _alert_tracker_grade(distinct_addresses: set[str], track_records: dict[str, dict] | None, score: dict, c: dict) -> tuple[str, int, list[str]]:
     track_records = track_records or {}
     reasons: list[str] = []
 
-    # Wallet Quality (max 60) - who's actually buying in.
+    # Wallet Quality (max 45) - who's actually buying in.
     wallet_points = min(len(distinct_addresses) * _ALERT_TRACKER_GRADE_POINTS_PER_WALLET, _ALERT_TRACKER_GRADE_MAX_WALLET_COUNT_POINTS)
     proven_count = sum(1 for a in distinct_addresses if a in track_records)
     if proven_count >= 1:
@@ -9677,17 +9715,17 @@ def _alert_tracker_grade(distinct_addresses: set[str], track_records: dict[str, 
         wallet_bit += f" ({proven_count} with a proven track record)"
     reasons.append(wallet_bit)
 
-    # Price Action (max 40) - is the floor actually moving.
-    action_points = 0
+    # Price Momentum (max 20) - is the floor actually moving right now.
+    momentum_points = 0
     floor_multiple = score.get("floor_multiple") or 0
     if floor_multiple >= 2.0:
-        action_points += _ALERT_TRACKER_GRADE_FLOOR_2X_POINTS
+        momentum_points += _ALERT_TRACKER_GRADE_FLOOR_2X_POINTS
         reasons.append(f"Floor already {floor_multiple:.1f}x since first tracked")
     elif floor_multiple >= 1.5:
-        action_points += _ALERT_TRACKER_GRADE_FLOOR_1_5X_POINTS
+        momentum_points += _ALERT_TRACKER_GRADE_FLOOR_1_5X_POINTS
         reasons.append(f"Floor already {floor_multiple:.1f}x since first tracked")
     elif floor_multiple >= 1.2:
-        action_points += _ALERT_TRACKER_GRADE_FLOOR_1_2X_POINTS
+        momentum_points += _ALERT_TRACKER_GRADE_FLOOR_1_2X_POINTS
         reasons.append(f"Floor up {floor_multiple:.1f}x since first tracked")
     # Same reason strings _nft_scope_score itself already writes (🔥 sharp /
     # 💥 surge / 🚀 rapid) - matched here rather than re-computed, the same
@@ -9696,17 +9734,53 @@ def _alert_tracker_grade(distinct_addresses: set[str], track_records: dict[str, 
     # threading yet another raw parameter through every caller.
     reason_text = " ".join(score.get("reasons") or [])
     if "🔥" in reason_text:
-        action_points += _ALERT_TRACKER_GRADE_SHARP_MOMENTUM_POINTS
+        momentum_points += _ALERT_TRACKER_GRADE_SHARP_MOMENTUM_POINTS
         reasons.append("🔥 Sharp momentum happening right now")
     elif "💥" in reason_text:
-        action_points += _ALERT_TRACKER_GRADE_SURGE_MOMENTUM_POINTS
+        momentum_points += _ALERT_TRACKER_GRADE_SURGE_MOMENTUM_POINTS
         reasons.append("💥 Price and volume surging together")
     elif "🚀" in reason_text:
-        action_points += _ALERT_TRACKER_GRADE_RAPID_MOMENTUM_POINTS
+        momentum_points += _ALERT_TRACKER_GRADE_RAPID_MOMENTUM_POINTS
         reasons.append("🚀 Verified sales accelerating")
-    action_points = min(action_points, _ALERT_TRACKER_GRADE_MAX_ACTION_POINTS)
+    momentum_points = min(momentum_points, _ALERT_TRACKER_GRADE_MAX_MOMENTUM_POINTS)
 
-    points = wallet_points + action_points
+    # Floor Value (max 20) - real dollar stakes behind this call, priced in
+    # USD so every chain/token grades on the same real scale.
+    floor_points = 0
+    floor_usd = c.get("floorUsd")
+    if floor_usd is not None:
+        if floor_usd >= _ALERT_TRACKER_GRADE_FLOOR_ELITE_USD:
+            floor_points = _ALERT_TRACKER_GRADE_FLOOR_ELITE_POINTS
+            reasons.append(f"Elite floor - ${floor_usd:,.2f}")
+        elif floor_usd >= _ALERT_TRACKER_GRADE_FLOOR_HIGH_USD:
+            floor_points = _ALERT_TRACKER_GRADE_FLOOR_HIGH_POINTS
+            reasons.append(f"High-value floor - ${floor_usd:,.2f}")
+        elif floor_usd >= _ALERT_TRACKER_GRADE_FLOOR_MID_USD:
+            floor_points = _ALERT_TRACKER_GRADE_FLOOR_MID_POINTS
+            reasons.append(f"Solid floor - ${floor_usd:,.2f}")
+        elif floor_usd >= _ALERT_TRACKER_GRADE_FLOOR_LOW_USD:
+            floor_points = _ALERT_TRACKER_GRADE_FLOOR_LOW_POINTS
+            reasons.append(f"Modest floor - ${floor_usd:,.2f}")
+        # Below _FLOOR_LOW_USD (or floorUsd unknown): 0 points, no reason
+        # line - a sub-$5 or unpriced floor genuinely adds nothing here.
+
+    # Project Quality (max 15) - the TYPE of project, independent of who's
+    # currently buying it.
+    quality_points = 0
+    quality_bits = []
+    if c.get("verified"):
+        quality_points += _ALERT_TRACKER_GRADE_VERIFIED_POINTS
+        quality_bits.append("OpenSea-verified")
+    if c.get("category"):
+        quality_points += _ALERT_TRACKER_GRADE_CATEGORY_POINTS
+        quality_bits.append(f"category: {c['category']}")
+    if c.get("twitter") or c.get("discord") or c.get("website"):
+        quality_points += _ALERT_TRACKER_GRADE_SOCIALS_POINTS
+        quality_bits.append("public presence linked")
+    if quality_bits:
+        reasons.append("Project quality: " + ", ".join(quality_bits))
+
+    points = wallet_points + momentum_points + floor_points + quality_points
     return _alert_tracker_grade_letter_for_points(points), points, reasons
 
 
@@ -10296,7 +10370,7 @@ async def _nft_scope_maybe_post_tracked_convergence(client: httpx.AsyncClient, s
         _mint_status_signals_cached(client, c),
     )
     scam_warning = await _mint_link_scam_warning(client, c.get("website") or c.get("openseaUrl"))
-    grade, grade_points, grade_reasons = _alert_tracker_grade(distinct_addresses, track_records, score)
+    grade, grade_points, grade_reasons = _alert_tracker_grade(distinct_addresses, track_records, score, c)
     delivered = await _post_channel_message(
         client, settings.discord_smart_wallet_channel_id,
         _nft_scope_tracked_convergence_embed(

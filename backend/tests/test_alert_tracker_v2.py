@@ -690,12 +690,13 @@ def test_embed_conviction_badge_replaced_by_the_grade_scales_with_proven_wallet_
     score = {"floor_multiple": None, "reasons": []}
     distinct = {"0xa", "0xb"}
 
-    grade_one, points_one, reasons_one = main._alert_tracker_grade(distinct, one_proven, score)
-    embed_one = main._nft_scope_tracked_convergence_embed(_fake_collection(), hits, track_records=one_proven, grade=grade_one, grade_points=points_one, grade_reasons=reasons_one)
+    collection = _fake_collection()
+    grade_one, points_one, reasons_one = main._alert_tracker_grade(distinct, one_proven, score, collection)
+    embed_one = main._nft_scope_tracked_convergence_embed(collection, hits, track_records=one_proven, grade=grade_one, grade_points=points_one, grade_reasons=reasons_one)
     assert embed_one["title"].startswith(f"{main._ALERT_TRACKER_GRADE_EMOJI[grade_one]} {grade_one}-Tier")
 
-    grade_two, points_two, reasons_two = main._alert_tracker_grade(distinct, two_proven, score)
-    embed_two = main._nft_scope_tracked_convergence_embed(_fake_collection(), hits, track_records=two_proven, grade=grade_two, grade_points=points_two, grade_reasons=reasons_two)
+    grade_two, points_two, reasons_two = main._alert_tracker_grade(distinct, two_proven, score, collection)
+    embed_two = main._nft_scope_tracked_convergence_embed(collection, hits, track_records=two_proven, grade=grade_two, grade_points=points_two, grade_reasons=reasons_two)
     assert embed_two["title"].startswith(f"{main._ALERT_TRACKER_GRADE_EMOJI[grade_two]} {grade_two}-Tier")
 
     # Two proven wallets converging must never grade lower than one.

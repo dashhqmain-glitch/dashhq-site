@@ -708,9 +708,10 @@ async def test_alert_tracker_post_carries_real_floor_and_mint_progress_end_to_en
     assert progress_field["value"] == "777 / 1,000 (78%)"
     # Grade: not just the embed builder accepting a grade param - this is
     # _nft_scope_maybe_post_tracked_convergence's own _alert_tracker_grade
-    # call, computed from the real hits/track_records/score above and
-    # actually reaching the posted embed. 1 wallet (15) + 1.5x floor tier
-    # (15) + 🚀 rapid momentum (5) = 35 -> B.
+    # call, computed from the real hits/track_records/score/c above and
+    # actually reaching the posted embed. 1 wallet (12) + 1.5x floor
+    # momentum (8) + 🚀 rapid momentum (3) + $1,500 floor value, "High"
+    # tier (14) + no project-quality signals on this c (0) = 37 -> B.
     grade_field = next(f for f in embed["fields"] if f["name"] == "🏆 Grade")
-    assert grade_field["value"].startswith("**B** (35/100)")
+    assert grade_field["value"].startswith("**B** (37/100)")
     assert embed["title"].startswith("🥈 B-Tier · 1 Wallet Minting")
