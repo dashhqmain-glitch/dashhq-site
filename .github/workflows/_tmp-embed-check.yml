@@ -7,7 +7,10 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - name: Post a real Alert Tracker preview and show the fields it carried
+      - name: Show the real floor/mint-progress data cinder-tooth's post should have carried
         run: |
-          curl -s -w "\nHTTP_CODE=%{http_code}\n" "https://www.dashhq.site/cron/post-latest-tracked-mint" \
-            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
+          curl -s -G "https://www.dashhq.site/cron/check-mint-status" \
+            --data-urlencode "slugs=cinder-tooth" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" | jq .
+          echo "--- collection floor/symbol from the same source the embed uses ---"
+          curl -s "https://www.dashhq.site/toolkit/nft-collection?slug=cinder-tooth" | jq '{name, floor, floorUsd, symbol}'
