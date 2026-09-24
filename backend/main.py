@@ -891,7 +891,12 @@ async def post_latest_tracked_mint(request: Request, ping: bool = False):
         estimated = await _estimate_wallet_categories(client, [h["address"] for h in hits if not h.get("category")])
         c = await _nft_collection_core(slug)
         scam_warning = await _mint_link_scam_warning(client, c.get("website") or c.get("openseaUrl"))
-        embed = _nft_scope_tracked_convergence_embed(c, hits, estimated, scam_warning)
+        # Same real on-chain lookup the live pipeline uses for the Floor
+        # Price/Mint Progress fields - this previews REAL data, so it
+        # should render the exact same fields a genuine alert would, not a
+        # thinner stand-in missing what's actually new.
+        mint_signals = await _mint_status_signals_cached(client, c)
+        embed = _nft_scope_tracked_convergence_embed(c, hits, estimated, scam_warning, mint_signals=mint_signals)
         embed["footer"] = {"text": f"{embed['footer']['text']} · Manually triggered preview with REAL data, not a live alert"}
         # Silent by default - a manual preview call shouldn't ping anyone
         # every time someone wants to eyeball the embed. ?ping=true opts
