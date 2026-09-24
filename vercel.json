@@ -1,7 +1,7 @@
 {
   "version": 2,
   "builds": [
-    { "src": "api/index.py",  "use": "@vercel/python", "config": { "maxDuration": 60, "memory": 3009, "includeFiles": "backend/assets/**" } },
+    { "src": "api/index.py",  "use": "@vercel/python", "config": { "maxDuration": 60, "memory": 2048, "includeFiles": "backend/assets/**" } },
     { "src": "index.html",    "use": "@vercel/static" },
     { "src": "portal.html",   "use": "@vercel/static" },
     { "src": "apply.html",    "use": "@vercel/static" },
@@ -29,11 +29,5 @@
     { "src": "/apply.html",   "dest": "/apply", "status": 301 },
     { "src": "/",             "dest": "/index.html"   },
     { "src": "/(.*)",         "dest": "/$1"           }
-  ],
-  "crons": [
-    { "path": "/cron/sync-members", "schedule": "0 6 * * *" },
-    { "path": "/cron/refresh-opensea-key", "schedule": "0 12 * * *" },
-    { "path": "/cron/aco-education", "schedule": "0 17 */3 * *" },
-    { "path": "/cron/aco-key-cleanup", "schedule": "0 3 * * *" }
   ]
 }

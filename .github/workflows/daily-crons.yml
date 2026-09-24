@@ -1,0 +1,66 @@
+name: Daily crons (moved off Vercel's native cron)
+
+# These 4 jobs used to run on Vercel's own native cron feature
+# (vercel.json's "crons" array). Vercel's Hobby plan caps native cron at
+# 2 jobs/project and this account was about to be forced onto Hobby by a
+# failed-payment shutdown, so all 4 moved here instead - the same free,
+# already-proven pattern nft-poll.yml and nft-poll-heartbeat.yml already
+# run on for the exact same underlying reason (GH Actions crons cost
+# nothing and don't depend on the Vercel plan at all).
+#
+# Unlike those two, this does NOT need the self-looping wall-clock
+# pattern: that trick exists specifically because GH Actions' own
+# `schedule:` trigger gets throttled/delayed under platform load at SHORT
+# intervals (documented in nft-poll.yml - "every 5 min" landing anywhere
+# from ~20 min to 2.5+ hours apart). All 4 jobs below are daily or
+# slower, where that same unreliability is a total non-issue - a job
+# meant to run once a day landing a few minutes (even an hour) late
+# doesn't matter, so a plain `schedule:` trigger is the right, simpler
+# tool here.
+#
+# Same cron expressions vercel.json used, unchanged, so the real-world
+# firing pattern doesn't change either.
+
+on:
+  schedule:
+    - cron: '0 6 * * *'     # sync-members
+    - cron: '0 12 * * *'    # refresh-opensea-key
+    - cron: '0 3 * * *'     # aco-key-cleanup
+    - cron: '0 17 */3 * *'  # aco-education
+  workflow_dispatch: {}     # manual run fires every job below - useful for verification
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: sync-members
+        if: github.event.schedule == '0 6 * * *' || github.event_name == 'workflow_dispatch'
+        run: |
+          status=$(curl -s -o response.json -w "%{http_code}" "https://www.dashhq.site/cron/sync-members" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}")
+          echo "HTTP $status"; cat response.json
+          [ "$status" -lt 400 ] || { echo "::error::sync-members failed"; exit 1; }
+
+      - name: refresh-opensea-key
+        if: github.event.schedule == '0 12 * * *' || github.event_name == 'workflow_dispatch'
+        run: |
+          status=$(curl -s -o response.json -w "%{http_code}" "https://www.dashhq.site/cron/refresh-opensea-key" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}")
+          echo "HTTP $status"; cat response.json
+          [ "$status" -lt 400 ] || { echo "::error::refresh-opensea-key failed"; exit 1; }
+
+      - name: aco-key-cleanup
+        if: github.event.schedule == '0 3 * * *' || github.event_name == 'workflow_dispatch'
+        run: |
+          status=$(curl -s -o response.json -w "%{http_code}" "https://www.dashhq.site/cron/aco-key-cleanup" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}")
+          echo "HTTP $status"; cat response.json
+          [ "$status" -lt 400 ] || { echo "::error::aco-key-cleanup failed"; exit 1; }
+
+      - name: aco-education
+        if: github.event.schedule == '0 17 */3 * *' || github.event_name == 'workflow_dispatch'
+        run: |
+          status=$(curl -s -o response.json -w "%{http_code}" "https://www.dashhq.site/cron/aco-education" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}")
+          echo "HTTP $status"; cat response.json
+          [ "$status" -lt 400 ] || { echo "::error::aco-education failed"; exit 1; }
