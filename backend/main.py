@@ -896,7 +896,21 @@ async def post_latest_tracked_mint(request: Request, ping: bool = False):
         # should render the exact same fields a genuine alert would, not a
         # thinner stand-in missing what's actually new.
         mint_signals = await _mint_status_signals_cached(client, c)
-        embed = _nft_scope_tracked_convergence_embed(c, hits, estimated, scam_warning, mint_signals=mint_signals)
+        # Wallet-quality half of the grade uses real data (hits/track
+        # records, fetched below); the price-action half needs
+        # floor_multiple/rapid-activity reasons from the full NFT Scope
+        # scoring pipeline, which this lightweight preview deliberately
+        # doesn't run (real extra API cost for a manual, on-demand command).
+        # An empty score just means that half reads as 0 here - honestly
+        # thinner than what a live automated call for the same slug might
+        # show, never a fabricated number.
+        distinct_addresses = {h["address"] for h in hits}
+        track_records = await _nft_scope_merged_track_records(client, sorted(distinct_addresses))
+        grade, grade_points, grade_reasons = _alert_tracker_grade(distinct_addresses, track_records, {})
+        embed = _nft_scope_tracked_convergence_embed(
+            c, hits, estimated, scam_warning, track_records, mint_signals=mint_signals,
+            grade=grade, grade_points=grade_points, grade_reasons=grade_reasons,
+        )
         embed["footer"] = {"text": f"{embed['footer']['text']} · Manually triggered preview with REAL data, not a live alert"}
         # Silent by default - a manual preview call shouldn't ping anyone
         # every time someone wants to eyeball the embed. ?ping=true opts
@@ -9600,10 +9614,117 @@ def _alert_tracker_footer_text(stats: dict | None) -> str:
     return f"{base} · Alert Tracker record: {stats['hit_rate'] * 100:.0f}% up on floor ({stats['checked_calls']} calls)"
 
 
+# ── Alert Tracker grade: S/A/B/C on every call ──────────────────────────
+# Direct request: grade each call by (1) the quality of the wallets
+# converging and (2) real floor/price action, not the general NFT Scope
+# score - that score answers "is this collection legitimate" (distribution
+# health, socials, verified badge, supply sanity), most of which has
+# nothing to do with what's actually being asked here. This is a narrower,
+# purpose-built combination of two things already computed elsewhere in
+# this file, reused as-is rather than re-derived: track_records (this
+# wallet's REAL resolved win rate, already cleared
+# _NFT_SCOPE_SMART_WALLET_MIN_SAMPLE/_MIN_WIN_RATE to even be present) and
+# score["floor_multiple"]/score["reasons"] (the same real, proven
+# appreciation-since-first-tracked and rapid-activity signals every other
+# post already trusts). Zero new API calls - every input is already in
+# hand by the time a post is about to go out.
+#
+# Deliberately additive and capped per axis, same shape as every other
+# scoring function in this file (_nft_scope_score, _nft_scope_tracked_wallet_points)
+# - transparent, tunable constants, not a black box. Wallet Quality is
+# weighted slightly heavier than Price Action (60 vs 40) because this IS
+# the Alert Tracker: WHO is buying is the primary signal it exists to
+# surface; price action is real corroborating evidence, not the headline.
+_ALERT_TRACKER_GRADE_POINTS_PER_WALLET = 15  # per distinct tracked wallet converging
+_ALERT_TRACKER_GRADE_MAX_WALLET_COUNT_POINTS = 45  # caps at 3 wallets - a 4th converging wallet is still shown, just doesn't add further grade points
+_ALERT_TRACKER_GRADE_ONE_PROVEN_WALLET_POINTS = 10  # at least one converging wallet has a REAL resolved track record, not just a category label
+_ALERT_TRACKER_GRADE_TWO_PROVEN_WALLETS_BONUS = 5  # stacks on top of the above - two independently proven wallets agreeing is stronger than one
+_ALERT_TRACKER_GRADE_MAX_WALLET_POINTS = 60
+
+_ALERT_TRACKER_GRADE_FLOOR_2X_POINTS = 25  # floor_multiple >= 2.0 - real, proven appreciation since NFT Scope first tracked this
+_ALERT_TRACKER_GRADE_FLOOR_1_5X_POINTS = 15
+_ALERT_TRACKER_GRADE_FLOOR_1_2X_POINTS = 8
+_ALERT_TRACKER_GRADE_SHARP_MOMENTUM_POINTS = 15  # score already found a 🔥 "happening right now" burst this cycle
+_ALERT_TRACKER_GRADE_SURGE_MOMENTUM_POINTS = 10  # 💥 price and volume moving together within the burst
+_ALERT_TRACKER_GRADE_RAPID_MOMENTUM_POINTS = 5  # 🚀 a real but more modest burst of verified sales
+_ALERT_TRACKER_GRADE_MAX_ACTION_POINTS = 40
+
+_ALERT_TRACKER_GRADE_S_THRESHOLD = 80
+_ALERT_TRACKER_GRADE_A_THRESHOLD = 55
+_ALERT_TRACKER_GRADE_B_THRESHOLD = 30
+# Below B_THRESHOLD is C - the floor grade, not a failure: every call
+# graded at all already cleared _nft_scope_maybe_post_tracked_convergence's
+# own posting gates (real activity, not blocked, worth posting). C means
+# "this call is real, just the thinnest qualifying form of one" - a single
+# wallet with no proven history yet and no price action so far.
+_ALERT_TRACKER_GRADE_EMOJI = {"S": "🏆", "A": "🥇", "B": "🥈", "C": "🥉"}
+
+
+def _alert_tracker_grade(distinct_addresses: set[str], track_records: dict[str, dict] | None, score: dict) -> tuple[str, int, list[str]]:
+    track_records = track_records or {}
+    reasons: list[str] = []
+
+    # Wallet Quality (max 60) - who's actually buying in.
+    wallet_points = min(len(distinct_addresses) * _ALERT_TRACKER_GRADE_POINTS_PER_WALLET, _ALERT_TRACKER_GRADE_MAX_WALLET_COUNT_POINTS)
+    proven_count = sum(1 for a in distinct_addresses if a in track_records)
+    if proven_count >= 1:
+        wallet_points += _ALERT_TRACKER_GRADE_ONE_PROVEN_WALLET_POINTS
+    if proven_count >= 2:
+        wallet_points += _ALERT_TRACKER_GRADE_TWO_PROVEN_WALLETS_BONUS
+    wallet_points = min(wallet_points, _ALERT_TRACKER_GRADE_MAX_WALLET_POINTS)
+    wallet_bit = f"{len(distinct_addresses)} tracked wallet(s) converging"
+    if proven_count:
+        wallet_bit += f" ({proven_count} with a proven track record)"
+    reasons.append(wallet_bit)
+
+    # Price Action (max 40) - is the floor actually moving.
+    action_points = 0
+    floor_multiple = score.get("floor_multiple") or 0
+    if floor_multiple >= 2.0:
+        action_points += _ALERT_TRACKER_GRADE_FLOOR_2X_POINTS
+        reasons.append(f"Floor already {floor_multiple:.1f}x since first tracked")
+    elif floor_multiple >= 1.5:
+        action_points += _ALERT_TRACKER_GRADE_FLOOR_1_5X_POINTS
+        reasons.append(f"Floor already {floor_multiple:.1f}x since first tracked")
+    elif floor_multiple >= 1.2:
+        action_points += _ALERT_TRACKER_GRADE_FLOOR_1_2X_POINTS
+        reasons.append(f"Floor up {floor_multiple:.1f}x since first tracked")
+    # Same reason strings _nft_scope_score itself already writes (🔥 sharp /
+    # 💥 surge / 🚀 rapid) - matched here rather than re-computed, the same
+    # established pattern _nft_scope_analyst_take already uses elsewhere in
+    # this file to read a signal back out of `reasons` instead of
+    # threading yet another raw parameter through every caller.
+    reason_text = " ".join(score.get("reasons") or [])
+    if "🔥" in reason_text:
+        action_points += _ALERT_TRACKER_GRADE_SHARP_MOMENTUM_POINTS
+        reasons.append("🔥 Sharp momentum happening right now")
+    elif "💥" in reason_text:
+        action_points += _ALERT_TRACKER_GRADE_SURGE_MOMENTUM_POINTS
+        reasons.append("💥 Price and volume surging together")
+    elif "🚀" in reason_text:
+        action_points += _ALERT_TRACKER_GRADE_RAPID_MOMENTUM_POINTS
+        reasons.append("🚀 Verified sales accelerating")
+    action_points = min(action_points, _ALERT_TRACKER_GRADE_MAX_ACTION_POINTS)
+
+    points = wallet_points + action_points
+    return _alert_tracker_grade_letter_for_points(points), points, reasons
+
+
+def _alert_tracker_grade_letter_for_points(points: int) -> str:
+    if points >= _ALERT_TRACKER_GRADE_S_THRESHOLD:
+        return "S"
+    if points >= _ALERT_TRACKER_GRADE_A_THRESHOLD:
+        return "A"
+    if points >= _ALERT_TRACKER_GRADE_B_THRESHOLD:
+        return "B"
+    return "C"
+
+
 def _nft_scope_tracked_convergence_embed(
     c: dict, tracked_hits: list[dict], estimated: dict[str, str] | None = None, scam_warning: str | None = None,
     track_records: dict[str, dict] | None = None, event_times: dict[str, float] | None = None,
-    record_stats: dict | None = None, mint_signals: dict | None = None,
+    record_stats: dict | None = None, mint_signals: dict | None = None, grade: str | None = None,
+    grade_points: int | None = None, grade_reasons: list[str] | None = None,
 ) -> dict:
     # A category badge and a shortened linked address, one line per
     # wallet - this list is externally curated, not proprietary internal
@@ -9693,28 +9814,26 @@ def _nft_scope_tracked_convergence_embed(
     if scam_warning:
         lines.append(f"\n{scam_warning}")
     chain_display = _CHAIN_DISPLAY_NAMES.get(c.get("chain") or "", (c.get("chain") or "Unknown").title())
-    # Conviction badge, swapped in for the leading emoji - strictly tied to
-    # REAL resolved track records (never staff-set category alone, which
-    # is a claim this bot can't verify), so it can never overstate the
-    # signal. Any wallet present in track_records already cleared
-    # _NFT_SCOPE_SMART_WALLET_MIN_SAMPLE/_MIN_WIN_RATE server-side, so
-    # "how many converging wallets have one" is itself the honest bar -
-    # no separate threshold to invent and get wrong.
-    proven_converging = sum(1 for a in by_address if a in track_records)
-    if proven_converging >= 2:
-        emoji = "🔥"
-    elif proven_converging == 1:
-        emoji = "⚡"
-    else:
-        emoji = "🌱"
+    # Grade badge, replacing the old 🔥/⚡/🌱 conviction emoji - same spirit
+    # (a scannable, at-a-glance strength signal in the title) but now a
+    # real, documented S/A/B/C combination of wallet quality AND price
+    # action instead of just a proven-wallet headcount. Falls back to the
+    # old lowest-tier look if a caller ever has no grade to give (e.g. a
+    # hand-built score dict in a test) - never a blank or broken title.
+    grade_emoji = _ALERT_TRACKER_GRADE_EMOJI.get(grade or "", "🌱")
+    grade_prefix = f"{grade}-Tier · " if grade else ""
     # Real, scannable numbers pulled OUT of the wall of text and into a
     # clean field grid, same idea _nft_scope_embed's own fields already
-    # use - direct request: floor price and real mint progress, for more
-    # info and accuracy, without the embed reading as packed/disorganized.
-    # Both optional and additive - a slug with no floor data yet, or a
-    # chain/contract shape mint_signals couldn't read, just shows fewer
-    # fields, never a broken or misleading one.
+    # use - direct request: a grade, floor price, and real mint progress,
+    # for more info and accuracy, without the embed reading as
+    # packed/disorganized. All optional and additive - a slug missing some
+    # input just shows fewer fields, never a broken or misleading one.
     fields = []
+    if grade:
+        grade_value = f"**{grade}** ({grade_points}/100)"
+        if grade_reasons:
+            grade_value += "\n" + "\n".join(grade_reasons)
+        fields.append({"name": "🏆 Grade", "value": grade_value, "inline": False})
     symbol = c.get("symbol") or "ETH"
     if (floor := c.get("floor")) is not None:
         floor_text = f"{floor:.4f} {symbol}"
@@ -9730,7 +9849,7 @@ def _nft_scope_tracked_convergence_embed(
     fields.append({"name": "⛓️ Chain", "value": chain_display, "inline": True})
     return {
         "author": {"name": "🔔 Alert Tracker"},
-        "title": f"{emoji} {len(by_address)} Wallet Minting {c['name']}",
+        "title": f"{grade_emoji} {grade_prefix}{len(by_address)} Wallet Minting {c['name']}",
         "url": opensea_url,
         "description": "\n".join(lines),
         "color": _NFT_SCOPE_TRACKED_ALERT_COLOR,
@@ -10177,9 +10296,13 @@ async def _nft_scope_maybe_post_tracked_convergence(client: httpx.AsyncClient, s
         _mint_status_signals_cached(client, c),
     )
     scam_warning = await _mint_link_scam_warning(client, c.get("website") or c.get("openseaUrl"))
+    grade, grade_points, grade_reasons = _alert_tracker_grade(distinct_addresses, track_records, score)
     delivered = await _post_channel_message(
         client, settings.discord_smart_wallet_channel_id,
-        _nft_scope_tracked_convergence_embed(c, tracked_wallet_hits, estimated, scam_warning, track_records, event_times, record_stats, mint_signals),
+        _nft_scope_tracked_convergence_embed(
+            c, tracked_wallet_hits, estimated, scam_warning, track_records, event_times, record_stats,
+            mint_signals, grade, grade_points, grade_reasons,
+        ),
         content=ping,
         components=_nft_scope_tracked_convergence_components(c),
     )

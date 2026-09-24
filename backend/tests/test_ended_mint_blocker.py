@@ -686,7 +686,10 @@ async def test_alert_tracker_post_carries_real_floor_and_mint_progress_end_to_en
         "contractAddress": "0xrealcontract",
     }
     hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": "Whale"}]
-    score = {"tier": "red", "blocked": False, "has_real_activity": True, "has_timeliness_signal": True}
+    score = {
+        "tier": "red", "blocked": False, "has_real_activity": True, "has_timeliness_signal": True,
+        "floor_multiple": 1.6, "reasons": ["🚀 5 verified sale(s) in the last 30 min from 4 buyer(s)"],
+    }
 
     with patch.object(main, "_alert_tracker_already_posted", new=fake_already), \
          patch.object(main, "_nft_scope_clears_wash_check", new=fake_wash), \
@@ -703,3 +706,11 @@ async def test_alert_tracker_post_carries_real_floor_and_mint_progress_end_to_en
     assert floor_field["value"] == "0.4200 ETH (~$1,500.00)"
     progress_field = next(f for f in embed["fields"] if f["name"] == "🎟️ Mint Progress")
     assert progress_field["value"] == "777 / 1,000 (78%)"
+    # Grade: not just the embed builder accepting a grade param - this is
+    # _nft_scope_maybe_post_tracked_convergence's own _alert_tracker_grade
+    # call, computed from the real hits/track_records/score above and
+    # actually reaching the posted embed. 1 wallet (15) + 1.5x floor tier
+    # (15) + 🚀 rapid momentum (5) = 35 -> B.
+    grade_field = next(f for f in embed["fields"] if f["name"] == "🏆 Grade")
+    assert grade_field["value"].startswith("**B** (35/100)")
+    assert embed["title"].startswith("🥈 B-Tier · 1 Wallet Minting")

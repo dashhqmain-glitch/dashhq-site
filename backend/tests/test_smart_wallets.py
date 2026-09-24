@@ -674,6 +674,51 @@ def test_convergence_embed_secondary_links_line_still_shows_opensea_alone_withou
     assert "𝕏" not in embed["description"]
 
 
+# ── S/A/B/C grade rendering ───────────────────────────────────────────────
+
+def test_convergence_embed_shows_the_grade_in_the_title_with_its_emoji():
+    hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": "Whale"}]
+    for letter, emoji in main._ALERT_TRACKER_GRADE_EMOJI.items():
+        embed = main._nft_scope_tracked_convergence_embed(_fake_collection(), hits, grade=letter, grade_points=50, grade_reasons=["x"])
+        assert embed["title"].startswith(f"{emoji} {letter}-Tier · ")
+        assert "Wallet Minting" in embed["title"]
+
+
+def test_convergence_embed_title_falls_back_cleanly_with_no_grade_given():
+    # A hand-built caller (or a test) that never computes a grade must
+    # still get a valid, non-broken title - same lowest-tier look the old
+    # conviction badge used to show by default.
+    hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": "Whale"}]
+    embed = main._nft_scope_tracked_convergence_embed(_fake_collection(), hits)
+    assert embed["title"] == "🌱 1 Wallet Minting Test Collection"
+
+
+def test_convergence_embed_grade_field_is_first_and_shows_points_and_reasons():
+    hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": "Whale"}]
+    embed = main._nft_scope_tracked_convergence_embed(
+        _fake_collection(), hits, grade="A", grade_points=67, grade_reasons=["1 tracked wallet(s) converging", "🔥 Sharp momentum happening right now"],
+    )
+    assert embed["fields"][0]["name"] == "🏆 Grade"
+    expected_value = "**A** (67/100)" + chr(10) + "1 tracked wallet(s) converging" + chr(10) + "🔥 Sharp momentum happening right now"
+    assert embed["fields"][0]["value"] == expected_value
+    assert embed["fields"][0]["inline"] is False  # full-width - this is the headline field, not a small stat
+
+
+def test_convergence_embed_omits_the_grade_field_when_no_grade_is_given():
+    hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": "Whale"}]
+    embed = main._nft_scope_tracked_convergence_embed(_fake_collection(), hits)
+    assert not any(f["name"] == "🏆 Grade" for f in embed["fields"])
+
+
+def test_convergence_embed_field_order_is_grade_then_floor_then_mint_progress_then_chain():
+    hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": "Whale"}]
+    embed = main._nft_scope_tracked_convergence_embed(
+        _fake_collection(floor=0.5), hits, grade="S", grade_points=95, grade_reasons=["x"],
+        mint_signals={"total_supply": 10, "max_supply": 20},
+    )
+    assert [f["name"] for f in embed["fields"]] == ["🏆 Grade", "💰 Floor Price", "🎟️ Mint Progress", "⛓️ Chain"]
+
+
 def test_convergence_embed_includes_a_scam_warning_when_given_one():
     hits = [{"address": "0xa", "tag": "T1", "rank": None, "pnl": None, "category": "Whale"}]
     embed = main._nft_scope_tracked_convergence_embed(_fake_collection(), hits, scam_warning="⚠️ **evil.xyz** is on ScamSniffer's known-phishing list")
