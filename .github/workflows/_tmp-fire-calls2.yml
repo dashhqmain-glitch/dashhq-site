@@ -1,0 +1,13 @@
+name: Temporary fire real call v2
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post the real Alert Tracker preview (with the 4-axis grade)
+        run: |
+          curl -s -w "\nHTTP_CODE=%{http_code}\n" "https://www.dashhq.site/cron/post-latest-tracked-mint" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}"
