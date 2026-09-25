@@ -1584,6 +1584,54 @@ async def diagnose_slug_posting(request: Request, slug: str):
         }
 
 
+@app.get("/cron/debug-wash-trading")
+async def debug_wash_trading(request: Request, slug: str):
+    # Raw, unfiltered look at exactly what _analyze_wash_trading saw for a
+    # real slug - built to answer "why didn't the wash-trade check catch
+    # this" with real event data instead of guessing at the heuristics.
+    # Mirrors _nft_scope_clears_wash_check's exact fetch (same window,
+    # same limit) so this reports on the SAME sample the live gate used.
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            c = await _nft_collection_core(slug)
+        except HTTPException as e:
+            c = {"error": f"collection lookup failed ({e.status_code})"}
+        recent = await _fetch_recent_sale_events(client, slug, window_seconds=86400, limit=50)
+        analysis = _analyze_wash_trading(recent)
+        token_counts: dict[str, int] = {}
+        for e in recent:
+            nft = e.get("nft")
+            tid = nft.get("identifier") if isinstance(nft, dict) else None
+            if tid is not None:
+                token_counts[str(tid)] = token_counts.get(str(tid), 0) + 1
+        buyers = [e.get("buyer") for e in recent if e.get("buyer")]
+        sellers = [e.get("seller") for e in recent if e.get("seller")]
+        buyer_counts: dict[str, int] = {}
+        for b in buyers:
+            buyer_counts[b] = buyer_counts.get(b, 0) + 1
+        seller_counts: dict[str, int] = {}
+        for s in sellers:
+            seller_counts[s] = seller_counts.get(s, 0) + 1
+    return {
+        "slug": slug,
+        "sample_size": len(recent),
+        "analysis": analysis,
+        "top_buyers_by_count": sorted(buyer_counts.items(), key=lambda kv: -kv[1])[:10],
+        "top_sellers_by_count": sorted(seller_counts.items(), key=lambda kv: -kv[1])[:10],
+        "token_counts": sorted(token_counts.items(), key=lambda kv: -kv[1])[:15],
+        "distinct_tokens": len(token_counts),
+        "recirculating_wallets": sorted(set(buyers) & set(sellers)),
+        "collection": {
+            "totalSupply": c.get("totalSupply"), "owners": c.get("owners"), "sales24h": c.get("sales24h"),
+            "floor": c.get("floor"), "floorUsd": c.get("floorUsd"), "verified": c.get("verified"),
+            "category": c.get("category"),
+        } if "error" not in c else c,
+    }
+
+
 @app.get("/cron/check-mint-status")
 async def check_mint_status(request: Request, slugs: str, probe: bool = False):
     # Read-only dry run of the ended-mint blocker: reports every raw signal
@@ -9672,6 +9720,22 @@ _ALERT_TRACKER_GRADE_FLOOR_MID_POINTS = 8
 _ALERT_TRACKER_GRADE_FLOOR_LOW_POINTS = 3
 _ALERT_TRACKER_GRADE_MAX_FLOOR_POINTS = 20  # same value as the elite tier above - named separately so every axis has one consistent cap constant
 
+# Hard gate, not another soft-scoring axis - confirmed live: "the-artifacts"
+# (6 converging wallets, capped at 36 wallet-quality points, $0.24 floor,
+# unverified, no category, no socials) landed at B purely on wallet count,
+# since Floor Value only ever contributes 0 for a cheap floor rather than
+# actively suppressing the total. Wallet Quality alone (up to 45 of the 100
+# points) must never carry a grade past C when there's no real stake AND no
+# real trading behind it - a near-zero-or-unpriced floor together with thin
+# 24h sales means there's nothing corroborating the wallet signal yet,
+# regardless of how many tracked wallets found it. sales24h (a plain count,
+# already the trusted real-activity signal _detect_abnormal_turnover/
+# _analyze_wash_trading rely on elsewhere in this file) is used instead of a
+# USD volume figure specifically to sidestep a currency conversion - a raw
+# sales COUNT needs no chain/token-price normalization to answer "is real
+# trading happening here," unlike a dollar amount would.
+_ALERT_TRACKER_GRADE_LOW_VOLUME_SALES_THRESHOLD = 10
+
 # Project Quality (max 15) - the TYPE of project being minted: an OpenSea-
 # verified collection with a real declared category and a public presence
 # is a fundamentally different kind of mint than an anonymous, blank-
@@ -9781,7 +9845,22 @@ def _alert_tracker_grade(distinct_addresses: set[str], track_records: dict[str, 
         reasons.append("Project quality: " + ", ".join(quality_bits))
 
     points = wallet_points + momentum_points + floor_points + quality_points
-    return _alert_tracker_grade_letter_for_points(points), points, reasons
+    letter = _alert_tracker_grade_letter_for_points(points)
+
+    # The hard gate: both the floor AND the real trading behind it have to
+    # be thin (or entirely unknown) for this to fire - a low-cost mint with
+    # genuinely heavy sales, or a well-priced floor with thin volume so
+    # far, both still stand on their own. Only the combination - no real
+    # dollar stake AND no real trading proving demand - forces C, no matter
+    # how many wallets or how much momentum/quality fired above.
+    low_floor = floor_usd is None or floor_usd < _ALERT_TRACKER_GRADE_FLOOR_LOW_USD
+    sales24h = c.get("sales24h")
+    low_volume = sales24h is None or sales24h < _ALERT_TRACKER_GRADE_LOW_VOLUME_SALES_THRESHOLD
+    if low_floor and low_volume and letter != "C":
+        reasons.append("⚠️ Capped at C — low floor and thin 24h volume, not enough real stake behind this yet")
+        letter = "C"
+
+    return letter, points, reasons
 
 
 def _alert_tracker_grade_letter_for_points(points: int) -> str:

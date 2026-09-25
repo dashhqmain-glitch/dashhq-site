@@ -222,6 +222,82 @@ def test_grade_letter_boundaries_are_correct_and_inclusive_at_each_threshold():
     assert main._alert_tracker_grade_letter_for_points(0) == "C"
 
 
+# ── Low-floor + low-volume hard gate ────────────────────────────────────────
+# Direct user-reported lapse: a real collection with a decent number of
+# converging wallets but a near-zero floor AND thin (or unknown) 24h sales
+# was still landing on B purely on wallet count, since Floor Value only
+# ever contributes 0 points for a cheap floor rather than actively
+# suppressing the total. This gate is deliberately NOT another additive
+# axis - it's a hard override that runs after every axis is summed, and it
+# only fires when BOTH signals are thin together, never on either alone.
+
+def test_grade_gate_forces_c_when_floor_and_volume_are_both_low():
+    grade, points, reasons = main._alert_tracker_grade(
+        {f"0x{i}" for i in range(6)}, {}, _score(reasons=["🚀 rapid"]),
+        _collection(floorUsd=0.24, sales24h=2),
+    )
+    assert points > main._ALERT_TRACKER_GRADE_B_THRESHOLD  # the raw signal really would have cleared B
+    assert grade == "C"
+    assert any("Capped at C" in r for r in reasons)
+
+
+def test_grade_gate_forces_c_when_floor_and_volume_are_both_unknown():
+    grade, points, reasons = main._alert_tracker_grade({f"0x{i}" for i in range(3)}, {}, _score(), _collection())
+    assert points == main._ALERT_TRACKER_GRADE_MAX_WALLET_COUNT_POINTS == 36  # would have been B on wallet count alone
+    assert grade == "C"
+    assert any("Capped at C" in r for r in reasons)
+
+
+def test_grade_gate_does_not_fire_when_only_the_floor_is_low_but_volume_is_real():
+    # A genuinely cheap mint with heavy real sales behind it proves its own
+    # demand - the gate must not punish a low price tag on its own.
+    grade, points, reasons = main._alert_tracker_grade(
+        {f"0x{i}" for i in range(3)}, {}, _score(), _collection(floorUsd=0.24, sales24h=500),
+    )
+    assert grade == "B"
+    assert not any("Capped at C" in r for r in reasons)
+
+
+def test_grade_gate_does_not_fire_when_only_the_volume_is_low_but_floor_is_real():
+    # A well-priced floor with thin volume so far still has real stakes
+    # behind it - the gate must not punish trading that just hasn't
+    # happened yet on an otherwise legitimate floor.
+    grade, points, reasons = main._alert_tracker_grade(
+        {f"0x{i}" for i in range(3)}, {}, _score(), _collection(floorUsd=500, sales24h=1),
+    )
+    assert grade == "B"
+    assert not any("Capped at C" in r for r in reasons)
+
+
+def test_grade_gate_volume_threshold_is_inclusive_at_the_boundary():
+    threshold = main._ALERT_TRACKER_GRADE_LOW_VOLUME_SALES_THRESHOLD
+    grade_at, _, _ = main._alert_tracker_grade({f"0x{i}" for i in range(3)}, {}, _score(), _collection(floorUsd=0.24, sales24h=threshold))
+    grade_below, _, _ = main._alert_tracker_grade({f"0x{i}" for i in range(3)}, {}, _score(), _collection(floorUsd=0.24, sales24h=threshold - 1))
+    assert grade_at == "B"  # exactly at the threshold counts as real volume
+    assert grade_below == "C"
+
+
+def test_grade_gate_never_double_reports_when_the_grade_was_already_c():
+    grade, points, reasons = main._alert_tracker_grade({"0xa"}, {}, _score(), _collection())
+    assert grade == "C"
+    assert sum("Capped at C" in r for r in reasons) == 0  # nothing to override - never fired, never mentioned
+    assert reasons == ["1 tracked wallet(s) converging"]
+
+
+def test_grade_gate_can_pull_a_high_scoring_call_all_the_way_down_from_s():
+    # The gate is unconditional, not "only when it would land on B" - a
+    # call with maxed-out wallet/momentum/quality points but a genuinely
+    # unpriced-and-untraded floor still has no real stake behind it.
+    tr = {"0xa": {"win_rate": 0.9, "sample": 20}, "0xb": {"win_rate": 0.8, "sample": 10}}
+    grade, points, reasons = main._alert_tracker_grade(
+        {"0xa", "0xb", "0xc"}, tr, _score(floor_multiple=2.5, reasons=["🔥 sharp burst"]),
+        _collection(floorUsd=None, verified=True, category="Art", twitter="proj"),
+    )
+    assert points == main._ALERT_TRACKER_GRADE_MAX_WALLET_POINTS + main._ALERT_TRACKER_GRADE_MAX_MOMENTUM_POINTS + main._ALERT_TRACKER_GRADE_MAX_QUALITY_POINTS
+    assert grade == "C"
+    assert any("Capped at C" in r for r in reasons)
+
+
 def test_grade_reaches_s_tier_only_with_strong_signal_across_every_axis():
     tr = {"0xa": {"win_rate": 0.9, "sample": 20}, "0xb": {"win_rate": 0.8, "sample": 10}}
     grade, points, reasons = main._alert_tracker_grade(
@@ -240,10 +316,14 @@ def test_grade_a_real_28_wallet_cheap_floor_call_does_not_reach_s_or_a_on_wallet
     # 3-wallet ceiling either way) but a $0.91 floor and, via the manual
     # preview path, no momentum data. Wallet count alone must not be
     # enough to reach the top tiers - the whole point of adding the other
-    # three axes.
-    grade, points, _ = main._alert_tracker_grade({f"0x{i}" for i in range(28)}, {}, _score(), _collection(floorUsd=0.91))
+    # three axes. Points still reflect the raw wallet signal, but with no
+    # sales24h on file either, the low-floor+low-volume hard gate now
+    # forces this all the way to C, not just short of S/A - a real, user-
+    # reported lapse: wallet count alone was still enough to clear B.
+    grade, points, reasons = main._alert_tracker_grade({f"0x{i}" for i in range(28)}, {}, _score(), _collection(floorUsd=0.91))
     assert points == main._ALERT_TRACKER_GRADE_MAX_WALLET_COUNT_POINTS == 36
-    assert grade == "B"
+    assert grade == "C"
+    assert any("Capped at C" in r for r in reasons)
 
 
 def test_grade_points_never_exceed_one_hundred_even_if_every_axis_maxes_out():
