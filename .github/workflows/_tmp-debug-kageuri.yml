@@ -1,0 +1,17 @@
+name: _tmp-debug-kageuri
+on:
+  workflow_dispatch:
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check mint status / velocity for kageuri
+        run: |
+          curl -sS -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "https://www.dashhq.site/cron/check-mint-status?slugs=kageuri" | python3 -m json.tool
+
+      - name: Diagnose slug posting (real score/reasons) for kageuri
+        run: |
+          curl -sS -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "https://www.dashhq.site/cron/diagnose-slug-posting?slug=kageuri" | python3 -m json.tool
