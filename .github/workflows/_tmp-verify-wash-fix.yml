@@ -1,0 +1,12 @@
+name: _tmp-verify-wash-fix
+on:
+  workflow_dispatch:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Re-query debug-wash-trading for rhsnakrs after the fix
+        run: |
+          curl -sS -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "https://www.dashhq.site/cron/debug-wash-trading?slug=rhsnakrs" | python3 -m json.tool
