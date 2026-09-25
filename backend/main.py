@@ -7022,6 +7022,35 @@ def _analyze_wash_trading(events: list[dict]) -> dict:
         if unique_tokens <= max(1, len(token_ids) // 3):
             reasons.append(f"Only {unique_tokens} distinct token(s) changed hands across {len(token_ids)} sales - repeatedly flipped, not organic spread")
 
+    # (e) extreme buyer/seller concentration - one wallet (or a tiny
+    # handful) buying from one wallet (or a tiny handful) across MANY
+    # DIFFERENT token IDs, always in the same direction. None of the
+    # checks above catch this: it's not a self-trade (different
+    # wallets), not reciprocal (the roles never swap, so no
+    # (buyer,seller)+(seller,buyer) edge pair ever forms), not a closed
+    # cluster ((c) above requires a wallet to show up as BOTH a buyer
+    # and a seller - recirculating - which never happens here since each
+    # wallet only ever plays one role), and not low token diversity
+    # (using a different token ID every time is exactly how this dodges
+    # that check). Confirmed live: rhsnakrs, a real wash-traded
+    # collection reported by a member, had its entire 8-sale/24h sample
+    # be ONE buyer buying from ONE seller across 8 distinct token IDs -
+    # unique_buyers=1, unique_sellers=1, zero overlap between the sets,
+    # so every check above cleared it. A real single-whale sweep looks
+    # similar on the buyer side alone (few buyers, many sales - see
+    # _detect_sweep) but draws from MANY DIFFERENT sellers, since it's
+    # buying up scattered real holders' listings; only when BOTH sides
+    # are this concentrated at once does it stop looking like a sweep
+    # and start looking like two wallets trading with each other.
+    # Gated on a real sample (>=4, same floor the recirculating check
+    # above already uses) so a brand-new collection's first couple of
+    # organic sales can't trip this on too little data.
+    if len(events) >= 4 and 1 <= len(buyers) <= 2 and 1 <= len(sellers) <= 2:
+        reasons.append(
+            f"Entire sample concentrated in {len(buyers)} buyer(s) and {len(sellers)} seller(s) across "
+            f"{len(events)} sales - looks like the same wallets trading with each other, not a real market"
+        )
+
     return {
         "suspicious": bool(reasons), "reasons": reasons, "unique_buyers": len(buyers), "unique_sellers": len(sellers),
         # The buyer/seller counts above are only ever measured against

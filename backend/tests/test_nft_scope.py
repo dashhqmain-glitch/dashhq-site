@@ -125,6 +125,64 @@ def test_wash_handles_empty_and_malformed_input():
     main._analyze_wash_trading([{}, {"buyer": None}, {"nft": "not-a-dict"}, {"nft": {}}])
 
 
+def test_wash_one_directional_pair_across_distinct_tokens_detected():
+    # Real, user-reported wash-trading case: rhsnakrs' entire 24h/8-sale
+    # sample was ONE buyer buying from ONE seller across 8 DIFFERENT token
+    # IDs - not a self-trade (different wallets), not reciprocal (the
+    # seller never buys back), not a closed cluster (recirculating
+    # requires a wallet to show up as both buyer and seller, which never
+    # happens here), and not low token diversity (a different token every
+    # time dodges that check entirely). None of the pre-existing checks
+    # caught this - this is the gap that let it through.
+    events = [sale("buyer1", "seller1", str(i)) for i in range(8)]
+    result = main._analyze_wash_trading(events)
+    assert result["suspicious"]
+    assert any("concentrated" in r for r in result["reasons"])
+
+
+def test_wash_concentrated_pair_needs_a_real_sample_not_just_a_couple_of_sales():
+    # A brand-new collection's first 2-3 organic sales can look identical
+    # to this pattern purely from having too little data yet - must not
+    # trip on a too-small sample.
+    events = [sale("buyer1", "seller1", str(i)) for i in range(3)]
+    result = main._analyze_wash_trading(events)
+    assert not result["suspicious"], result
+
+
+def test_wash_concentrated_pair_needs_both_sides_concentrated_not_just_one():
+    # A real single-whale sweep (few buyers, but MANY distinct sellers -
+    # see _detect_sweep) must not be caught by this - test_wash_legit_
+    # sweep_not_falsely_flagged_as_closed_cluster already covers the
+    # closed-cluster angle; this covers the same legit shape against the
+    # new concentration check specifically.
+    events = [sale("whale", f"seller{i}", str(i)) for i in range(8)]
+    result = main._analyze_wash_trading(events)
+    assert not result["suspicious"], result
+
+    # And the mirror: many distinct buyers scooping up one seller's
+    # listings (a real holder liquidating to a broad, diverse market) is
+    # equally legitimate.
+    events = [sale(f"buyer{i}", "seller", str(i)) for i in range(8)]
+    result = main._analyze_wash_trading(events)
+    assert not result["suspicious"], result
+
+
+def test_wash_concentrated_pair_boundary_allows_up_to_two_wallets_each_side():
+    # Two colluding buyer wallets trading with two colluding seller
+    # wallets, spread across distinct token IDs, is still the same
+    # pattern at a slightly larger scale - the bar is <=2 each side, not
+    # exactly 1.
+    events = [sale(f"buyer{i % 2}", f"seller{i % 2}", str(i)) for i in range(8)]
+    result = main._analyze_wash_trading(events)
+    assert result["suspicious"]
+    assert any("concentrated" in r for r in result["reasons"])
+
+    # A 3rd distinct buyer joining clears it.
+    events = [sale(f"buyer{i % 3}", f"seller{i % 2}", str(i)) for i in range(9)]
+    result = main._analyze_wash_trading(events)
+    assert not any("concentrated" in r for r in result["reasons"])
+
+
 # ── _detect_abnormal_turnover (real scam calls: CashCatForex, TRWNAT) ──
 
 def test_turnover_blocks_real_case_cashcatforex():
