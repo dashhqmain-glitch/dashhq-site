@@ -1,0 +1,12 @@
+name: _tmp-wallet-stats
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Query real tracked-wallet count
+        run: |
+          curl -sS -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "https://www.dashhq.site/cron/wallet-stats" | python3 -m json.tool
