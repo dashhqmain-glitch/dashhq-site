@@ -10581,18 +10581,25 @@ _TRACKED_WALLET_ALCHEMY_CHAINS = {
 }
 _TRACKED_WALLET_NULL_ADDRESS = "0x0000000000000000000000000000000000000000"
 _TRACKED_WALLET_EVENTS_PER_WALLET = 10
-# 288 buckets x the 5-minute cron cadence = once per wallet per ~24h. Was 5
-# (once per ~25 min) before Address Activity webhooks (below) took over as
-# the PRIMARY detection path - this sweep is now only a safety net against
-# a missed webhook delivery, so it no longer needs to be fast, just
-# eventually-consistent. Directly answers the cost concern that motivated
-# this whole change: at the old cadence, N tracked wallets cost roughly
-# N x 1.8M Alchemy compute units/month (7 chains x 150 CU/call, every 25
-# min) - enough to blow the free 30M CU/month tier past ~16 wallets. This
-# cadence cuts that by ~57x on its own, on top of most real detection now
-# costing ~40 CU per actual event via the webhook instead of 1050 CU per
-# wallet-check regardless of outcome.
-_TRACKED_WALLET_POLL_BUCKETS = 288
+# 864 buckets x the 5-minute cron cadence = once per wallet per ~72h (3
+# days). Was 5 (once per ~25 min) before Address Activity webhooks (below)
+# took over as the PRIMARY detection path, then 288 (once per ~24h) for a
+# while after - this sweep is only ever a safety net against a missed
+# webhook delivery, so it doesn't need to be fast, just eventually
+# consistent. Confirmed live against the real Alchemy dashboard at 972
+# tracked wallets: the 24h cadence alone was consuming ~22.2M of the free
+# 30M CU/month tier (verified via alchemy_getAssetTransfers's real
+# published cost of 120 CU/call, not the 150 an earlier version of this
+# comment assumed - 972 wallets x 7 chains x 120 CU = ~816K CU/day, and
+# 816K x ~27 days landed almost exactly on the dashboard's real number).
+# That left thin headroom for real webhook events, the ended-mint
+# blocker's own Alchemy calls, and room to keep growing the tracked list -
+# stretching to a 3-day cadence cuts this sweep's own cost to a third
+# (~8M CU/month), directly answering that margin concern without touching
+# real-time detection at all (webhooks still catch the overwhelming
+# majority of mints instantly regardless of this cadence - the only
+# tradeoff is how long the RARE missed-webhook case takes to self-heal).
+_TRACKED_WALLET_POLL_BUCKETS = 864
 _TRACKED_WALLET_POLL_TIME_BUDGET_SECONDS = 50  # skip this phase outright once a cycle has already burned this much of Vercel's 60s cap
 
 
@@ -11437,7 +11444,7 @@ async def _tracked_wallet_watch_sweep(client: httpx.AsyncClient, deadline: float
 # plain request (Cloudflare or similar blocking non-browser clients) -
 # confirmed live, not guessed - so there is no backstop leg for Robinhood;
 # it stays solely on Alchemy, same as before this existed.
-_EXPLORER_BACKSTOP_POLL_BUCKETS = 288  # same cadence/reasoning as _TRACKED_WALLET_POLL_BUCKETS - a safety net only needs to be eventually consistent
+_EXPLORER_BACKSTOP_POLL_BUCKETS = 864  # MUST stay equal to _TRACKED_WALLET_POLL_BUCKETS - this backstop is only redundant if it checks the exact same wallets Alchemy's own sweep checks this cycle (see test_backstop_sweep_uses_the_same_bucket_formula_as_the_alchemy_sweep), not an independently-offset rotation
 _EXPLORER_BACKSTOP_TIME_BUDGET_SECONDS = 70  # absolute cutoff from cycle start, not "15s for this phase alone" - real gap confirmed live: this runs right after the wallet-watch sweep, whose OWN deadline already extends to the 50s absolute mark (_TRACKED_WALLET_POLL_TIME_BUDGET_SECONDS), so a smaller threshold here got skipped every single time that sweep did real work. Vercel has confirmed live tolerance well past the 60s figure vercel.json's own maxDuration suggests (real cycles completing successfully at 90-150s+), so there's real room for this.
 _ETHERSCAN_MINT_TX_LIMIT = 20  # most recent NFT transfers to scan per wallet - a real mint burst is always near the top of a sorted-by-recent list
 
