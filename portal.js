@@ -153,6 +153,13 @@ async function init() {
 var Dash = (function () {
   var inited = false;
   var currentPage = 'overview';
+  // Ticker/Gas both back-feed the Overview bento tiles (Top Mover,
+  // the gas number) as well as their own dedicated pages - so both stay
+  // polling across either of those, and only actually stop once the
+  // visitor is on a page that uses neither (PnL, Rug Check, NFT tools,
+  // etc.), instead of running forever on every open tab regardless of
+  // what's on screen.
+  var _LIVE_DATA_PAGES = { overview: true, ticker: true, gas: true };
   function go(page) {
     document.querySelectorAll('.dsb-item').forEach(function (t) { t.classList.toggle('active', t.dataset.page === page); });
     document.querySelectorAll('.dpage').forEach(function (p) { p.classList.toggle('on', p.dataset.page === page); });
@@ -161,6 +168,14 @@ var Dash = (function () {
     if (c) c.scrollTop = 0;
     if (currentPage === 'pairs' && page !== 'pairs' && typeof Pairs !== 'undefined') Pairs.onLeave();
     if (page === 'pairs' && typeof Pairs !== 'undefined') Pairs.onEnter();
+    var wasLive = !!_LIVE_DATA_PAGES[currentPage], isLive = !!_LIVE_DATA_PAGES[page];
+    if (wasLive && !isLive) {
+      if (typeof Ticker !== 'undefined') Ticker.onLeave();
+      if (typeof Gas !== 'undefined') Gas.onLeave();
+    } else if (!wasLive && isLive) {
+      if (typeof Ticker !== 'undefined') Ticker.onEnter();
+      if (typeof Gas !== 'undefined') Gas.onEnter();
+    }
     currentPage = page;
     if (page === 'overview') renderBento();
   }
@@ -447,11 +462,23 @@ var Ticker = (function () {
     var best = syms.reduce(function (a, b) { return Math.abs(state[b].chg) > Math.abs(state[a].chg) ? b : a; });
     return { sym: best, chg: state[best].chg };
   }
+  // Used to poll every open tab unconditionally, the instant the portal
+  // loaded, regardless of which page the visitor was actually looking at -
+  // real, continuous backend load from tabs that were never even on this
+  // page. Now only runs while this data is actually in view (own page OR
+  // the Overview bento tile that also reads Ticker.top()) - see Dash.go's
+  // _LIVE_DATA_PAGES gating below, the same onEnter/onLeave shape Pairs
+  // already used for its own age-ticker interval.
+  var tickInterval = null;
+  function startPolling() { if (!tickInterval) tickInterval = setInterval(tick, 15000); }
+  function stopPolling() { if (tickInterval) { clearInterval(tickInterval); tickInterval = null; } }
+  function onEnter() { tick(); startPolling(); }
+  function onLeave() { stopPolling(); }
   function init() {
     seed('ETH'); seed('SOL');
-    setInterval(tick, 15000);
+    startPolling(); // Overview (the default landing page) shows this data too - start live right away
   }
-  return { init: init, add: add, remove: remove, retry: retry, top: top, topSparkSvg: topSparkSvg };
+  return { init: init, add: add, remove: remove, retry: retry, top: top, topSparkSvg: topSparkSvg, onEnter: onEnter, onLeave: onLeave };
 })();
 
 // ── 2. GAS TRACKER — real public RPC + CoinGecko, multi-chain ────────────────
@@ -550,8 +577,17 @@ var Gas = (function () {
     render();
     refresh();
   }
-  function init() { refresh(); setInterval(refresh, 20000); }
-  return { init: init, render: render, switchChain: switchChain };
+  // Same reasoning as Ticker.onEnter/onLeave above - this used to poll
+  // every open tab unconditionally regardless of page. Gas feeds the
+  // Overview bento tile too, so it stays live there in addition to its
+  // own page - see Dash.go's _LIVE_DATA_PAGES gating.
+  var refreshInterval = null;
+  function startPolling() { if (!refreshInterval) refreshInterval = setInterval(refresh, 20000); }
+  function stopPolling() { if (refreshInterval) { clearInterval(refreshInterval); refreshInterval = null; } }
+  function onEnter() { refresh(); startPolling(); }
+  function onLeave() { stopPolling(); }
+  function init() { refresh(); startPolling(); }
+  return { init: init, render: render, switchChain: switchChain, onEnter: onEnter, onLeave: onLeave };
 })();
 
 // ── 3. WALLET CARD — real QR (branded download) + real ENS resolution ────────
