@@ -6,12 +6,7 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - name: Trigger one real nft-poll cycle and see the prune result
-        run: |
-          curl -sS --max-time 150 -H "Authorization: Bearer ${{ secrets.NFT_CRON_SECRET }}" \
-            "https://www.dashhq.site/cron/nft-poll" | python3 -m json.tool
-
-      - name: Re-check db size estimate after the prune ran
+      - name: Re-check db size estimate
         run: |
           curl -sS --max-time 120 -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
             "https://www.dashhq.site/cron/db-size-estimate" | python3 -m json.tool
