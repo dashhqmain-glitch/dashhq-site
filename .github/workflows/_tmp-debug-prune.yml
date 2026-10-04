@@ -1,0 +1,12 @@
+name: _tmp-debug-prune
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Direct call to the sale-events prune function
+        run: |
+          curl -sS --max-time 90 -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "https://www.dashhq.site/cron/debug-prune-sale-events" | python3 -m json.tool
