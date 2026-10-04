@@ -12548,6 +12548,27 @@ async def nft_poll(request: Request):
                 "errors": ["database_not_writable: Supabase rejected a write, so this cycle posted nothing"],
                 "took_seconds": round(time.time() - start, 2),
             }
+        # Pruning runs here, before any of the variable/unbounded-cost
+        # phases below, for the exact same reason Recheck and the tracked-
+        # wallet sweep already got moved early (see their own comments
+        # above this one): this route runs under Vercel's 60s function
+        # timeout, and a phase placed dead last in a long pipeline gets
+        # silently truncated by a hard kill on any cycle that runs long -
+        # NFT Scope's own scan alone has been measured consuming the
+        # entire 90-150s+ cycle by itself with no time budget of its own.
+        # Pruning used to sit at the very end and paid exactly that price:
+        # confirmed live, nft_sale_events_log had grown to 905,242 rows
+        # (~427 MB estimated, against Supabase Free's 500 MB cap - already
+        # hit once before, see _SALE_EVENTS_LOG_RETENTION_DAYS) despite a
+        # 90-day retention window that should have capped it near 423,000
+        # rows - the prune call was there, correct, and simply never
+        # getting a turn. Unlike the other phases moved early, this one
+        # doesn't need its own time-budget guard: a DELETE by date range
+        # is cheap and roughly constant-time regardless of how busy the
+        # rest of the cycle is, it just has to actually run every cycle.
+        pruned = await _prune_old_snapshots(client)
+        pruned_sale_events = await _prune_old_sale_events(client)
+        pruned_call_buyers = await _prune_old_call_buyers(client)
         try:
             alerted = await _nft_poll_watchlist_alerts(client)
         except (httpx.HTTPError, KeyError) as e:
@@ -12634,9 +12655,6 @@ async def nft_poll(request: Request):
             logger.exception("nft-poll: Alert Tracker digest phase failed")
             alert_tracker_digest_posted = False
             errors.append(f"alert_tracker_digest: {e}")
-        pruned = await _prune_old_snapshots(client)
-        pruned_sale_events = await _prune_old_sale_events(client)
-        pruned_call_buyers = await _prune_old_call_buyers(client)
 
     return {
         "watchlist_alerts": alerted, "nft_scope_posts": scoped, "nft_scope_followups": followups,
