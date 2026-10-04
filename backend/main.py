@@ -1554,24 +1554,39 @@ async def db_size_estimate(request: Request):
         "aco_tickets", "discord_nft_watchlist", "nft_alert_state", "nft_watch_subscriptions",
     ]
     counts: dict[str, int | None] = {}
+    errors: dict[str, str] = {}
+    # count=exact runs a real COUNT(*) - fine for a small table, but on the
+    # one table actually at risk here (nft_sale_events_log, the whole
+    # reason this endpoint exists) that can be slow enough to need its own
+    # longer timeout and a fallback that still gives a usable number
+    # instead of silently coming back empty.
     async with httpx.AsyncClient(timeout=30) as client:
         for table in tables:
+            timeout = 90 if table == "nft_sale_events_log" else 30
             try:
                 res = await client.get(
                     f"{settings.supabase_url}/rest/v1/{table}",
                     headers=_supabase_headers(prefer="count=exact"),
-                    params={"select": "*", "limit": "1"},
+                    params={"select": "*", "limit": "1"}, timeout=timeout,
                 )
                 res.raise_for_status()
                 range_total = res.headers.get("content-range", "").split("/")[-1]
-                counts[table] = int(range_total) if range_total.isdigit() else None
-            except httpx.HTTPError:
+                if range_total.isdigit():
+                    counts[table] = int(range_total)
+                else:
+                    counts[table] = None
+                    errors[table] = f"no usable content-range header: {res.headers.get('content-range')!r}"
+            except httpx.HTTPError as e:
                 counts[table] = None
+                status = getattr(getattr(e, "response", None), "status_code", None)
+                body = getattr(getattr(e, "response", None), "text", "")[:300]
+                errors[table] = f"{type(e).__name__} (HTTP {status}): {body}" if status else f"{type(e).__name__}: {e}"
     sale_events_rows = counts.get("nft_sale_events_log")
     sale_events_bytes_per_row = 495  # measured live, see _SALE_EVENTS_LOG_RETENTION_DAYS's comment
     sale_events_mb_estimate = round(sale_events_rows * sale_events_bytes_per_row / (1024 * 1024), 1) if sale_events_rows is not None else None
     return {
         "row_counts": counts,
+        "errors": errors,
         "nft_sale_events_log_estimate": {
             "rows": sale_events_rows,
             "bytes_per_row_measured": sale_events_bytes_per_row,
