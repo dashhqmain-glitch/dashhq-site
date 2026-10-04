@@ -1530,6 +1530,59 @@ async def wallet_stats(request: Request):
     }
 
 
+@app.get("/cron/db-size-estimate")
+async def db_size_estimate(request: Request):
+    # Read-only - answers "are we anywhere near Supabase Free's 500 MB cap
+    # again" with real row counts instead of waiting to find out the hard
+    # way (see _SALE_EVENTS_LOG_RETENTION_DAYS - this project has already
+    # hit that cap once, at 0.54/0.5 GB, which is what forced that
+    # retention window down from 180 to 90 days). PostgREST has no
+    # endpoint for actual on-disk bytes (that needs a raw SQL
+    # pg_database_size() call this backend has no connection for - it only
+    # ever talks to Supabase through the REST API), so this uses the one
+    # real, measured bytes/row figure already on record for the single
+    # dominant table (nft_sale_events_log, ~495 bytes/row including its
+    # three indexes - see that same retention comment) to turn a cheap
+    # row count into an honest size estimate, rather than inventing a
+    # ratio for tables nobody has ever actually measured.
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    tables = [
+        "nft_sale_events_log", "nft_snapshot_history", "nft_scope_call_buyers", "nft_scope_proved_slugs",
+        "smart_wallet_tags", "smart_wallet_submissions", "alert_tracker_calls", "members", "applications",
+        "aco_tickets", "discord_nft_watchlist", "nft_alert_state", "nft_watch_subscriptions",
+    ]
+    counts: dict[str, int | None] = {}
+    async with httpx.AsyncClient(timeout=30) as client:
+        for table in tables:
+            try:
+                res = await client.get(
+                    f"{settings.supabase_url}/rest/v1/{table}",
+                    headers=_supabase_headers(prefer="count=exact"),
+                    params={"select": "*", "limit": "1"},
+                )
+                res.raise_for_status()
+                range_total = res.headers.get("content-range", "").split("/")[-1]
+                counts[table] = int(range_total) if range_total.isdigit() else None
+            except httpx.HTTPError:
+                counts[table] = None
+    sale_events_rows = counts.get("nft_sale_events_log")
+    sale_events_bytes_per_row = 495  # measured live, see _SALE_EVENTS_LOG_RETENTION_DAYS's comment
+    sale_events_mb_estimate = round(sale_events_rows * sale_events_bytes_per_row / (1024 * 1024), 1) if sale_events_rows is not None else None
+    return {
+        "row_counts": counts,
+        "nft_sale_events_log_estimate": {
+            "rows": sale_events_rows,
+            "bytes_per_row_measured": sale_events_bytes_per_row,
+            "estimated_mb": sale_events_mb_estimate,
+            "note": "This table is the dominant one by a wide margin (per the real 0.54/0.5GB incident already on record) - "
+                    "every other table here is known small by comparison, not independently measured in bytes/row.",
+        },
+        "free_tier_cap_mb": 500,
+    }
+
+
 @app.get("/cron/diagnose-slug-posting")
 async def diagnose_slug_posting(request: Request, slug: str):
     # Answers "why didn't this real, already-logged slug post" with real
