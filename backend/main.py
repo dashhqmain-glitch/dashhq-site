@@ -1605,6 +1605,46 @@ async def db_size_estimate(request: Request):
     }
 
 
+@app.get("/cron/debug-prune-sale-events")
+async def debug_prune_sale_events(request: Request):
+    # Direct, isolated call to the real prune function against real data -
+    # built to answer "is it actually working" in one request instead of
+    # waiting on the self-loop cron's opaque internal cadence and
+    # inferring from a row-count delta that could be swamped by normal
+    # new-row inflow (~4,700/day) in either direction.
+    expected = f"Bearer {settings.cron_secret}"
+    if not settings.cron_secret or request.headers.get("authorization") != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    async with httpx.AsyncClient(timeout=60) as client:
+        oldest_before = None
+        try:
+            res = await client.get(
+                f"{settings.supabase_url}/rest/v1/nft_sale_events_log",
+                headers=_supabase_headers(), params={"select": "event_at", "order": "event_at.asc", "limit": "1"},
+            )
+            res.raise_for_status()
+            rows = res.json()
+            oldest_before = rows[0]["event_at"] if rows else None
+        except httpx.HTTPError as e:
+            oldest_before = f"lookup failed: {e}"
+        result = await _prune_old_sale_events(client)
+        oldest_after = None
+        try:
+            res2 = await client.get(
+                f"{settings.supabase_url}/rest/v1/nft_sale_events_log",
+                headers=_supabase_headers(), params={"select": "event_at", "order": "event_at.asc", "limit": "1"},
+            )
+            res2.raise_for_status()
+            rows2 = res2.json()
+            oldest_after = rows2[0]["event_at"] if rows2 else None
+        except httpx.HTTPError as e:
+            oldest_after = f"lookup failed: {e}"
+    return {
+        "prune_result": result, "oldest_event_at_before": oldest_before, "oldest_event_at_after": oldest_after,
+        "retention_cutoff_days": _SALE_EVENTS_LOG_RETENTION_DAYS, "batch_days": _SALE_EVENTS_PRUNE_BATCH_DAYS,
+    }
+
+
 @app.get("/cron/diagnose-slug-posting")
 async def diagnose_slug_posting(request: Request, slug: str):
     # Answers "why didn't this real, already-logged slug post" with real
