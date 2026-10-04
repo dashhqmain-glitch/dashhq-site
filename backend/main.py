@@ -12470,13 +12470,44 @@ def _prune_result(res, table: str) -> bool:
     return True
 
 
+_SALE_EVENTS_PRUNE_BATCH_DAYS = 3  # keeps each individual DELETE small/fast regardless of backlog size - see the comment below
+
+
 async def _prune_old_sale_events(client: httpx.AsyncClient) -> bool:
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=_SALE_EVENTS_LOG_RETENTION_DAYS)).isoformat()
+    # Confirmed live: a single unbounded "delete everything older than the
+    # cutoff" DELETE is exactly how this table grew to 900k+ rows despite
+    # this function running every cycle and reporting success - against a
+    # real backlog, Supabase's own Postgres cancels the statement outright
+    # (HTTP 500, code 57014 "canceling statement due to statement
+    # timeout"), caught here as a plain httpx.HTTPError and logged, so it
+    # failed the exact same silent way every single cycle. A longer
+    # client-side timeout can't fix a server-side one.
+    #
+    # Deletes in bounded date windows instead, oldest-first, so each
+    # individual DELETE stays small and fast no matter how large the
+    # backlog is: a healthy, caught-up table does one cheap "anything
+    # left?" check and exits; a large backlog catches up gradually,
+    # _SALE_EVENTS_PRUNE_BATCH_DAYS worth per cycle, instead of either
+    # succeeding instantly or never completing at all.
+    cutoff_dt = datetime.now(timezone.utc) - timedelta(days=_SALE_EVENTS_LOG_RETENTION_DAYS)
     try:
+        oldest_res = await client.get(
+            f"{settings.supabase_url}/rest/v1/nft_sale_events_log",
+            headers=_supabase_headers(), params={"select": "event_at", "order": "event_at.asc", "limit": "1"},
+        )
+        oldest_res.raise_for_status()
+        oldest_rows = oldest_res.json()
+        if not oldest_rows:
+            return True  # table is empty - nothing to prune
+        oldest_at = _parse_event_at(oldest_rows[0]["event_at"])
+        if oldest_at >= cutoff_dt.timestamp():
+            return True  # already caught up - nothing older than retention remains
+        oldest_dt = datetime.fromtimestamp(oldest_at, tz=timezone.utc)
+        window_end = min(oldest_dt + timedelta(days=_SALE_EVENTS_PRUNE_BATCH_DAYS), cutoff_dt)
         res = await client.delete(
             f"{settings.supabase_url}/rest/v1/nft_sale_events_log",
             headers=_supabase_headers(prefer="return=minimal"),
-            params={"event_at": f"lt.{cutoff}"},
+            params={"event_at": [f"gte.{oldest_dt.isoformat()}", f"lt.{window_end.isoformat()}"]},
         )
         return _prune_result(res, "nft_sale_events_log")
     except httpx.HTTPError:

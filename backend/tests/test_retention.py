@@ -18,6 +18,21 @@ class FakeRes:
         self.text = text
 
 
+class FakeGetRes:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def raise_for_status(self):
+        pass
+
+    def json(self):
+        return self.rows
+
+
+def _iso_days_ago(n):
+    return (main.datetime.now(main.timezone.utc) - main.timedelta(days=n)).isoformat()
+
+
 def _days_ago(cutoff_param):
     assert cutoff_param.startswith("lt.")
     cutoff = main.datetime.fromisoformat(cutoff_param[len("lt."):])
@@ -25,13 +40,24 @@ def _days_ago(cutoff_param):
 
 
 class RecordingClient:
-    def __init__(self, res=None):
+    # get_res defaults to "there's a real old row, 100 days old" so every
+    # existing test exercising _prune_old_sale_events's DELETE-response
+    # handling (rejected/successful/no-body) proceeds straight past the
+    # new oldest-row lookup without having to know it exists, unless a
+    # test specifically wants to exercise that lookup itself.
+    def __init__(self, res=None, get_res=None):
         self.res = res or FakeRes()
+        self.get_res = get_res if get_res is not None else FakeGetRes([{"event_at": _iso_days_ago(100)}])
         self.calls = []
+        self.get_calls = []
 
     async def delete(self, url, headers=None, params=None):
         self.calls.append((url, params))
         return self.res
+
+    async def get(self, url, headers=None, params=None):
+        self.get_calls.append((url, params))
+        return self.get_res
 
 
 def test_retention_windows_are_what_the_size_budget_assumes():
@@ -40,12 +66,52 @@ def test_retention_windows_are_what_the_size_budget_assumes():
     assert main._SNAPSHOT_RETENTION_DAYS == 30
 
 
-async def test_sale_events_are_pruned_at_ninety_days():
-    client = RecordingClient()
+async def test_sale_events_prune_deletes_a_bounded_window_from_the_oldest_row():
+    # Confirmed live: a single unbounded "everything older than 90 days"
+    # DELETE is exactly what let this table grow to 900k+ rows - Supabase's
+    # own Postgres canceled that statement outright against a real
+    # backlog. Each call now only ever deletes one _SALE_EVENTS_PRUNE_
+    # BATCH_DAYS-wide window starting from the real oldest row, not the
+    # whole backlog at once.
+    oldest_iso = _iso_days_ago(100)
+    client = RecordingClient(get_res=FakeGetRes([{"event_at": oldest_iso}]))
     assert await main._prune_old_sale_events(client) is True
     url, params = client.calls[0]
     assert url.endswith("/nft_sale_events_log")
-    assert abs(_days_ago(params["event_at"]) - 90) < 0.01
+    gte_param, lt_param = params["event_at"]
+    assert gte_param == f"gte.{oldest_iso}"
+    # Window is bounded to _SALE_EVENTS_PRUNE_BATCH_DAYS (3), not the full
+    # distance to the 90-day cutoff (10 days away here) - a 97-day-old
+    # upper bound, not a 90-day-old one.
+    lt_days_ago = (main.datetime.now(main.timezone.utc) - main.datetime.fromisoformat(lt_param[len("lt."):])).total_seconds() / 86400
+    assert abs(lt_days_ago - (100 - main._SALE_EVENTS_PRUNE_BATCH_DAYS)) < 0.01
+
+
+async def test_sale_events_prune_window_clamps_to_the_retention_cutoff():
+    # The oldest row is only 1 day past the 90-day cutoff - less than a
+    # full batch window remains. The delete's upper bound must clamp to
+    # the cutoff itself (90 days ago), not overshoot into data that's
+    # still within the retention window.
+    client = RecordingClient(get_res=FakeGetRes([{"event_at": _iso_days_ago(91)}]))
+    assert await main._prune_old_sale_events(client) is True
+    _, params = client.calls[0]
+    _, lt_param = params["event_at"]
+    lt_days_ago = (main.datetime.now(main.timezone.utc) - main.datetime.fromisoformat(lt_param[len("lt."):])).total_seconds() / 86400
+    assert abs(lt_days_ago - 90) < 0.01
+
+
+async def test_sale_events_prune_is_a_noop_once_caught_up():
+    # The oldest row is well within the retention window - nothing to
+    # delete, and no DELETE should even be attempted.
+    client = RecordingClient(get_res=FakeGetRes([{"event_at": _iso_days_ago(10)}]))
+    assert await main._prune_old_sale_events(client) is True
+    assert client.calls == []
+
+
+async def test_sale_events_prune_is_a_noop_on_an_empty_table():
+    client = RecordingClient(get_res=FakeGetRes([]))
+    assert await main._prune_old_sale_events(client) is True
+    assert client.calls == []
 
 
 async def test_call_buyers_keep_their_own_longer_window():

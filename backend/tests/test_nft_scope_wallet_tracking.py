@@ -316,10 +316,24 @@ async def test_wallet_holdings_empty_without_a_key():
 # one thing in this whole tracker that grows forever, same failure mode
 # nft_snapshot_history already had before it got its own pruning job.
 
+def _old_event_at_row(days_ago=100):
+    iso = (main.datetime.now(main.timezone.utc) - main.timedelta(days=days_ago)).isoformat()
+    return [{"event_at": iso}]
+
+
 async def test_prune_old_sale_events_deletes_with_the_right_cutoff_column():
+    # Batched, not a single unbounded delete (confirmed live: that's
+    # exactly how this table grew to 900k+ rows before Supabase's own
+    # Postgres started outright canceling the statement) - see
+    # test_retention.py for the full window-bounding behavior. This just
+    # confirms the real shape: a get() to find the oldest row, then a
+    # delete() with a gte/lt-bounded event_at filter.
     calls = []
 
     class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, json_data=_old_event_at_row())
+
         async def delete(self, url, headers=None, params=None):
             calls.append((url, params))
             return FakeRes(200)
@@ -330,11 +344,15 @@ async def test_prune_old_sale_events_deletes_with_the_right_cutoff_column():
     url, params = calls[0]
     assert url.endswith("/nft_sale_events_log")
     assert "event_at" in params
-    assert params["event_at"].startswith("lt.")
+    gte_param, lt_param = params["event_at"]
+    assert gte_param.startswith("gte.") and lt_param.startswith("lt.")
 
 
 async def test_prune_old_sale_events_fails_safe_on_error():
     class FakeClient:
+        async def get(self, url, headers=None, params=None):
+            return FakeRes(200, json_data=_old_event_at_row())
+
         async def delete(self, url, headers=None, params=None):
             raise main.httpx.HTTPError("boom")
 
