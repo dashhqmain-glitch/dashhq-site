@@ -1,0 +1,12 @@
+name: _tmp-db-size2
+on:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Query real Supabase size estimate (retry with errors surfaced)
+        run: |
+          curl -sS --max-time 120 -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "https://www.dashhq.site/cron/db-size-estimate" | python3 -m json.tool
