@@ -1555,19 +1555,26 @@ async def db_size_estimate(request: Request):
     ]
     counts: dict[str, int | None] = {}
     errors: dict[str, str] = {}
-    # count=exact runs a real COUNT(*) - fine for a small table, but on the
-    # one table actually at risk here (nft_sale_events_log, the whole
-    # reason this endpoint exists) that can be slow enough to need its own
-    # longer timeout and a fallback that still gives a usable number
-    # instead of silently coming back empty.
+    # count=exact runs a real COUNT(*) - fine for a small table, but
+    # confirmed live against the one table actually at risk here
+    # (nft_sale_events_log, the whole reason this endpoint exists): it
+    # doesn't just run slow, Supabase's own Postgres cancels it outright
+    # (HTTP 500, code 57014 "canceling statement due to statement
+    # timeout") well before even a 90s client-side timeout gets a chance
+    # to matter - a longer client timeout can't fix a server-side one.
+    # count=estimated instead reads Postgres's own planner statistics
+    # (reltuples) rather than scanning the table - fast regardless of
+    # table size, at the cost of being an estimate rather than exact,
+    # which is a fine trade for "are we anywhere near the cap," not
+    # "bill someone to the row."
     async with httpx.AsyncClient(timeout=30) as client:
         for table in tables:
-            timeout = 90 if table == "nft_sale_events_log" else 30
+            count_pref = "count=estimated" if table == "nft_sale_events_log" else "count=exact"
             try:
                 res = await client.get(
                     f"{settings.supabase_url}/rest/v1/{table}",
-                    headers=_supabase_headers(prefer="count=exact"),
-                    params={"select": "*", "limit": "1"}, timeout=timeout,
+                    headers=_supabase_headers(prefer=count_pref),
+                    params={"select": "*", "limit": "1"},
                 )
                 res.raise_for_status()
                 range_total = res.headers.get("content-range", "").split("/")[-1]
